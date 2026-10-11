@@ -18,3 +18,13 @@ rtrb = "0.4"
 crossbeam-channel = "0.5"
 thiserror = "2"
 log = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }
+lofty = "0.25"
+notify = "8"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+toml_edit = "0.25"
+dirs = "7"
+
+[dev-dependencies]
+tempfile = "3"

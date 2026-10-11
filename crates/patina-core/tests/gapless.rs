@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use patina_core::audio::decoder::Source;
 use patina_core::audio::output::null::NullOutput;
-use patina_core::player::OutputFactory;
+use patina_core::player::{Hooks, OutputFactory};
 use patina_core::{Command, Event, Player, PlayerConfig};
 
 const RATE: u32 = 44100;
@@ -83,7 +83,13 @@ fn play_captured(parts: Vec<PathBuf>) -> Vec<f64> {
         fade_ms: 0,
         ..Default::default()
     };
-    let player = Player::spawn_with(cfg, Some(factory));
+    let player = Player::spawn_with(
+        cfg,
+        Hooks {
+            output: Some(factory),
+            ..Default::default()
+        },
+    );
     player.send(Command::SetQueue {
         paths: parts,
         start: 0,

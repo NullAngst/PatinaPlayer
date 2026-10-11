@@ -2,6 +2,8 @@
 //! and GUI are thin frontends that send commands and draw snapshots.
 
 pub mod audio;
+pub mod config;
+pub mod library;
 pub mod player;
 pub mod queue;
 pub mod track;

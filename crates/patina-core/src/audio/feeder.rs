@@ -18,14 +18,14 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::decoder::Source;
 use super::{SharedRef, StreamFormat};
-use crate::queue::Queue;
+use crate::queue::{EntryId, Queue};
 use crate::track::TrackInfo;
 
 #[derive(Debug)]
 pub enum FeedCmd {
     /// Start playing queue entry `entry` at `pos`.
     Start {
-        entry: usize,
+        entry: EntryId,
         pos: Duration,
     },
     /// Seek within the current track.
@@ -38,7 +38,7 @@ pub enum FeedCmd {
 /// Where a track starts in the stream of frames the renderer consumes.
 #[derive(Debug, Clone)]
 pub struct Segment {
-    pub entry: usize,
+    pub entry: EntryId,
     /// Value of `consumed_frames` at which this track's first frame plays.
     pub start_frame: u64,
     /// Track position of that first frame (non-zero after a seek).
@@ -57,7 +57,7 @@ pub enum FeedMsg {
     /// The ring was emptied for a Start, Seek or Stop.
     Flushed,
     TrackError {
-        entry: usize,
+        entry: EntryId,
         error: String,
     },
     /// Every queued track has been decoded.
@@ -82,7 +82,7 @@ struct Feeder {
     cmds: Receiver<FeedCmd>,
     msgs: Sender<FeedMsg>,
     source: Option<Source>,
-    entry: usize,
+    entry: EntryId,
     ring: Option<Producer<f64>>,
     format: Option<StreamFormat>,
     /// Frames pushed into the ring, in `consumed_frames` coordinates.
@@ -207,7 +207,7 @@ impl Feeder {
     }
 
     /// Open `entry` at `pos`, skipping forward past files that won't open.
-    fn open_from(&mut self, mut entry: usize, pos: Duration) {
+    fn open_from(&mut self, mut entry: EntryId, pos: Duration) {
         let mut pos = pos;
         for _ in 0..MAX_CONSECUTIVE_ERRORS {
             if self.open(entry, pos) {
@@ -223,7 +223,7 @@ impl Feeder {
     }
 
     /// Open one entry. Sends the Segment (and a new ring if needed).
-    fn open(&mut self, entry: usize, pos: Duration) -> bool {
+    fn open(&mut self, entry: EntryId, pos: Duration) -> bool {
         let Some(path) = self.queue.lock().unwrap().path(entry) else {
             return false;
         };
@@ -246,7 +246,7 @@ impl Feeder {
         self.queue
             .lock()
             .unwrap()
-            .set_info_at(entry, src.info().clone());
+            .set_info(entry, src.info().clone());
 
         let fmt = src.format();
         if self.format != Some(fmt) {

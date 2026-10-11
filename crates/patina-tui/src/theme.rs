@@ -11,8 +11,6 @@ pub struct Theme {
     pub text: Color,
     pub muted: Color,
     pub verdigris: Color,
-    /// Buffered part of the seek bar, once streaming lands.
-    #[allow(dead_code)]
     pub verdigris_dim: Color,
     pub copper: Color,
     pub copper_dim: Color,

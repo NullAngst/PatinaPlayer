@@ -34,7 +34,7 @@ impl std::str::FromStr for Backend {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OutputConfig {
     pub backend: Backend,
     /// ALSA device name ("default", "hw:1,0") or PipeWire target node name.

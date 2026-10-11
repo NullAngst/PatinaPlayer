@@ -2,20 +2,37 @@
 
 PatinaPlayer is a Linux music player for Subsonic servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 1 of the design doc: the core audio engine and a terminal player that plays local files. Subsonic, the library views, EQ, leveling, bit-perfect, the amp stack and the GUI all come in later milestones. What's here is the part everything else sits on, so it's built to the final shape, not as a throwaway.
+This is milestone 2 of the build plan: the audio engine from milestone 1, plus the library index and every library view in the terminal player. Radio and podcasts come next, then the GUI, then bit-perfect, Subsonic and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
-- Plays local files and folders passed on the command line. Folders are scanned recursively and sorted the way you'd expect (2 before 10).
-- Anything FFmpeg decodes: FLAC, ALAC, WAV, AIFF, APE, WavPack, MP3, AAC, Opus, Vorbis and the rest.
-- Gapless playback. Tracks are decoded back to back into one ring buffer, and FFmpeg trims MP3 and AAC encoder delay and padding, so live albums join without a click. A test proves the FLAC joins are sample-exact.
-- Short fades on pause, resume, seek, next and stop (100 ms, adjustable, or off). No pops.
-- PipeWire output, falling back to ALSA if no PipeWire daemon answers.
-- Shuffle (the current track stays put), repeat off, all and one, and back restarts the track if you're more than 3 seconds in.
-- Volume with a cubic curve, mute, and the format badge (FLAC 44.1/16, Opus 192) in the bottom bar.
-- Mouse: click rows, double-click to play, click or drag the seek and volume bars, scroll the list.
+**Library**
+- Indexes your local folders into one SQLite database, so browsing is instant and works offline.
+- Reads tags with lofty (ID3v2, Vorbis comments, MP4, APE), with FFmpeg as the fallback for anything lofty can't read. ReplayGain values are stored now so leveling can use them later.
+- Only reads tags for new or changed files on startup, by size and modification time. A 3000-file test folder takes about a quarter second to index from scratch and about 10 ms to recheck.
+- Watches the folders with inotify while it runs. Copy an album in and it shows up a couple of seconds later. Delete one and it's gone.
+- If a folder root goes missing (an unmounted drive, say), its tracks are kept until it comes back instead of being wiped.
 
-One honest limitation: when the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 10.
+**Views**
+- Folders: the real folder tree of every library root.
+- Artists: by album artist (the default) or track artist, toggled with `t`.
+- Albums: sorted by name, artist, year, recently added, most played or random.
+- Songs: one flat list, sortable on seven columns, either direction.
+- Genres: every genre with album and track counts, then its albums or its songs. "Blues Rock", "blues-rock" and "Blues_Rock" count as one genre.
+- Playlists: create, rename, delete, add to from anywhere, reorder and remove items.
+- Queue: what's playing and next, with reorder, remove, clear and save as playlist.
+- Downloads: an empty placeholder until caching lands in milestone 7.
+- Settings: shows what the config file currently says.
+- Search: type-ahead over the index, artists, albums and songs at once. Every word has to match somewhere, so `nirv blea` finds Bleach.
+- A queue panel (`q`) that shows what's coming up beside any view.
+
+**Playback** (from milestone 1)
+- Anything FFmpeg decodes: FLAC, ALAC, WAV, AIFF, APE, WavPack, MP3, AAC, Opus, Vorbis and the rest.
+- Gapless playback. A test proves FLAC joins are sample-exact, and another proves MP3 padding is trimmed.
+- Short fades on pause, resume, seek, next and stop. PipeWire output with ALSA fallback.
+- Play counts. A track counts once you've actually listened to half of it or four minutes, whichever comes first. Seeking past the middle doesn't count.
+
+A note on how albums are grouped. Tracks with an album artist tag group by album artist plus album name, wherever the files sit. Tracks without one group by album name plus folder, which keeps two unrelated "Greatest Hits" apart and keeps a compilation together even when every track has a different artist. Disc folders (`CD1`, `Disc 2`) are folded into their parent, so multi-disc albums come out as one.
 
 ## Prerequisites
 
@@ -24,13 +41,15 @@ One honest limitation: when the next track has a different sample rate (44.1 kHz
 - PipeWire and ALSA dev headers
 - clang and pkg-config, since the FFmpeg and PipeWire bindings are generated at build time
 
+SQLite is built into the binary, so there's nothing to install for it.
+
 On Kubuntu (or any Ubuntu 24.04 based system):
 
 ```
 sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libavfilter-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
 ```
 
-On another distro, the package names are different but the list is the same: FFmpeg, PipeWire, libspa, ALSA, clang. Fedora calls them `ffmpeg-free-devel` (or `ffmpeg-devel` from RPM Fusion), `pipewire-devel` and `alsa-lib-devel`, for example. You'll have to check yours.
+On another distro the package names differ but the list is the same: FFmpeg, PipeWire, libspa, ALSA, clang. Fedora calls them `ffmpeg-free-devel` (or `ffmpeg-devel` from RPM Fusion), `pipewire-devel` and `alsa-lib-devel`, for example. You'll have to check yours.
 
 The tests also need the `ffmpeg` command itself, since they generate their own audio files.
 
@@ -38,94 +57,113 @@ The tests also need the `ffmpeg` command itself, since they generate their own a
 
 1. Extract the archive and go into it: `cd patinaplayer`
 2. Build it: `cargo build --release`
-3. The binary is at `target/release/patinaplayer-tui`. Copy it somewhere on your PATH if you want it there, like `cp target/release/patinaplayer-tui ~/.local/bin/`, since that's where user binaries usually live.
+3. Copy the binary somewhere on your PATH, like `cp target/release/patinaplayer-tui ~/.local/bin/`, since that's where user binaries usually live.
 4. Optionally run the tests: `cargo test`
 
-## Usage
+## First run
 
+1. Run it once: `patinaplayer-tui`. That writes `~/.config/patinaplayer/config.toml`. If your system has a Music folder (`xdg-user-dir MUSIC`), it's already in the list.
+2. Add any other folders: `patinaplayer-tui --add-folder /mnt/storage/music`. This edits the config and exits. Your comments in the file are kept.
+3. Run it again. The first scan shows progress next to the folder in the sidebar, and the views fill in as it goes.
+
+To take a folder back out: `patinaplayer-tui --remove-folder /mnt/storage/music`. Its tracks leave the index on the next start.
+
+You can still play files directly without touching the library: `patinaplayer-tui song.flac ~/Downloads/SomeAlbum`. They go straight into the queue.
+
+## Config
+
+Everything lives in `~/.config/patinaplayer/config.toml`:
+
+```toml
+[library]
+folders = ["~/Music", "/mnt/storage/music"]
+watch = true             # pick up changes while running
+
+[output]
+backend = "auto"         # auto, pipewire, alsa or null
+device = ""              # ALSA device or PipeWire node; empty is the default
+buffer_ms = 200          # 50 to 1000
+
+[playback]
+volume = 80              # starting volume, 0 to 100
+fade_ms = 100            # 0 turns fades off
 ```
-patinaplayer-tui ~/Music/Nirvana/Bleach
-patinaplayer-tui song.flac other-song.opus ~/Music/SomeAlbum
-patinaplayer-tui --shuffle ~/Music
-```
 
-Options:
+A typo in a key name is an error, not a silent default, so you find out right away. Command line flags (`--backend`, `--device`, `--buffer-ms`, `--volume`, `--fade-ms`) override the file for one run.
 
-| Option | What it does |
+Where everything else goes:
+
+| What | Where |
 |---|---|
-| `--backend auto\|pipewire\|alsa\|null` | Output. `auto` (the default) tries PipeWire, then ALSA. `null` plays to nothing, for testing on a box with no sound. |
-| `--device NAME` | ALSA device (`default`, `hw:1,0`) or PipeWire node name. Leave it off for the system default. |
-| `--buffer-ms N` | Output buffer, 50 to 1000. Default 200. |
-| `--volume N` | Starting volume, 0 to 100. Default 80. |
-| `--fade-ms N` | Fade length for pause, seek and so on. 0 turns fades off. Default 100. |
-| `--shuffle` | Start shuffled. |
-| `--log FILE` | Write a log. Logs never go to the terminal while the TUI is drawing, so this is the only way to see them. |
+| Settings | `~/.config/patinaplayer/config.toml` |
+| Library index, playlists, play counts | `~/.local/share/patinaplayer/library.db` |
+
+The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists to that.
 
 ## Keys
 
 | Key | Action |
 |---|---|
 | Space | Play / pause |
-| n / b | Next / back |
-| Left / Right | Seek 5 s |
-| Shift+Left / Shift+Right | Seek 30 s |
-| + / - | Volume |
-| m | Mute |
-| s | Shuffle |
-| r | Cycle repeat (off, all, one) |
-| Up / Down, j / k | Move the selection |
-| PgUp / PgDn, g / G | Page up and down, top, bottom |
-| Enter | Play the selection |
-| . | Jump the selection back to the playing track |
+| n / b | Next / back (back restarts the track if you're more than 3 seconds in) |
+| Left / Right | Seek 5 s, Shift for 30 s |
+| + / -, m | Volume, mute |
+| s, r | Shuffle, cycle repeat |
+| 1 to 8 | Folders, Artists, Albums, Songs, Genres, Playlists, Queue, Downloads |
+| Tab | Switch between the sidebar and the list |
+| / | Search |
+| Enter | Open, or play from the selected track |
+| Esc / Backspace | Back up a level |
+| a / A | Add to the queue / play next |
+| p | Add to a playlist |
+| o / O | Sort Albums or Songs / reverse Songs |
+| t | Artists: album or track artist. Genres: albums or songs |
+| q | Queue panel |
+| . | Jump to the playing track in Queue |
+| F5 | Check the folders for changes |
 | ? | Help |
 | Ctrl+Q | Quit |
 
-The rest of the doc's key map (views, search, EQ, queue panel, love) gets bound when those features exist.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` save as a playlist, `C` clear. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
 
-## PipeWire and sample rates
+Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
-PatinaPlayer asks PipeWire to run at the track's sample rate. Whether it does depends on your PipeWire config. Out of the box, most distros only allow 48 kHz, so a 44.1 kHz track gets resampled by PipeWire. To let it switch, add this to `~/.config/pipewire/pipewire.conf.d/rates.conf` (or whichever rates your DAC supports):
-
-```
-context.properties = {
-    default.clock.allowed-rates = [ 44100 48000 88200 96000 176400 192000 ]
-}
-```
-
-Then restart PipeWire with `systemctl --user restart pipewire`. That's still not bit-perfect, and the player never calls it that. Bit-perfect is the ALSA hw path in milestone 2.
+The mouse works too: click to select, double-click to play or open, right-click to go back, and click or drag the seek and volume bars.
 
 ## How it's put together
 
 ```
 crates/
-  patina-core/        shared core, used by the TUI now and the GUI later
-    src/audio/
-      decoder.rs      FFmpeg to interleaved f64, sample-accurate seek
-      feeder.rs       decoder thread, gapless hand-off, ring management
-      render.rs       real-time callback: fades, volume, DSP slots
-      output/         PipeWire, ALSA and null backends
-    src/player.rs     core thread: commands in, snapshots and events out
-    src/queue.rs      queue, shuffle, repeat
-    src/track.rs      metadata, format badge, folder scanning
-    tests/gapless.rs  sample-exact join, MP3 padding, seek and rate change tests
-  patina-tui/         the terminal frontend (ratatui)
+  patina-core/          shared core, used by the TUI now and the GUI later
+    src/audio/          decoder, gapless feeder, real-time renderer, outputs
+    src/library/        SQLite index, tag reading, scanner, inotify service
+    src/config.rs       config file and XDG paths
+    src/player.rs       core thread: commands in, snapshots and events out
+    src/queue.rs        queue on stable entry ids, shuffle, repeat
+    examples/scan.rs    time an index of your own folders
+    tests/              gapless, seek, library, watcher and player tests
+  patina-tui/           the terminal frontend (ratatui)
 ```
 
-The core owns all the state. Frontends only send commands and draw snapshots, which is what will keep the TUI and GUI identical later.
+The core owns all the state. Frontends send commands and draw what the core and the index report, which is what keeps the TUI and GUI identical later.
 
-The audio thread never locks or allocates. Decoding happens on its own thread and feeds a lock-free ring, so a slow disk (or later, a slow server) stalls the ring, never the output. Seeks and track jumps fade the output down, flush the ring through an atomic handshake with the audio thread, then fade back in on the new audio.
+The library runs on its own thread with its own database connection. SQLite is in WAL mode, so the views keep reading while a scan writes. Paths are stored as raw bytes, since Linux file names don't have to be valid UTF-8.
 
-All processing runs in 64-bit float. 16 and 24-bit PCM converts to f64 and back without losing a bit, which a test checks, since bit-perfect depends on it later.
+The queue refers to entries by id, never by position. That's what lets you reorder or remove tracks while the decoder is already reading the next one, without anything getting confused.
+
+To see how fast indexing is on your own collection: `cargo run --release -p patina-core --example scan -- ~/Music`. It uses a throwaway database, so your real index isn't touched.
 
 ## Known gaps in this milestone
 
-- The TUI binary links FFmpeg, PipeWire and ALSA dynamically. The static TUI build in the doc is packaging work for milestone 14.
-- Tags come from FFmpeg's metadata. Proper tag reading with lofty (ReplayGain fields included) comes with the library index in milestone 3.
-- No config file yet. Everything is a command line flag.
-- 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 10. PipeWire output is f32, so this only matters on the ALSA fallback with a device that refuses float and 32-bit.
+- Cover art isn't drawn yet, in either frontend. The plan is to add it alongside the GUI in milestone 4, with kitty and sixel support in the TUI.
+- There's no settings screen. Edit the config file and restart.
+- When the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 12.
+- The TUI binary links FFmpeg, PipeWire and ALSA dynamically. The static TUI build is packaging work for milestone 14.
+- 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
+- inotify needs one watch per folder. A very large library can run past `fs.inotify.max_user_watches`. If it does, you'll see an error saying so, and raising the limit with `sysctl` fixes it.
 
 ## License
 
 GPL-3.0-or-later. See `LICENSE`.
 
-Now PatinaPlayer is building, playing your files gaplessly through PipeWire, and the engine is ready for the bit-perfect path in milestone 2.
+Now PatinaPlayer is indexing your folders, keeping up with changes as you make them, and every library view is browsable from the terminal.

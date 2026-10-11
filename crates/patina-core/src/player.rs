@@ -15,7 +15,7 @@ use crate::audio::feeder::{self, FeedCmd, FeedMsg, Segment};
 use crate::audio::output::{self, Output, OutputConfig};
 use crate::audio::render::Renderer;
 use crate::audio::{Shared, SharedRef, gain_to_db, volume_to_gain};
-use crate::queue::{Queue, Repeat};
+use crate::queue::{EntryId, Queue, Repeat};
 use crate::track::TrackInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,15 +28,33 @@ pub enum PlayState {
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Replace the queue and start playing entry `start`.
+    /// Replace the queue with files (tags read in the background) and
+    /// start playing the one at index `start`.
     SetQueue {
         paths: Vec<PathBuf>,
         start: usize,
     },
-    /// Add to the end of the queue.
+    /// Add files to the end of the queue.
     Append(Vec<PathBuf>),
-    /// Play queue entry `idx` from the start.
-    PlayEntry(usize),
+    /// Replace the queue with tracks whose tags are known (from the
+    /// library) and start at index `start`.
+    SetQueueTracks {
+        tracks: Vec<TrackInfo>,
+        start: usize,
+    },
+    AppendTracks(Vec<TrackInfo>),
+    /// Insert right after the current track.
+    PlayNext(Vec<TrackInfo>),
+    /// Play this queue entry from the start.
+    PlayEntry(EntryId),
+    /// Move an entry to a new position in play order.
+    MoveEntry {
+        id: EntryId,
+        to: usize,
+    },
+    /// Remove an entry. Removing the playing track moves on to the next.
+    RemoveEntry(EntryId),
+    ClearQueue,
     TogglePause,
     Play,
     Pause,
@@ -59,7 +77,7 @@ pub enum Command {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    TrackChanged(Option<usize>),
+    TrackChanged(Option<EntryId>),
     StateChanged(PlayState),
     QueueChanged,
     Error(String),
@@ -71,7 +89,7 @@ pub enum Event {
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub state: PlayState,
-    pub current: Option<usize>,
+    pub current: Option<EntryId>,
     pub track: Option<TrackInfo>,
     pub position: Duration,
     pub duration: Option<Duration>,
@@ -105,6 +123,18 @@ impl Default for PlayerConfig {
     }
 }
 
+/// Called when a track has been listened to for half its length or four
+/// minutes, whichever comes first. Counts real listening: time skipped by
+/// seeking forward doesn't count.
+pub type PlayedHook = Box<dyn Fn(&TrackInfo) + Send>;
+
+#[derive(Default)]
+pub struct Hooks {
+    pub played: Option<PlayedHook>,
+    /// Replaces the output backend, for tests that capture the audio.
+    pub output: Option<OutputFactory>,
+}
+
 /// Handle to the running core. Cheap to clone.
 #[derive(Clone)]
 pub struct Player {
@@ -116,18 +146,15 @@ pub struct Player {
 
 impl Player {
     pub fn spawn(cfg: PlayerConfig) -> Self {
-        Self::spawn_with(cfg, None)
+        Self::spawn_with(cfg, Hooks::default())
     }
 
-    /// Spawn with an output factory override, for tests that capture the
-    /// rendered audio instead of playing it.
-    #[doc(hidden)]
-    pub fn spawn_with(cfg: PlayerConfig, factory: Option<OutputFactory>) -> Self {
+    pub fn spawn_with(cfg: PlayerConfig, hooks: Hooks) -> Self {
         let (cmd_tx, cmd_rx) = unbounded();
         let (ev_tx, ev_rx) = unbounded();
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         let queue = Arc::new(Mutex::new(Queue::new()));
-        let core = Core::new(cfg, factory, cmd_rx, ev_tx, snapshot.clone(), queue.clone());
+        let core = Core::new(cfg, hooks, cmd_rx, ev_tx, snapshot.clone(), queue.clone());
         std::thread::Builder::new()
             .name("patina-core".into())
             .spawn(move || core.run())
@@ -164,6 +191,12 @@ pub type OutputFactory =
 struct Core {
     cfg: PlayerConfig,
     factory: Option<OutputFactory>,
+    played_hook: Option<PlayedHook>,
+    /// Listening time on the current track, and whether it was counted.
+    listened: Duration,
+    counted: bool,
+    last_pos: Option<Duration>,
+    seg_start: Option<u64>,
     cmds: Receiver<Command>,
     events: Sender<Event>,
     snapshot: Arc<Mutex<Snapshot>>,
@@ -174,7 +207,7 @@ struct Core {
     output: Option<Box<dyn Output>>,
     segments: VecDeque<Segment>,
     state: PlayState,
-    current: Option<usize>,
+    current: Option<EntryId>,
     volume: f64,
     muted: bool,
     /// Turn sound back on once the decoder announces the new segment.
@@ -186,7 +219,7 @@ struct Core {
 impl Core {
     fn new(
         cfg: PlayerConfig,
-        factory: Option<OutputFactory>,
+        hooks: Hooks,
         cmds: Receiver<Command>,
         events: Sender<Event>,
         snapshot: Arc<Mutex<Snapshot>>,
@@ -202,7 +235,12 @@ impl Core {
         let volume = cfg.volume;
         Self {
             cfg,
-            factory,
+            factory: hooks.output,
+            played_hook: hooks.played,
+            listened: Duration::ZERO,
+            counted: false,
+            last_pos: None,
+            seg_start: None,
             cmds,
             events,
             snapshot,
@@ -292,7 +330,7 @@ impl Core {
         seg.start_pos + Duration::from_secs_f64(frames as f64 / seg.rate.max(1) as f64)
     }
 
-    fn start_entry(&mut self, entry: usize, pos: Duration) {
+    fn start_entry(&mut self, entry: EntryId, pos: Duration) {
         self.fade_out_and_wait();
         self.segments.clear();
         self.resume_on_segment = true;
@@ -335,20 +373,71 @@ impl Core {
                     q.clear();
                     q.append(paths)
                 };
-                let _ = self.probe_tx.send(added);
+                let _ = self.probe_tx.send(added.clone());
                 self.emit(Event::QueueChanged);
-                if start < self.queue.lock().unwrap().len() {
-                    self.start_entry(start, Duration::ZERO);
+                if let Some(&(id, _)) = added.get(start) {
+                    self.start_entry(id, Duration::ZERO);
                 }
+            }
+            Command::SetQueueTracks { tracks, start } => {
+                self.stop();
+                let ids = {
+                    let mut q = self.queue.lock().unwrap();
+                    q.clear();
+                    q.append_tracks(tracks)
+                };
+                self.emit(Event::QueueChanged);
+                if let Some(&id) = ids.get(start) {
+                    self.start_entry(id, Duration::ZERO);
+                }
+            }
+            Command::AppendTracks(tracks) => {
+                self.queue.lock().unwrap().append_tracks(tracks);
+                self.emit(Event::QueueChanged);
+            }
+            Command::PlayNext(tracks) => {
+                self.queue.lock().unwrap().insert_next(tracks);
+                self.emit(Event::QueueChanged);
+            }
+            Command::MoveEntry { id, to } => {
+                if self.queue.lock().unwrap().move_to(id, to) {
+                    self.emit(Event::QueueChanged);
+                }
+            }
+            Command::RemoveEntry(id) => {
+                let next = {
+                    let q = self.queue.lock().unwrap();
+                    (self.current == Some(id)).then(|| q.step(id, 1)).flatten()
+                };
+                let was_current = self.current == Some(id);
+                if !self.queue.lock().unwrap().remove(id) {
+                    return;
+                }
+                if was_current && self.state != PlayState::Stopped {
+                    match next {
+                        Some(n) => self.start_entry(n, Duration::ZERO),
+                        None => self.stop(),
+                    }
+                }
+                if was_current {
+                    self.current = None;
+                }
+                self.emit(Event::QueueChanged);
+            }
+            Command::ClearQueue => {
+                self.stop();
+                self.queue.lock().unwrap().clear();
+                self.current = None;
+                self.emit(Event::QueueChanged);
             }
             Command::Append(paths) => {
                 let added = self.queue.lock().unwrap().append(paths);
                 let _ = self.probe_tx.send(added);
                 self.emit(Event::QueueChanged);
             }
-            Command::PlayEntry(idx) => {
-                if idx < self.queue.lock().unwrap().len() {
-                    self.start_entry(idx, Duration::ZERO);
+            Command::PlayEntry(id) => {
+                if self.queue.lock().unwrap().contains(id) {
+                    self.start_entry(id, Duration::ZERO);
                 }
             }
             Command::TogglePause => match self.state {
@@ -363,7 +452,9 @@ impl Core {
                 PlayState::Stopped => {
                     let first = {
                         let q = self.queue.lock().unwrap();
-                        self.current.filter(|&c| c < q.len()).or_else(|| q.first())
+                        self.current
+                            .filter(|&c| q.contains(c))
+                            .or_else(|| q.first())
                     };
                     if let Some(e) = first {
                         self.start_entry(e, Duration::ZERO);
@@ -473,6 +564,38 @@ impl Core {
         self.emit(Event::Error(msg));
     }
 
+    fn reset_listening(&mut self) {
+        self.listened = Duration::ZERO;
+        self.counted = false;
+        self.last_pos = None;
+    }
+
+    /// Add up time actually heard. A jump of more than two seconds between
+    /// ticks is a seek, not listening.
+    fn count_listening(&mut self, pos: Duration, track: Option<&TrackInfo>) {
+        if let Some(last) = self.last_pos
+            && pos > last
+            && pos - last < Duration::from_secs(2)
+        {
+            self.listened += pos - last;
+        }
+        self.last_pos = Some(pos);
+        let Some(info) = track else { return };
+        if self.counted {
+            return;
+        }
+        let threshold = info
+            .duration
+            .map(|d| (d / 2).min(Duration::from_secs(240)))
+            .unwrap_or(Duration::from_secs(240));
+        if self.listened >= threshold && !threshold.is_zero() {
+            self.counted = true;
+            if let Some(h) = &self.played_hook {
+                h(info);
+            }
+        }
+    }
+
     /// Runs every tick: work out what's playing and refresh the snapshot.
     fn update(&mut self) {
         let consumed = self.shared.consumed_frames.load(Ordering::Relaxed);
@@ -486,7 +609,17 @@ impl Core {
             .front()
             .filter(|s| s.start_frame <= consumed || self.segments.len() == 1);
         let entry = playing_seg.map(|s| s.entry);
+        let seg_info = playing_seg.map(|s| (s.start_frame, s.start_pos.is_zero()));
+        // A segment that starts a track from zero is a fresh listen, which
+        // also covers Repeat One playing the same entry again.
+        if let Some((start, from_zero)) = seg_info {
+            if from_zero && Some(start) != self.seg_start {
+                self.reset_listening();
+            }
+            self.seg_start = Some(start);
+        }
         if entry.is_some() && entry != self.current {
+            self.reset_listening();
             self.current = entry;
             self.queue.lock().unwrap().set_current(entry);
             self.emit(Event::TrackChanged(entry));
@@ -511,6 +644,11 @@ impl Core {
             self.shared.underrun.swap(false, Ordering::Relaxed) && self.state == PlayState::Playing;
         let position = self.position();
         let track = self.segments.front().map(|s| s.info.clone());
+        if self.state == PlayState::Playing {
+            self.count_listening(position, track.as_ref());
+        } else {
+            self.last_pos = None;
+        }
         let (shuffle, repeat) = {
             let q = self.queue.lock().unwrap();
             (q.shuffle(), q.repeat)
