@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use patina_core::config::{self, Station};
 use patina_core::library::{ArtistMode, LibEvent, Library, LibraryService, PlaylistRow, TrackRow};
+use patina_core::podcast::{PodEvent, PodcastService};
 use patina_core::{Command, Event, Player, Snapshot, TrackInfo};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
@@ -28,15 +31,30 @@ pub enum Focus {
 #[derive(Debug, Clone)]
 pub enum InputPurpose {
     Search,
-    NewPlaylist { add: Vec<PathBuf> },
-    RenamePlaylist { id: i64 },
+    NewPlaylist {
+        add: Vec<PathBuf>,
+    },
+    RenamePlaylist {
+        id: i64,
+    },
     SaveQueue,
+    /// Station name, then its URL. `edit` is the station being changed.
+    StationName {
+        edit: Option<usize>,
+    },
+    StationUrl {
+        name: String,
+        edit: Option<usize>,
+    },
+    FeedUrl,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeletePlaylist(i64),
     ClearQueue,
+    DeleteStation(usize),
+    RemoveFeed(String),
 }
 
 pub enum Modal {
@@ -97,6 +115,28 @@ pub struct App {
     pub volume_area: Rect,
     last_click: Option<(Instant, u16, u16)>,
     quit: bool,
+    pub config_path: PathBuf,
+    pub stations: Vec<Station>,
+    pub feeds: Vec<String>,
+    pub pod: Option<PodcastService>,
+    /// Podcast speed and trimming as last set here. The snapshot lags a
+    /// tick behind, so repeated key presses build on these instead.
+    pub podcast_tempo: f64,
+    pub podcast_trim: bool,
+    /// Station test results by URL, and the channel the test threads use.
+    pub checks: HashMap<String, String>,
+    check_tx: Sender<(String, String)>,
+    check_rx: Receiver<(String, String)>,
+}
+
+/// What main hands the app besides the player and library.
+pub struct Extras {
+    pub config_path: PathBuf,
+    pub stations: Vec<Station>,
+    pub feeds: Vec<String>,
+    pub pod: Option<PodcastService>,
+    pub podcast_tempo: f64,
+    pub podcast_trim: bool,
 }
 
 const ERROR_TIME: Duration = Duration::from_secs(8);
@@ -108,7 +148,9 @@ impl App {
         lib: Option<Library>,
         service: Option<LibraryService>,
         settings: Settings,
+        extras: Extras,
     ) -> Self {
+        let (check_tx, check_rx) = unbounded();
         let mut app = Self {
             player,
             theme: Theme::detect(),
@@ -135,6 +177,15 @@ impl App {
             volume_area: Rect::default(),
             last_click: None,
             quit: false,
+            config_path: extras.config_path,
+            stations: extras.stations,
+            feeds: extras.feeds,
+            pod: extras.pod,
+            podcast_tempo: extras.podcast_tempo,
+            podcast_trim: extras.podcast_trim,
+            checks: HashMap::new(),
+            check_tx,
+            check_rx,
         };
         app.rebuild_sidebar();
         app
@@ -192,9 +243,45 @@ impl App {
                 }
             }
         }
+        let mut pods_changed = false;
+        if let Some(pod) = &self.pod {
+            let evs: Vec<PodEvent> = pod.events().try_iter().collect();
+            for ev in evs {
+                match ev {
+                    PodEvent::Updated => pods_changed = true,
+                    PodEvent::Downloaded(id) => {
+                        pods_changed = true;
+                        let title = self
+                            .lib
+                            .as_ref()
+                            .and_then(|l| l.episode(id).ok().flatten())
+                            .map(|e| e.title)
+                            .unwrap_or_default();
+                        self.note(format!("Downloaded \"{title}\""));
+                    }
+                    PodEvent::Error(e) => self.error(e),
+                    PodEvent::Download { .. } => {}
+                }
+            }
+        }
+        while let Ok((url, summary)) = self.check_rx.try_recv() {
+            self.checks.insert(url, summary.clone());
+            self.note(summary);
+            self.refresh_section(Section::Radio);
+        }
         if changed {
             self.refresh_all();
             self.rebuild_sidebar();
+        } else if pods_changed {
+            self.refresh_section(Section::Podcasts);
+        }
+    }
+
+    fn refresh_section(&mut self, s: Section) {
+        if let Some(n) = self.stacks.get(&s).map(|v| v.len()) {
+            for i in 0..n {
+                self.rebuild_level(s, i);
+            }
         }
     }
 
@@ -285,8 +372,18 @@ impl App {
         self.sync_sidebar_sel();
     }
 
+    fn ctx(&self) -> views::Ctx<'_> {
+        views::Ctx {
+            lib: self.lib.as_ref(),
+            prefs: &self.prefs,
+            settings: &self.settings,
+            stations: &self.stations,
+            checks: &self.checks,
+        }
+    }
+
     fn build(&mut self, src: &Source) -> Option<Level> {
-        match views::build(self.lib.as_ref(), src, &self.prefs, &self.settings) {
+        match views::build(&self.ctx(), src) {
             Ok((title, items)) => {
                 let mut l = Level {
                     title,
@@ -346,7 +443,7 @@ impl App {
         let src = level.source.clone();
         let key = level.selected_item().map(Item::key);
         let (old_sel, old_off) = (level.selected, level.offset);
-        let built = views::build(self.lib.as_ref(), &src, &self.prefs, &self.settings);
+        let built = views::build(&self.ctx(), &src);
         let Some(level) = self.stacks.get_mut(&section).and_then(|s| s.get_mut(idx)) else {
             return;
         };
@@ -449,6 +546,33 @@ impl App {
             self.push(src);
             return;
         }
+        match &item {
+            Item::Station { station, .. } => {
+                self.player.send(Command::SetQueueTracks {
+                    tracks: vec![views::station_info(station)],
+                    start: 0,
+                    pos: Duration::ZERO,
+                });
+                self.follow = true;
+                return;
+            }
+            Item::Episode(e) => {
+                // Fresh from the database, so the resume point is current.
+                let e = self
+                    .lib
+                    .as_ref()
+                    .and_then(|l| l.episode(e.id).ok().flatten())
+                    .unwrap_or_else(|| e.clone());
+                self.player.send(Command::SetQueueTracks {
+                    tracks: vec![e.to_info()],
+                    start: 0,
+                    pos: e.resume_at(),
+                });
+                self.follow = true;
+                return;
+            }
+            _ => {}
+        }
         if let Item::Track(t) = &item {
             // Play the whole list this track sits in, starting here, the
             // way picking a song in an album plays the album from there.
@@ -465,18 +589,21 @@ impl App {
             self.player.send(Command::SetQueueTracks {
                 tracks: Self::infos(&tracks),
                 start,
+                pos: Duration::ZERO,
             });
             self.follow = true;
         }
     }
 
     fn add_to_queue(&mut self, next: bool) {
-        let tracks = self.selection_tracks();
-        if tracks.is_empty() {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let infos = views::infos_of(self.lib.as_ref(), &item, &self.prefs);
+        if infos.is_empty() {
             return;
         }
-        let n = tracks.len();
-        let infos = Self::infos(&tracks);
+        let n = infos.len();
         if next {
             self.player.send(Command::PlayNext(infos));
             self.note(format!("Playing next: {}", count(n)));
@@ -623,8 +750,13 @@ impl App {
             KeyCode::Char('q') => self.queue_panel = !self.queue_panel,
             KeyCode::Char('?') => self.modal = Modal::Help,
             KeyCode::Char('/') if self.lib.is_some() => self.start_search(),
-            KeyCode::Char(c @ '1'..='8') => {
-                let s = Section::NUMBERED[(c as u8 - b'1') as usize];
+            KeyCode::Char(c @ '0'..='9') => {
+                let i = if c == '0' {
+                    9
+                } else {
+                    (c as u8 - b'1') as usize
+                };
+                let s = Section::NUMBERED[i];
                 self.switch(s);
                 self.focus = Focus::Content;
             }
@@ -637,8 +769,22 @@ impl App {
             KeyCode::F(5) => {
                 if let Some(svc) = &self.service {
                     svc.rescan();
-                    self.note("Checking library folders for changes");
                 }
+                if let Some(pod) = &self.pod {
+                    pod.refresh();
+                }
+                self.note("Checking folders and feeds for changes");
+            }
+            KeyCode::Char('[') => self.nudge_tempo(-0.1),
+            KeyCode::Char(']') => self.nudge_tempo(0.1),
+            KeyCode::Char('z') => {
+                let trim = !self.podcast_trim;
+                self.set_podcast_playback(self.podcast_tempo, trim);
+                self.note(if trim {
+                    "Silence trimming on (podcasts)"
+                } else {
+                    "Silence trimming off"
+                });
             }
             KeyCode::Char('.') => {
                 self.follow = true;
@@ -664,7 +810,168 @@ impl App {
         }
     }
 
+    fn nudge_tempo(&mut self, d: f64) {
+        let t = ((self.podcast_tempo + d) * 10.0).round() / 10.0;
+        let t = t.clamp(0.5, 3.0);
+        self.set_podcast_playback(t, self.podcast_trim);
+        self.note(format!("Podcast speed {t:.1}x"));
+    }
+
+    fn set_podcast_playback(&mut self, tempo: f64, trim: bool) {
+        self.player.send(Command::SetPodcastPlayback {
+            tempo,
+            trim_silence: trim,
+        });
+        self.podcast_tempo = tempo;
+        self.podcast_trim = trim;
+        if let Err(e) = config::set_podcast_playback(&self.config_path, tempo, trim) {
+            self.error(format!("couldn't save to the config: {e}"));
+        }
+    }
+
+    fn save_stations(&mut self) {
+        if let Err(e) = config::set_stations(&self.config_path, &self.stations) {
+            self.error(format!("couldn't save stations: {e}"));
+        }
+        self.refresh_section(Section::Radio);
+    }
+
+    fn test_station(&mut self, url: String) {
+        self.note(format!("Testing {url}"));
+        let tx = self.check_tx.clone();
+        std::thread::spawn(move || {
+            let summary = match patina_core::radio::check(&url) {
+                Ok(c) => c.summary(),
+                Err(e) => format!("Not working: {e}"),
+            };
+            let _ = tx.send((url, summary));
+        });
+    }
+
+    /// Keys for Radio and Podcasts. True if the key was theirs.
+    fn media_key(&mut self, k: KeyEvent) -> bool {
+        let src = self.level().map(|l| l.source.clone());
+        let item = self.selected_item();
+        match (src, k.code) {
+            (Some(Source::Section(Section::Radio)), code) => match code {
+                KeyCode::Char('N') => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::StationName { edit: None },
+                        buf: String::new(),
+                    }
+                }
+                KeyCode::Char('E') => {
+                    if let Some(Item::Station { index, station, .. }) = item {
+                        self.modal = Modal::Input {
+                            purpose: InputPurpose::StationName { edit: Some(index) },
+                            buf: station.name,
+                        }
+                    }
+                }
+                KeyCode::Char('D') => {
+                    if let Some(Item::Station { index, station, .. }) = item {
+                        self.modal = Modal::Confirm {
+                            msg: format!("Delete station \"{}\"?", station.name),
+                            action: ConfirmAction::DeleteStation(index),
+                        }
+                    }
+                }
+                KeyCode::Char('T') => {
+                    if let Some(Item::Station { station, .. }) = item {
+                        self.test_station(station.url);
+                    }
+                }
+                KeyCode::Char(c @ ('J' | 'K')) => {
+                    if let Some(Item::Station { index, .. }) = item {
+                        let to = if c == 'J' {
+                            index + 1
+                        } else {
+                            index.wrapping_sub(1)
+                        };
+                        if to < self.stations.len() {
+                            self.stations.swap(index, to);
+                            self.save_stations();
+                            if let Some(l) = self.level_mut() {
+                                l.selected = to;
+                            }
+                        }
+                    }
+                }
+                _ => return false,
+            },
+            (Some(Source::Section(Section::Podcasts)), code) => match code {
+                KeyCode::Char('N') => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::FeedUrl,
+                        buf: String::new(),
+                    }
+                }
+                KeyCode::Char('D') => {
+                    if let Some(Item::Podcast(p)) = item {
+                        self.modal = Modal::Confirm {
+                            msg: format!("Unsubscribe from \"{}\"?", p.title),
+                            action: ConfirmAction::RemoveFeed(p.feed_url),
+                        }
+                    }
+                }
+                _ => return false,
+            },
+            (Some(Source::Podcast { .. } | Source::Section(Section::Downloads)), code) => {
+                let Some(Item::Episode(e)) = item else {
+                    return false;
+                };
+                match code {
+                    KeyCode::Char('w') => {
+                        let Some(pod) = &self.pod else { return true };
+                        let busy = pod.status();
+                        if busy.downloading.is_some_and(|d| d.0 == e.id)
+                            || busy.queued.contains(&e.id)
+                        {
+                            pod.cancel_download(e.id);
+                            self.note("Download cancelled");
+                        } else if e.download.is_some() {
+                            self.note("Already downloaded. x deletes it.");
+                        } else {
+                            pod.download(e.id);
+                            self.note(format!("Downloading \"{}\"", e.title));
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        if let Some(lib) = &self.lib {
+                            match patina_core::podcast::delete_download(lib, e.id) {
+                                Ok(()) => self.note("Download deleted"),
+                                Err(err) => self.error(err.to_string()),
+                            }
+                        }
+                        self.refresh_current();
+                    }
+                    KeyCode::Char('P') => {
+                        if let Some(lib) = &self.lib
+                            && let Err(err) = lib.set_episode_played(e.id, !e.played)
+                        {
+                            self.error(err.to_string());
+                        }
+                        self.refresh_current();
+                        if self
+                            .stacks
+                            .get(&Section::Podcasts)
+                            .is_some_and(|s| !s.is_empty())
+                        {
+                            self.rebuild_level(Section::Podcasts, 0);
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn content_key(&mut self, k: KeyEvent) {
+        if self.media_key(k) {
+            return;
+        }
         let queue = self.section == Section::Queue;
         let playlist = self.in_playlist();
         let lists = self.section == Section::Playlists && playlist.is_none();
@@ -874,6 +1181,53 @@ impl App {
 
     fn submit_input(&mut self, purpose: InputPurpose, text: String) {
         match purpose {
+            InputPurpose::StationName { edit } => {
+                if text.is_empty() {
+                    return;
+                }
+                let url = edit
+                    .and_then(|i| self.stations.get(i))
+                    .map(|s| s.url.clone())
+                    .unwrap_or_default();
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::StationUrl { name: text, edit },
+                    buf: url,
+                };
+            }
+            InputPurpose::StationUrl { name, edit } => {
+                if text.is_empty() {
+                    return;
+                }
+                let st = Station {
+                    name,
+                    url: text.clone(),
+                };
+                match edit {
+                    Some(i) if i < self.stations.len() => self.stations[i] = st,
+                    _ => self.stations.push(st),
+                }
+                self.save_stations();
+                // Check it right away so you know whether it works.
+                self.test_station(text);
+            }
+            InputPurpose::FeedUrl => {
+                if text.is_empty() {
+                    return;
+                }
+                if self.feeds.contains(&text) {
+                    return self.note("Already subscribed");
+                }
+                match config::edit_podcast_feed(&self.config_path, &text, true) {
+                    Ok(_) => {
+                        self.feeds.push(text);
+                        if let Some(pod) = &self.pod {
+                            pod.set_feeds(self.feeds.clone());
+                        }
+                        self.note("Subscribed. Fetching the feed…");
+                    }
+                    Err(e) => self.error(format!("couldn't save the feed: {e}")),
+                }
+            }
             // Enter keeps the results on screen for browsing.
             InputPurpose::Search => {}
             InputPurpose::NewPlaylist { add } => {
@@ -974,6 +1328,24 @@ impl App {
 
     fn confirm(&mut self, action: ConfirmAction) {
         match action {
+            ConfirmAction::DeleteStation(i) => {
+                if i < self.stations.len() {
+                    self.stations.remove(i);
+                    self.save_stations();
+                }
+            }
+            ConfirmAction::RemoveFeed(url) => {
+                match config::edit_podcast_feed(&self.config_path, &url, false) {
+                    Ok(_) => {
+                        self.feeds.retain(|f| f != &url);
+                        if let Some(pod) = &self.pod {
+                            pod.set_feeds(self.feeds.clone());
+                        }
+                        self.note("Unsubscribed");
+                    }
+                    Err(e) => self.error(format!("couldn't save: {e}")),
+                }
+            }
             ConfirmAction::ClearQueue => self.player.send(Command::ClearQueue),
             ConfirmAction::DeletePlaylist(id) => {
                 if let Some(lib) = &self.lib

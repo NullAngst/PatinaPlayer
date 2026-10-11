@@ -13,6 +13,7 @@ use clap::Parser;
 use patina_core::config::{self, Config};
 use patina_core::library::{Library, LibraryService};
 use patina_core::player::Hooks;
+use patina_core::podcast::PodcastService;
 use patina_core::{Backend, Command, OutputConfig, Player, PlayerConfig, TrackInfo, track};
 
 #[derive(Parser, Debug)]
@@ -154,21 +155,54 @@ fn main() -> Result<()> {
         (Some(lib), Some(svc), Some(Mutex::new(hook)))
     };
 
-    let played = hook_lib.map(|l| {
+    let hook_lib = hook_lib.map(std::sync::Arc::new);
+    let played = hook_lib.clone().map(|l| {
         Box::new(move |t: &TrackInfo| {
-            if let Err(e) = l.lock().unwrap().record_play(&t.path) {
+            // Only library files have play counts.
+            if t.kind == patina_core::track::MediaKind::File
+                && let Err(e) = l.lock().unwrap().record_play(&t.path)
+            {
                 log::warn!("couldn't record play: {e}");
             }
         }) as patina_core::player::PlayedHook
     });
+    let progress = hook_lib.map(|l| {
+        Box::new(
+            move |t: &TrackInfo, pos: std::time::Duration, finished: bool| {
+                if let Some(id) = t.episode
+                    && let Err(e) = l.lock().unwrap().set_episode_progress(id, pos, finished)
+                {
+                    log::warn!("couldn't save episode position: {e}");
+                }
+            },
+        ) as patina_core::player::ProgressHook
+    });
+    let pod = if args.no_library {
+        None
+    } else {
+        match PodcastService::start(
+            &db_path,
+            config::offline_dir().join("podcasts"),
+            cfg.podcasts.feeds.clone(),
+        ) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                log::warn!("podcasts unavailable: {e}");
+                None
+            }
+        }
+    };
     let player = Player::spawn_with(
         PlayerConfig {
             output: output.clone(),
             volume: volume as f64 / 100.0,
             fade_ms,
+            podcast_tempo: cfg.podcasts.speed,
+            podcast_trim: cfg.podcasts.trim_silence,
         },
         Hooks {
             played,
+            progress,
             ..Default::default()
         },
     );
@@ -215,7 +249,15 @@ fn main() -> Result<()> {
         std::io::stdout(),
         ratatui::crossterm::event::EnableMouseCapture
     );
-    let mut app = app::App::new(player.clone(), lib, service, settings);
+    let extras = app::Extras {
+        config_path: config_path.clone(),
+        stations: cfg.stations.clone(),
+        feeds: cfg.podcasts.feeds.clone(),
+        pod,
+        podcast_tempo: cfg.podcasts.speed,
+        podcast_trim: cfg.podcasts.trim_silence,
+    };
+    let mut app = app::App::new(player.clone(), lib, service, settings, extras);
     app.switch(start);
     let result = app.run(&mut terminal);
     let _ = ratatui::crossterm::execute!(
@@ -281,6 +323,24 @@ fn settings_lines(
         } else {
             format!("{fade_ms} ms")
         },
+    ));
+    v.push(("Radio stations".into(), cfg.stations.len().to_string()));
+    v.push(("Podcast feeds".into(), cfg.podcasts.feeds.len().to_string()));
+    v.push((
+        "Podcast speed".into(),
+        format!(
+            "{:.1}x{}",
+            cfg.podcasts.speed,
+            if cfg.podcasts.trim_silence {
+                ", trimming silence"
+            } else {
+                ""
+            }
+        ),
+    ));
+    v.push((
+        "Downloaded episodes".into(),
+        config::offline_dir().join("podcasts").display().to_string(),
     ));
     v.push(("".into(), "".into()));
     v.push((

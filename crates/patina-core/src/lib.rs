@@ -5,7 +5,9 @@ pub mod audio;
 pub mod config;
 pub mod library;
 pub mod player;
+pub mod podcast;
 pub mod queue;
+pub mod radio;
 pub mod track;
 
 pub use audio::output::{Backend, OutputConfig};

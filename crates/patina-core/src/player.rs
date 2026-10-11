@@ -41,6 +41,8 @@ pub enum Command {
     SetQueueTracks {
         tracks: Vec<TrackInfo>,
         start: usize,
+        /// Where in that track to begin, for resuming a podcast episode.
+        pos: Duration,
     },
     AppendTracks(Vec<TrackInfo>),
     /// Insert right after the current track.
@@ -72,6 +74,12 @@ pub enum Command {
     CycleRepeat,
     /// Fade length for pause, resume, seek and stop. 0 turns fades off.
     SetFadeMs(u32),
+    /// Podcast speed (0.5 to 3, pitch kept) and silence trimming. Takes
+    /// effect at once on a playing episode.
+    SetPodcastPlayback {
+        tempo: f64,
+        trim_silence: bool,
+    },
     Quit,
 }
 
@@ -83,6 +91,8 @@ pub enum Event {
     Error(String),
     /// The last track in the queue finished.
     Finished,
+    /// A live stream's now-playing title changed.
+    NowPlaying(String),
 }
 
 /// What the frontends draw. Cloned out on every read; it's small.
@@ -104,6 +114,22 @@ pub struct Snapshot {
     /// Playing but the ring ran dry.
     pub buffering: bool,
     pub last_error: Option<String>,
+    /// Playing a live stream: no duration, no seeking.
+    pub live: bool,
+    /// Now-playing title from the stream (radio).
+    pub live_title: Option<String>,
+    /// Set while a dropped stream is waiting to reconnect.
+    pub reconnect: Option<Reconnect>,
+    /// Podcast playback speed and trimming, as currently set.
+    pub podcast_tempo: f64,
+    pub podcast_trim: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Reconnect {
+    pub attempt: u32,
+    pub at: Instant,
+    pub error: String,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +137,8 @@ pub struct PlayerConfig {
     pub output: OutputConfig,
     pub volume: f64,
     pub fade_ms: u32,
+    pub podcast_tempo: f64,
+    pub podcast_trim: bool,
 }
 
 impl Default for PlayerConfig {
@@ -119,6 +147,8 @@ impl Default for PlayerConfig {
             output: OutputConfig::default(),
             volume: 0.8,
             fade_ms: 100,
+            podcast_tempo: 1.0,
+            podcast_trim: false,
         }
     }
 }
@@ -128,9 +158,14 @@ impl Default for PlayerConfig {
 /// seeking forward doesn't count.
 pub type PlayedHook = Box<dyn Fn(&TrackInfo) + Send>;
 
+/// Called with a podcast episode's position while it plays (every few
+/// seconds, and when it stops or changes), and `finished` once it's done.
+pub type ProgressHook = Box<dyn Fn(&TrackInfo, Duration, bool) + Send>;
+
 #[derive(Default)]
 pub struct Hooks {
     pub played: Option<PlayedHook>,
+    pub progress: Option<ProgressHook>,
     /// Replaces the output backend, for tests that capture the audio.
     pub output: Option<OutputFactory>,
 }
@@ -192,6 +227,13 @@ struct Core {
     cfg: PlayerConfig,
     factory: Option<OutputFactory>,
     played_hook: Option<PlayedHook>,
+    progress_hook: Option<ProgressHook>,
+    /// The podcast episode being tracked for resume, its last position,
+    /// and when it was last reported.
+    progress: Option<(TrackInfo, Duration, Instant)>,
+    marks: VecDeque<(u64, Duration)>,
+    live_title: Option<String>,
+    reconnect: Option<Reconnect>,
     /// Listening time on the current track, and whether it was counted.
     listened: Duration,
     counted: bool,
@@ -228,6 +270,12 @@ impl Core {
         let shared: SharedRef = Arc::new(Shared::default());
         shared.fade_ms.store(cfg.fade_ms, Ordering::Relaxed);
         shared.volume.store(volume_to_gain(cfg.volume));
+        shared
+            .podcast_tempo
+            .store(cfg.podcast_tempo.clamp(0.5, 3.0));
+        shared
+            .podcast_trim
+            .store(cfg.podcast_trim, Ordering::Relaxed);
         let (feed_tx, feed_cmd_rx) = unbounded();
         let (feed_msg_tx, feed_rx) = unbounded();
         feeder::spawn(shared.clone(), queue.clone(), feed_cmd_rx, feed_msg_tx);
@@ -237,6 +285,11 @@ impl Core {
             cfg,
             factory: hooks.output,
             played_hook: hooks.played,
+            progress_hook: hooks.progress,
+            progress: None,
+            marks: VecDeque::new(),
+            live_title: None,
+            reconnect: None,
             listened: Duration::ZERO,
             counted: false,
             last_pos: None,
@@ -276,7 +329,8 @@ impl Core {
             self.update();
         }
         self.fade_out_and_wait();
-        let _ = self.feed_tx.send(FeedCmd::Quit);
+        self.flush_progress(false);
+        self.send_feed(FeedCmd::Quit);
         self.output = None;
     }
 
@@ -314,6 +368,13 @@ impl Core {
         }
     }
 
+    /// Tell the decoder something, cutting short any network read it's
+    /// stuck in so it hears about it now.
+    fn send_feed(&self, cmd: FeedCmd) {
+        self.shared.abort_io.store(true, Ordering::Relaxed);
+        let _ = self.feed_tx.send(cmd);
+    }
+
     fn position(&self) -> Duration {
         let Some(seg) = self.segments.back() else {
             return Duration::ZERO;
@@ -326,16 +387,54 @@ impl Core {
             .rev()
             .find(|s| s.start_frame <= consumed)
             .unwrap_or(seg);
+        let rate = seg.rate.max(1) as f64;
+        // Filtered playback: start from the newest mark already played.
+        if seg.marked
+            && let Some(&(at, pos)) = self
+                .marks
+                .iter()
+                .rev()
+                .find(|(at, _)| *at <= consumed && *at >= seg.start_frame)
+        {
+            let frames = consumed - at;
+            return pos + Duration::from_secs_f64(frames as f64 / rate * seg.tempo);
+        }
         let frames = consumed.saturating_sub(seg.start_frame);
-        seg.start_pos + Duration::from_secs_f64(frames as f64 / seg.rate.max(1) as f64)
+        seg.start_pos + Duration::from_secs_f64(frames as f64 / rate * seg.tempo)
+    }
+
+    /// Report the tracked podcast episode's position, and forget it.
+    fn flush_progress(&mut self, finished: bool) {
+        if let Some((info, pos, _)) = self.progress.take()
+            && let Some(h) = &self.progress_hook
+        {
+            let done = finished
+                || info.duration.is_some_and(|d| {
+                    pos + Duration::from_secs(30) >= d
+                        || pos.as_secs_f64() >= d.as_secs_f64() * 0.95
+                });
+            h(&info, pos, done);
+        }
+    }
+
+    fn clear_segments(&mut self) {
+        self.segments.clear();
+        self.marks.clear();
     }
 
     fn start_entry(&mut self, entry: EntryId, pos: Duration) {
         self.fade_out_and_wait();
-        self.segments.clear();
+        self.flush_progress(false);
+        self.clear_segments();
+        self.live_title = None;
+        self.reconnect = None;
         self.resume_on_segment = true;
         self.set_state(PlayState::Playing);
-        let _ = self.feed_tx.send(FeedCmd::Start { entry, pos });
+        self.send_feed(FeedCmd::Start { entry, pos });
+    }
+
+    fn current_is_live(&self) -> bool {
+        self.segments.front().is_some_and(|s| s.info.is_live()) || self.reconnect.is_some()
     }
 
     fn seek(&mut self, pos: Duration) {
@@ -345,22 +444,28 @@ impl Core {
             }
             return;
         }
+        if self.current_is_live() {
+            return;
+        }
         let pos = match self.snapshot.lock().unwrap().duration {
             Some(d) => pos.min(d.saturating_sub(Duration::from_millis(250))),
             None => pos,
         };
         let playing = self.state == PlayState::Playing;
         self.fade_out_and_wait();
-        self.segments.clear();
+        self.clear_segments();
         self.resume_on_segment = playing;
-        let _ = self.feed_tx.send(FeedCmd::Seek(pos));
+        self.send_feed(FeedCmd::Seek(pos));
     }
 
     fn stop(&mut self) {
         self.fade_out_and_wait();
+        self.flush_progress(false);
         self.resume_on_segment = false;
-        let _ = self.feed_tx.send(FeedCmd::Stop);
-        self.segments.clear();
+        self.send_feed(FeedCmd::Stop);
+        self.clear_segments();
+        self.live_title = None;
+        self.reconnect = None;
         self.set_state(PlayState::Stopped);
     }
 
@@ -379,7 +484,7 @@ impl Core {
                     self.start_entry(id, Duration::ZERO);
                 }
             }
-            Command::SetQueueTracks { tracks, start } => {
+            Command::SetQueueTracks { tracks, start, pos } => {
                 self.stop();
                 let ids = {
                     let mut q = self.queue.lock().unwrap();
@@ -388,7 +493,34 @@ impl Core {
                 };
                 self.emit(Event::QueueChanged);
                 if let Some(&id) = ids.get(start) {
-                    self.start_entry(id, Duration::ZERO);
+                    self.start_entry(id, pos);
+                }
+            }
+            Command::SetPodcastPlayback {
+                tempo,
+                trim_silence,
+            } => {
+                let tempo = tempo.clamp(0.5, 3.0);
+                let changed = (self.shared.podcast_tempo.load() - tempo).abs() > 1e-3
+                    || self.shared.podcast_trim.load(Ordering::Relaxed) != trim_silence;
+                self.shared.podcast_tempo.store(tempo);
+                self.shared
+                    .podcast_trim
+                    .store(trim_silence, Ordering::Relaxed);
+                // A playing episode is reopened where it is, so the change
+                // is heard now rather than two seconds of buffer later.
+                let podcast = self
+                    .segments
+                    .front()
+                    .is_some_and(|s| s.info.kind == crate::track::MediaKind::Podcast);
+                if changed && podcast && self.state != PlayState::Stopped {
+                    let pos = self.position();
+                    let entry = self.segments.front().unwrap().entry;
+                    let playing = self.state == PlayState::Playing;
+                    self.fade_out_and_wait();
+                    self.clear_segments();
+                    self.resume_on_segment = playing;
+                    self.send_feed(FeedCmd::Start { entry, pos });
                 }
             }
             Command::AppendTracks(tracks) => {
@@ -464,6 +596,12 @@ impl Core {
             },
             Command::Pause => {
                 if self.state == PlayState::Playing {
+                    // Save the episode position on pause too.
+                    if let Some((info, pos, _)) = &self.progress
+                        && let Some(h) = &self.progress_hook
+                    {
+                        h(info, *pos, false);
+                    }
                     self.shared.playing.store(false, Ordering::Relaxed);
                     self.resume_on_segment = false;
                     self.set_state(PlayState::Paused);
@@ -546,6 +684,7 @@ impl Core {
                 }
             }
             FeedMsg::Segment(seg) => {
+                self.reconnect = None;
                 if self.resume_on_segment && self.state == PlayState::Playing {
                     self.shared.playing.store(true, Ordering::Relaxed);
                     self.resume_on_segment = false;
@@ -555,6 +694,32 @@ impl Core {
             FeedMsg::Flushed => {}
             FeedMsg::TrackError { error, .. } => self.report(error),
             FeedMsg::EndOfQueue => {}
+            FeedMsg::Title { entry, title } => {
+                if self.segments.front().is_some_and(|s| s.entry == entry) {
+                    self.live_title = Some(title.clone());
+                    self.emit(Event::NowPlaying(title));
+                }
+            }
+            FeedMsg::Reconnecting {
+                attempt,
+                wait,
+                error,
+                ..
+            } => {
+                self.reconnect = Some(Reconnect {
+                    attempt,
+                    at: Instant::now() + wait,
+                    error,
+                });
+            }
+            FeedMsg::Mark { at_frame, pos } => {
+                self.marks.push_back((at_frame, pos));
+                let consumed = self.shared.consumed_frames.load(Ordering::Relaxed);
+                // Keep the newest played mark and everything ahead of it.
+                while self.marks.len() > 2 && self.marks[1].0 <= consumed {
+                    self.marks.pop_front();
+                }
+            }
         }
     }
 
@@ -619,6 +784,10 @@ impl Core {
             self.seg_start = Some(start);
         }
         if entry.is_some() && entry != self.current {
+            // Natural end of a podcast episode (gapless hand-off).
+            let natural = self.current.is_some();
+            self.flush_progress(natural);
+            self.live_title = None;
             self.reset_listening();
             self.current = entry;
             self.queue.lock().unwrap().set_current(entry);
@@ -626,6 +795,7 @@ impl Core {
         }
 
         if self.shared.drained.swap(false, Ordering::AcqRel) {
+            self.flush_progress(true);
             self.shared.playing.store(false, Ordering::Relaxed);
             self.shared.end_of_queue.store(false, Ordering::Release);
             self.segments.clear();
@@ -648,6 +818,24 @@ impl Core {
             self.count_listening(position, track.as_ref());
         } else {
             self.last_pos = None;
+        }
+        if let Some(info) = track
+            .as_ref()
+            .filter(|t| t.kind == crate::track::MediaKind::Podcast)
+            && self.state != PlayState::Stopped
+            && !self.segments.is_empty()
+        {
+            let now = Instant::now();
+            let last = self.progress.as_ref().map(|p| p.2).unwrap_or(now);
+            self.progress = Some((info.clone(), position, last));
+            if now.duration_since(last) >= Duration::from_secs(5) {
+                if let Some(h) = &self.progress_hook {
+                    h(info, position, false);
+                }
+                if let Some(p) = &mut self.progress {
+                    p.2 = now;
+                }
+            }
         }
         let (shuffle, repeat) = {
             let q = self.queue.lock().unwrap();
@@ -678,6 +866,11 @@ impl Core {
         snap.output = self.output.as_ref().map(|o| o.describe());
         snap.buffering = buffering;
         snap.last_error = self.last_error.clone();
+        snap.live = snap.track.as_ref().is_some_and(|t| t.is_live());
+        snap.live_title = self.live_title.clone();
+        snap.reconnect = self.reconnect.clone();
+        snap.podcast_tempo = self.shared.podcast_tempo.load();
+        snap.podcast_trim = self.shared.podcast_trim.load(Ordering::Relaxed);
     }
 }
 

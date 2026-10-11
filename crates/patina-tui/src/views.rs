@@ -5,9 +5,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use std::collections::HashMap;
+
+use patina_core::config::Station;
+use patina_core::library::podcasts::{EpisodeRow, PodcastRow};
 use patina_core::library::{
     AlbumRow, AlbumSort, ArtistMode, DirEntry, GenreRow, Library, PlaylistRow, SongSort, TrackRow,
 };
+use patina_core::track::{MediaKind, TrackInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
@@ -17,23 +22,37 @@ pub enum Section {
     Songs,
     Genres,
     Playlists,
+    Radio,
+    Podcasts,
     Queue,
     Downloads,
     Settings,
 }
 
 impl Section {
-    /// The eight with number keys, in sidebar order.
-    pub const NUMBERED: [Section; 8] = [
+    /// The ten with number keys (1 to 9, then 0), in sidebar order.
+    pub const NUMBERED: [Section; 10] = [
         Section::Folders,
         Section::Artists,
         Section::Albums,
         Section::Songs,
         Section::Genres,
         Section::Playlists,
+        Section::Radio,
+        Section::Podcasts,
         Section::Queue,
         Section::Downloads,
     ];
+
+    /// The key that jumps here.
+    pub fn key(self) -> Option<char> {
+        let i = Self::NUMBERED.iter().position(|&s| s == self)?;
+        Some(if i == 9 {
+            '0'
+        } else {
+            (b'1' + i as u8) as char
+        })
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -43,6 +62,8 @@ impl Section {
             Section::Songs => "Songs",
             Section::Genres => "Genres",
             Section::Playlists => "Playlists",
+            Section::Radio => "Radio",
+            Section::Podcasts => "Podcasts",
             Section::Queue => "Queue",
             Section::Downloads => "Downloads",
             Section::Settings => "Settings",
@@ -60,6 +81,7 @@ pub enum Source {
     Album { key: String },
     Genre { norm: String, name: String },
     Playlist { id: i64, name: String },
+    Podcast { id: i64, title: String },
     Search(String),
 }
 
@@ -87,6 +109,14 @@ pub enum Item {
     },
     Genre(GenreRow),
     Playlist(PlaylistRow),
+    /// One of your stations, by its place in the config list.
+    Station {
+        index: usize,
+        station: Station,
+        check: Option<String>,
+    },
+    Podcast(PodcastRow),
+    Episode(EpisodeRow),
     /// Group label inside search results. Not selectable.
     Header(&'static str),
     /// Label and value, for Settings and Downloads.
@@ -111,6 +141,9 @@ impl Item {
             Item::Missing { uri } => format!("m:{}", String::from_utf8_lossy(uri)),
             Item::Genre(g) => format!("g:{}", g.norm),
             Item::Playlist(p) => format!("p:{}", p.id),
+            Item::Station { station, .. } => format!("s:{}", station.url),
+            Item::Podcast(p) => format!("pc:{}", p.id),
+            Item::Episode(e) => format!("e:{}", e.id),
             Item::Header(h) => format!("h:{h}"),
             Item::Info { label, .. } => format!("i:{label}"),
         }
@@ -169,6 +202,26 @@ pub struct Settings {
     pub lines: Vec<(String, String)>,
 }
 
+/// Everything a view can draw from besides the library itself.
+pub struct Ctx<'a> {
+    pub lib: Option<&'a Library>,
+    pub prefs: &'a ViewPrefs,
+    pub settings: &'a Settings,
+    pub stations: &'a [Station],
+    /// Last test result per station URL.
+    pub checks: &'a HashMap<String, String>,
+}
+
+/// Queue entry for one of your stations.
+pub fn station_info(s: &Station) -> TrackInfo {
+    TrackInfo {
+        kind: MediaKind::Radio,
+        url: Some(s.url.clone()),
+        title: Some(s.name.clone()),
+        ..Default::default()
+    }
+}
+
 pub fn fmt_duration(d: Duration) -> String {
     let s = d.as_secs();
     if s >= 3600 {
@@ -193,15 +246,38 @@ pub fn fmt_length(d: Duration) -> String {
 
 /// Build the rows for a source. Queue rows come from the player, not the
 /// library, so the Queue section returns nothing here.
-pub fn build(
-    lib: Option<&Library>,
-    source: &Source,
-    prefs: &ViewPrefs,
-    settings: &Settings,
-) -> Result<(String, Vec<Item>), String> {
+pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> {
+    let (lib, prefs, settings) = (ctx.lib, ctx.prefs, ctx.settings);
     let none = || Err("No library folders yet. Add one with --add-folder.".to_string());
     let err = |e: patina_core::library::LibError| e.to_string();
     match source {
+        Source::Section(Section::Radio) => Ok((
+            "Radio".into(),
+            ctx.stations
+                .iter()
+                .enumerate()
+                .map(|(index, s)| Item::Station {
+                    index,
+                    station: s.clone(),
+                    check: ctx.checks.get(&s.url).cloned(),
+                })
+                .collect(),
+        )),
+        Source::Section(Section::Podcasts) => {
+            let Some(lib) = lib else {
+                return Err("Podcasts need the library database (--no-library is set).".into());
+            };
+            let rows = lib.podcasts().map_err(err)?;
+            Ok((
+                "Podcasts".into(),
+                rows.into_iter().map(Item::Podcast).collect(),
+            ))
+        }
+        Source::Podcast { id, title } => {
+            let Some(lib) = lib else { return none() };
+            let eps = lib.episodes(*id).map_err(err)?;
+            Ok((title.clone(), eps.into_iter().map(Item::Episode).collect()))
+        }
         Source::Section(Section::Settings) => Ok((
             "Settings".into(),
             settings
@@ -213,23 +289,26 @@ pub fn build(
                 })
                 .collect(),
         )),
-        Source::Section(Section::Downloads) => Ok((
-            "Downloads".into(),
-            vec![
-                Item::Info {
-                    label: "Pinned for offline".into(),
-                    value: "nothing yet".into(),
-                },
-                Item::Info {
+        Source::Section(Section::Downloads) => {
+            let eps = lib
+                .and_then(|l| l.downloaded_episodes().ok())
+                .unwrap_or_default();
+            let mut items = Vec::new();
+            if eps.is_empty() {
+                items.push(Item::Info {
+                    label: "Podcast episodes".into(),
+                    value: "none downloaded. Press w on an episode to keep it.".into(),
+                });
+                items.push(Item::Info {
                     label: "Track cache".into(),
-                    value: "empty".into(),
-                },
-                Item::Info {
-                    label: "Downloads in progress".into(),
-                    value: "none".into(),
-                },
-            ],
-        )),
+                    value: "arrives with Subsonic streaming".into(),
+                });
+            } else {
+                items.push(Item::Header("Downloaded episodes"));
+                items.extend(eps.into_iter().map(Item::Episode));
+            }
+            Ok(("Downloads".into(), items))
+        }
         Source::Section(Section::Queue) => Ok(("Queue".into(), Vec::new())),
         _ if lib.is_none() => none(),
         Source::Section(Section::Folders) => {
@@ -394,7 +473,37 @@ pub fn open(item: &Item) -> Option<Source> {
             id: p.id,
             name: p.name.clone(),
         }),
+        Item::Podcast(p) => Some(Source::Podcast {
+            id: p.id,
+            title: p.title.clone(),
+        }),
         _ => None,
+    }
+}
+
+/// What an item queues as. Covers stations and episodes as well as
+/// library tracks.
+pub fn infos_of(lib: Option<&Library>, item: &Item, prefs: &ViewPrefs) -> Vec<TrackInfo> {
+    match item {
+        Item::Station { station, .. } => vec![station_info(station)],
+        Item::Episode(e) => vec![e.to_info()],
+        Item::Podcast(p) => lib
+            .and_then(|l| l.episodes(p.id).ok())
+            .map(|eps| {
+                // Oldest unplayed first: the order you'd catch up in.
+                let mut v: Vec<_> = eps.into_iter().filter(|e| !e.played).collect();
+                v.reverse();
+                v.iter().map(EpisodeRow::to_info).collect()
+            })
+            .unwrap_or_default(),
+        _ => lib
+            .map(|l| {
+                tracks_of(l, item, prefs)
+                    .iter()
+                    .map(TrackRow::to_info)
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 1;
+pub const VERSION: i64 = 2;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -103,6 +103,40 @@ CREATE TABLE playlist_items (
 );
 "#;
 
+/// Podcasts. Feed URLs live in the config; this caches what the feeds
+/// said, plus your listening state, which the feeds can't know.
+const V2: &str = r#"
+CREATE TABLE podcasts (
+    id           INTEGER PRIMARY KEY,
+    feed_url     TEXT NOT NULL UNIQUE,
+    title        TEXT,
+    author       TEXT,
+    description  TEXT,
+    image_url    TEXT,
+    link         TEXT,
+    last_fetch   INTEGER,
+    last_error   TEXT
+);
+
+CREATE TABLE episodes (
+    id            INTEGER PRIMARY KEY,
+    podcast_id    INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE,
+    guid          TEXT NOT NULL,
+    title         TEXT NOT NULL,
+    published     INTEGER,
+    duration_ms   INTEGER,
+    audio_url     TEXT NOT NULL,
+    mime          TEXT,
+    size          INTEGER,
+    description   TEXT,
+    position_ms   INTEGER NOT NULL DEFAULT 0,
+    played        INTEGER NOT NULL DEFAULT 0,
+    download_path BLOB,
+    UNIQUE (podcast_id, guid)
+);
+CREATE INDEX episodes_podcast ON episodes(podcast_id, published);
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -119,6 +153,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     if current < 1 {
         tx.execute_batch(V1)?;
+    }
+    if current < 2 {
+        tx.execute_batch(V2)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

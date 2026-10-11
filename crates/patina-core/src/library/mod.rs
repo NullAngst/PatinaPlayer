@@ -5,6 +5,7 @@
 //! thread opens its own; SQLite in WAL mode lets readers run while the
 //! scanner writes. [`service::LibraryService`] owns scanning and watching.
 
+pub mod podcasts;
 pub mod scan;
 mod schema;
 pub mod service;
@@ -142,6 +143,7 @@ impl TrackRow {
             bits: self.bits,
             kbps: self.kbps,
             lossless: self.lossless,
+            ..Default::default()
         }
     }
 }

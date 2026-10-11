@@ -75,6 +75,13 @@ pub struct Shared {
     pub drained: AtomicBool,
     /// Renderer ran dry while more audio was expected.
     pub underrun: AtomicBool,
+    /// Set by the core before it sends the decoder a command, so a network
+    /// read stuck waiting gives up and the command is seen at once.
+    pub abort_io: Arc<AtomicBool>,
+    /// Podcast playback speed (pitch kept) and silence trimming. Read by
+    /// the decoder whenever it opens a podcast episode.
+    pub podcast_tempo: AtomicF64,
+    pub podcast_trim: AtomicBool,
 }
 
 impl Default for Shared {
@@ -90,6 +97,9 @@ impl Default for Shared {
             end_of_queue: AtomicBool::new(false),
             drained: AtomicBool::new(false),
             underrun: AtomicBool::new(false),
+            abort_io: Arc::new(AtomicBool::new(false)),
+            podcast_tempo: AtomicF64::new(1.0),
+            podcast_trim: AtomicBool::new(false),
         }
     }
 }

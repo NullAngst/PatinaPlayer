@@ -8,18 +8,22 @@
 //! ring is left to drain and a new one (and a new output stream) is opened
 //! at the new format. That join has a short gap, which is the honest
 //! result until the resampler lands.
+//!
+//! Radio is the exception to "end of stream means next track". A live
+//! stream that ends or errors is reconnected with backoff, trying each of
+//! the station's mirrors in turn, until it plays again or you stop it.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use super::decoder::Source;
+use super::decoder::{OpenOptions, Source};
 use super::{SharedRef, StreamFormat};
 use crate::queue::{EntryId, Queue};
-use crate::track::TrackInfo;
+use crate::track::{MediaKind, TrackInfo};
 
 #[derive(Debug)]
 pub enum FeedCmd {
@@ -44,9 +48,15 @@ pub struct Segment {
     /// Track position of that first frame (non-zero after a seek).
     pub start_pos: Duration,
     pub rate: u32,
+    /// Source seconds per output second. 1 except for sped-up podcasts.
+    pub tempo: f64,
+    /// Position comes from [`FeedMsg::Mark`]s rather than frame counting,
+    /// since silence trimming makes the mapping uneven.
+    pub marked: bool,
     pub info: TrackInfo,
 }
 
+#[allow(clippy::large_enum_variant)] // a few messages a second at most
 pub enum FeedMsg {
     /// A new ring at a new format. The core opens an output for it.
     Open {
@@ -62,6 +72,23 @@ pub enum FeedMsg {
     },
     /// Every queued track has been decoded.
     EndOfQueue,
+    /// A live stream's now-playing title changed.
+    Title {
+        entry: EntryId,
+        title: String,
+    },
+    /// A live stream dropped; the next try is in `wait`.
+    Reconnecting {
+        entry: EntryId,
+        attempt: u32,
+        wait: Duration,
+        error: String,
+    },
+    /// Source position at a point in the ring, for filtered playback.
+    Mark {
+        at_frame: u64,
+        pos: Duration,
+    },
 }
 
 pub fn spawn(
@@ -76,6 +103,13 @@ pub fn spawn(
         .expect("spawn decoder thread")
 }
 
+/// A live stream waiting to be reconnected.
+struct Retry {
+    entry: EntryId,
+    attempt: u32,
+    at: Instant,
+}
+
 struct Feeder {
     shared: SharedRef,
     queue: Arc<Mutex<Queue>>,
@@ -83,6 +117,9 @@ struct Feeder {
     msgs: Sender<FeedMsg>,
     source: Option<Source>,
     entry: EntryId,
+    /// What the queue says about the open entry, with the technical fields
+    /// filled in from the stream.
+    entry_info: TrackInfo,
     ring: Option<Producer<f64>>,
     format: Option<StreamFormat>,
     /// Frames pushed into the ring, in `consumed_frames` coordinates.
@@ -91,6 +128,9 @@ struct Feeder {
     pending: Vec<f64>,
     pending_off: usize,
     stashed: Option<FeedCmd>,
+    retry: Option<Retry>,
+    last_title_poll: Instant,
+    last_mark: u64,
 }
 
 /// Longest we wait for the renderer to acknowledge a flush. If the output
@@ -99,6 +139,11 @@ const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How many skips in a row before giving up on a queue full of broken files.
 const MAX_CONSECUTIVE_ERRORS: usize = 25;
+
+/// Reconnect backoff: 1, 2, 4, 8, 16, then every 30 s.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs((1u64 << attempt.saturating_sub(1).min(5)).min(30))
+}
 
 impl Feeder {
     fn new(
@@ -114,48 +159,70 @@ impl Feeder {
             msgs,
             source: None,
             entry: 0,
+            entry_info: TrackInfo::default(),
             ring: None,
             format: None,
             written: 0,
             pending: Vec::with_capacity(32768),
             pending_off: 0,
             stashed: None,
+            retry: None,
+            last_title_poll: Instant::now(),
+            last_mark: 0,
+        }
+    }
+
+    fn next_cmd(&mut self) -> Result<Option<FeedCmd>, ()> {
+        if let Some(c) = self.stashed.take() {
+            return Ok(Some(c));
+        }
+        if self.source.is_some() {
+            return match self.cmds.try_recv() {
+                Ok(c) => Ok(Some(c)),
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => Err(()),
+            };
+        }
+        // Nothing open: wait for a command, or until a reconnect is due.
+        match &self.retry {
+            Some(r) => {
+                let wait = r.at.saturating_duration_since(Instant::now());
+                match self.cmds.recv_timeout(wait) {
+                    Ok(c) => Ok(Some(c)),
+                    Err(RecvTimeoutError::Timeout) => Ok(None),
+                    Err(RecvTimeoutError::Disconnected) => Err(()),
+                }
+            }
+            None => self.cmds.recv().map(Some).map_err(|_| ()),
         }
     }
 
     fn run(mut self) {
         loop {
-            // Idle: block on the next command. Busy: just peek.
-            let cmd = if let Some(c) = self.stashed.take() {
-                Some(c)
-            } else if self.source.is_none() {
-                match self.cmds.recv() {
-                    Ok(c) => Some(c),
-                    Err(_) => return,
-                }
-            } else {
-                match self.cmds.try_recv() {
-                    Ok(c) => Some(c),
-                    Err(TryRecvError::Empty) => None,
-                    Err(TryRecvError::Disconnected) => return,
-                }
-            };
-
+            let Ok(cmd) = self.next_cmd() else { return };
             if let Some(cmd) = cmd {
+                // Commands mean "now": clear the abort the core raised so
+                // the next network read isn't cut short.
+                self.shared.abort_io.store(false, Ordering::Relaxed);
                 match cmd {
                     FeedCmd::Quit => return,
                     FeedCmd::Stop => {
+                        self.retry = None;
                         self.flush();
                         self.source = None;
                         let _ = self.msgs.send(FeedMsg::Flushed);
                     }
                     FeedCmd::Start { entry, pos } => {
+                        self.retry = None;
                         self.flush();
                         self.source = None;
                         let _ = self.msgs.send(FeedMsg::Flushed);
                         self.open_from(entry, pos);
                     }
                     FeedCmd::Seek(pos) => {
+                        if self.source.as_ref().is_some_and(|s| s.is_live()) {
+                            continue;
+                        }
                         self.flush();
                         let _ = self.msgs.send(FeedMsg::Flushed);
                         let entry = self.entry;
@@ -175,6 +242,11 @@ impl Feeder {
 
             if self.source.is_some() {
                 self.pump();
+            } else if let Some(r) = &self.retry
+                && Instant::now() >= r.at
+            {
+                let (entry, attempt) = (r.entry, r.attempt);
+                self.reconnect(entry, attempt);
             }
         }
     }
@@ -210,8 +282,10 @@ impl Feeder {
     fn open_from(&mut self, mut entry: EntryId, pos: Duration) {
         let mut pos = pos;
         for _ in 0..MAX_CONSECUTIVE_ERRORS {
-            if self.open(entry, pos) {
-                return;
+            match self.open(entry, pos, 1) {
+                Opened::Yes | Opened::Interrupted => return,
+                Opened::Retrying => return,
+                Opened::No => {}
             }
             pos = Duration::ZERO;
             match self.queue.lock().unwrap().step(entry, 1) {
@@ -222,48 +296,164 @@ impl Feeder {
         self.finish_queue();
     }
 
+    fn open_options(&self, info: &TrackInfo) -> OpenOptions {
+        let podcast = info.kind == MediaKind::Podcast;
+        OpenOptions {
+            live: info.is_live(),
+            tempo: if podcast {
+                self.shared.podcast_tempo.load()
+            } else {
+                1.0
+            },
+            trim_silence: podcast && self.shared.podcast_trim.load(Ordering::Relaxed),
+            abort: Some(self.shared.abort_io.clone()),
+        }
+    }
+
+    /// Open a radio station: resolve its URL, then try each stream.
+    fn open_station(&self, info: &TrackInfo) -> Result<Source, String> {
+        let url = info.url.clone().ok_or("station has no URL")?;
+        let resolved = crate::radio::resolve(&url).map_err(|e| e.to_string())?;
+        let mut last = String::new();
+        for s in &resolved.streams {
+            if self.shared.abort_io.load(Ordering::Relaxed) {
+                return Err("interrupted".into());
+            }
+            match Source::open_with(s, self.open_options(info)) {
+                Ok(src) => return Ok(src),
+                Err(e) => {
+                    log::info!("mirror {s} failed: {e}");
+                    last = e.to_string();
+                }
+            }
+        }
+        Err(format!("no stream answered ({last})"))
+    }
+
     /// Open one entry. Sends the Segment (and a new ring if needed).
-    fn open(&mut self, entry: EntryId, pos: Duration) -> bool {
-        let Some(path) = self.queue.lock().unwrap().path(entry) else {
-            return false;
+    /// `attempt` numbers the reconnect a failure here would schedule.
+    fn open(&mut self, entry: EntryId, pos: Duration, attempt: u32) -> Opened {
+        let Some(info) = self
+            .queue
+            .lock()
+            .unwrap()
+            .get(entry)
+            .map(|e| e.info.clone())
+        else {
+            return Opened::No;
         };
-        let mut src = match Source::open(&path) {
+        let label = info
+            .url
+            .clone()
+            .unwrap_or_else(|| info.path.display().to_string());
+        let opened = if info.is_live() {
+            self.open_station(&info)
+        } else {
+            match info.location() {
+                Some(loc) => {
+                    Source::open_with(&loc, self.open_options(&info)).map_err(|e| e.to_string())
+                }
+                None => Err("nothing to open".into()),
+            }
+        };
+        let mut src = match opened {
             Ok(s) => s,
+            Err(e) if info.is_live() => {
+                // A station that doesn't answer gets retried, not skipped.
+                self.schedule_retry(entry, attempt, e);
+                return Opened::Retrying;
+            }
             Err(e) => {
                 self.queue.lock().unwrap().mark_failed(entry);
                 let _ = self.msgs.send(FeedMsg::TrackError {
                     entry,
-                    error: format!("{}: {e}", path.display()),
+                    error: format!("{label}: {e}"),
                 });
-                return false;
+                return Opened::No;
             }
         };
         if pos > Duration::ZERO
             && let Err(e) = src.seek(pos)
         {
-            log::warn!("seek failed in {}: {e}", path.display());
+            log::warn!("seek failed in {label}: {e}");
         }
-        self.queue
-            .lock()
-            .unwrap()
-            .set_info(entry, src.info().clone());
+
+        // Local files: the file's own tags are the truth. Streams: keep
+        // what the queue knows (station name, episode title) and take the
+        // technical fields from the stream.
+        let merged = match info.kind {
+            MediaKind::File => {
+                let mut i = src.info().clone();
+                i.kind = MediaKind::File;
+                i
+            }
+            _ => {
+                let s = src.info();
+                TrackInfo {
+                    codec: s.codec.clone(),
+                    sample_rate: s.sample_rate,
+                    channels: s.channels,
+                    bits: s.bits,
+                    kbps: s.kbps.or(info.kbps),
+                    lossless: s.lossless,
+                    duration: info.duration.or(s.duration).filter(|_| !info.is_live()),
+                    album: info.album.clone().or_else(|| s.album.clone()),
+                    ..info.clone()
+                }
+            }
+        };
+        self.queue.lock().unwrap().set_info(entry, merged.clone());
 
         let fmt = src.format();
         if self.format != Some(fmt) {
             if !self.drain_ring() {
                 // A command arrived while draining; it's stashed and wins.
-                return true;
+                return Opened::Interrupted;
             }
             self.new_ring(fmt);
         }
         self.entry = entry;
+        self.entry_info = merged;
         self.source = Some(src);
+        self.last_mark = 0;
         self.announce(pos);
-        true
+        Opened::Yes
+    }
+
+    fn schedule_retry(&mut self, entry: EntryId, attempt: u32, error: String) {
+        let wait = backoff(attempt);
+        log::info!("stream dropped ({error}), retry {attempt} in {wait:?}");
+        let _ = self.msgs.send(FeedMsg::Reconnecting {
+            entry,
+            attempt,
+            wait,
+            error,
+        });
+        self.retry = Some(Retry {
+            entry,
+            attempt,
+            at: Instant::now() + wait,
+        });
+    }
+
+    fn reconnect(&mut self, entry: EntryId, attempt: u32) {
+        self.retry = None;
+        if !self.queue.lock().unwrap().contains(entry) {
+            return;
+        }
+        if let Opened::Yes = self.open(entry, Duration::ZERO, attempt + 1) {
+            log::info!("stream back after {attempt} attempt(s)");
+        }
     }
 
     fn announce(&mut self, pos: Duration) {
         let Some(src) = &self.source else { return };
+        let marked = src.source_position().is_some();
+        let tempo = if self.entry_info.kind == MediaKind::Podcast {
+            self.shared.podcast_tempo.load().clamp(0.5, 3.0)
+        } else {
+            1.0
+        };
         let _ = self.msgs.send(FeedMsg::Segment(Segment {
             entry: self.entry,
             start_frame: self.written
@@ -271,7 +461,9 @@ impl Feeder {
                     / self.format.map(|f| f.channels as u64).unwrap_or(1),
             start_pos: pos,
             rate: src.format().rate,
-            info: src.info().clone(),
+            tempo,
+            marked,
+            info: self.entry_info.clone(),
         }));
     }
 
@@ -314,22 +506,46 @@ impl Feeder {
     /// Decode a chunk if needed and push what fits. Sleeps a little when
     /// the ring is full so this thread doesn't spin.
     fn pump(&mut self) {
+        let live = self.source.as_ref().is_some_and(|s| s.is_live());
+        if live && self.last_title_poll.elapsed() > Duration::from_millis(500) {
+            self.last_title_poll = Instant::now();
+            if let Some(title) = self.source.as_mut().unwrap().poll_title() {
+                let _ = self.msgs.send(FeedMsg::Title {
+                    entry: self.entry,
+                    title,
+                });
+            }
+        }
         if self.pending_off >= self.pending.len() {
             self.pending.clear();
             self.pending_off = 0;
             let res = self.source.as_mut().unwrap().decode_into(&mut self.pending);
             match res {
+                Ok(0) if live => {
+                    self.source = None;
+                    self.schedule_retry(self.entry, 1, "stream ended".into());
+                    return;
+                }
                 Ok(0) => {
                     self.next_track();
                     return;
                 }
                 Ok(_) => {}
+                Err(e) if live => {
+                    self.source = None;
+                    self.schedule_retry(self.entry, 1, e.to_string());
+                    return;
+                }
                 Err(e) => {
-                    let path = self.source.as_ref().unwrap().info().path.clone();
-                    log::warn!("decode error in {}: {e}", path.display());
+                    let label = self
+                        .entry_info
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| self.entry_info.path.display().to_string());
+                    log::warn!("decode error in {label}: {e}");
                     let _ = self.msgs.send(FeedMsg::TrackError {
                         entry: self.entry,
-                        error: format!("{}: {e}", path.display()),
+                        error: format!("{label}: {e}"),
                     });
                     self.next_track();
                     return;
@@ -338,7 +554,26 @@ impl Feeder {
         }
         if self.push_pending() == 0 {
             std::thread::sleep(Duration::from_millis(10));
+        } else {
+            self.mark();
         }
+    }
+
+    /// For filtered playback, tell the core where in the source the audio
+    /// just pushed ends. A few marks a second keeps the position honest.
+    fn mark(&mut self) {
+        let Some(pos) = self.source.as_ref().and_then(|s| s.source_position()) else {
+            return;
+        };
+        let rate = self.format.map(|f| f.rate as u64).unwrap_or(44100);
+        if self.pending_off < self.pending.len() || self.written < self.last_mark + rate / 4 {
+            return;
+        }
+        self.last_mark = self.written;
+        let _ = self.msgs.send(FeedMsg::Mark {
+            at_frame: self.written,
+            pos,
+        });
     }
 
     /// Push as much pending audio as fits. Returns samples pushed.
@@ -402,5 +637,25 @@ impl Feeder {
         }
         self.shared.end_of_queue.store(true, Ordering::Release);
         let _ = self.msgs.send(FeedMsg::EndOfQueue);
+    }
+}
+
+enum Opened {
+    Yes,
+    No,
+    /// A live stream that didn't answer; a retry is scheduled.
+    Retrying,
+    /// A command arrived while waiting for the old ring to drain.
+    Interrupted,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_then_caps() {
+        let s: Vec<u64> = (1..=8).map(|a| backoff(a).as_secs()).collect();
+        assert_eq!(s, vec![1, 2, 4, 8, 16, 30, 30, 30]);
     }
 }

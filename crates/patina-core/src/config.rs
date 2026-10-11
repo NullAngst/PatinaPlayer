@@ -43,6 +43,11 @@ pub fn library_db_path() -> PathBuf {
     data_dir().join("library.db")
 }
 
+/// Pinned and downloaded files. Kept out of ~/.cache so cleaners leave it.
+pub fn offline_dir() -> PathBuf {
+    data_dir().join("offline")
+}
+
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
@@ -74,6 +79,23 @@ pub struct Config {
     pub library: LibraryConfig,
     pub output: OutputConfig,
     pub playback: PlaybackConfig,
+    /// Your own radio stations, in the order you listed them.
+    pub stations: Vec<Station>,
+    pub podcasts: PodcastConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Station {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PodcastConfig {
+    pub feeds: Vec<String>,
+    /// Speed with pitch kept, 0.5 to 3.
+    pub speed: f64,
+    pub trim_silence: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -103,6 +125,12 @@ impl Default for Config {
                 volume: 80,
                 fade_ms: 100,
             },
+            stations: Vec::new(),
+            podcasts: PodcastConfig {
+                feeds: Vec::new(),
+                speed: 1.0,
+                trim_silence: false,
+            },
         }
     }
 }
@@ -115,6 +143,29 @@ struct RawConfig {
     library: Option<RawLibrary>,
     output: Option<RawOutput>,
     playback: Option<RawPlayback>,
+    radio: Option<RawRadio>,
+    podcasts: Option<RawPodcasts>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRadio {
+    station: Option<Vec<RawStation>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStation {
+    name: String,
+    url: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawPodcasts {
+    feeds: Option<Vec<String>>,
+    speed: Option<f64>,
+    trim_silence: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -161,6 +212,8 @@ impl Config {
         let lib = raw.library.unwrap_or_default();
         let out = raw.output.unwrap_or_default();
         let pb = raw.playback.unwrap_or_default();
+        let radio = raw.radio.unwrap_or_default();
+        let pods = raw.podcasts.unwrap_or_default();
         let backend = match out.backend {
             Some(b) => b.parse::<Backend>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -186,6 +239,27 @@ impl Config {
             playback: PlaybackConfig {
                 volume: pb.volume.unwrap_or(d.playback.volume).min(100),
                 fade_ms: pb.fade_ms.unwrap_or(d.playback.fade_ms).min(2000),
+            },
+            stations: radio
+                .station
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| !s.url.trim().is_empty())
+                .map(|s| Station {
+                    name: s.name,
+                    url: s.url.trim().to_string(),
+                })
+                .collect(),
+            podcasts: PodcastConfig {
+                feeds: pods
+                    .feeds
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect(),
+                speed: pods.speed.unwrap_or(1.0).clamp(0.5, 3.0),
+                trim_silence: pods.trim_silence.unwrap_or(false),
             },
         })
     }
@@ -247,13 +321,32 @@ buffer_ms = 200
 volume = 80
 # Fade on pause, resume, seek and stop, in milliseconds. 0 turns it off.
 fade_ms = 100
+
+[podcasts]
+# Feed URLs. The Podcasts view adds to this list for you.
+feeds = []
+# Speed with pitch kept, 0.5 to 3. Applies to podcasts only.
+speed = 1.0
+# Cut long silences down. Applies to podcasts only.
+trim_silence = false
+
+# Your own radio stations, in the order they show in the Radio view.
+# The Radio view can add and edit these too.
+#
+# [[radio.station]]
+# name = "Some Station"
+# url = "https://example.com/listen.pls"
 "#
     )
 }
 
-/// Add or remove a library folder in the config file, keeping the rest of
-/// the file as you wrote it. Returns false if nothing needed changing.
-pub fn edit_library_folder(path: &Path, folder: &Path, add: bool) -> Result<bool, ConfigError> {
+/// Load the config file as an editable document, let `f` change it, and
+/// write it back if `f` says it changed something. Comments and layout
+/// outside what `f` touches stay as they were.
+fn edit(
+    path: &Path,
+    f: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<bool, String>,
+) -> Result<bool, ConfigError> {
     let text = if path.exists() {
         std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
@@ -268,40 +361,10 @@ pub fn edit_library_folder(path: &Path, folder: &Path, add: bool) -> Result<bool
                 path: path.to_path_buf(),
                 msg: e.to_string(),
             })?;
-    let lib = doc
-        .entry("library")
-        .or_insert(toml_edit::table())
-        .as_table_mut()
-        .ok_or_else(|| ConfigError::Parse {
-            path: path.to_path_buf(),
-            msg: "[library] is not a table".into(),
-        })?;
-    let arr = lib
-        .entry("folders")
-        .or_insert(toml_edit::value(toml_edit::Array::new()))
-        .as_array_mut()
-        .ok_or_else(|| ConfigError::Parse {
-            path: path.to_path_buf(),
-            msg: "library.folders is not a list".into(),
-        })?;
-
-    let same = |v: &toml_edit::Value| {
-        v.as_str()
-            .map(|s| expand_tilde(s) == folder)
-            .unwrap_or(false)
-    };
-    let changed = if add {
-        if arr.iter().any(same) {
-            false
-        } else {
-            arr.push(contract_tilde(folder));
-            true
-        }
-    } else {
-        let before = arr.len();
-        arr.retain(|v| !same(v));
-        arr.len() != before
-    };
+    let changed = f(&mut doc).map_err(|msg| ConfigError::Parse {
+        path: path.to_path_buf(),
+        msg,
+    })?;
     if changed {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -312,6 +375,101 @@ pub fn edit_library_folder(path: &Path, folder: &Path, add: bool) -> Result<bool
         })?;
     }
     Ok(changed)
+}
+
+fn table<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    name: &str,
+) -> Result<&'a mut toml_edit::Table, String> {
+    let t = doc.entry(name).or_insert(toml_edit::table());
+    // An implicit table (only sub-tables, like [[radio.station]]) is fine.
+    t.as_table_mut()
+        .ok_or_else(|| format!("[{name}] is not a table"))
+}
+
+/// Replace the station list with `stations`, in order.
+pub fn set_stations(path: &Path, stations: &[Station]) -> Result<bool, ConfigError> {
+    edit(path, |doc| {
+        let radio = table(doc, "radio")?;
+        radio.set_implicit(true);
+        let mut arr = toml_edit::ArrayOfTables::new();
+        for s in stations {
+            let mut t = toml_edit::Table::new();
+            t.insert("name", toml_edit::value(s.name.clone()));
+            t.insert("url", toml_edit::value(s.url.clone()));
+            arr.push(t);
+        }
+        if arr.is_empty() {
+            radio.remove("station");
+        } else {
+            radio.insert("station", toml_edit::Item::ArrayOfTables(arr));
+        }
+        Ok(true)
+    })
+}
+
+/// Add or remove a podcast feed URL.
+pub fn edit_podcast_feed(path: &Path, url: &str, add: bool) -> Result<bool, ConfigError> {
+    edit(path, |doc| {
+        let pods = table(doc, "podcasts")?;
+        let arr = pods
+            .entry("feeds")
+            .or_insert(toml_edit::value(toml_edit::Array::new()))
+            .as_array_mut()
+            .ok_or("podcasts.feeds is not a list")?;
+        let has = arr.iter().any(|v| v.as_str() == Some(url));
+        if add && !has {
+            arr.push(url);
+            Ok(true)
+        } else if !add && has {
+            arr.retain(|v| v.as_str() != Some(url));
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })
+}
+
+/// Save podcast speed and silence trimming.
+pub fn set_podcast_playback(path: &Path, speed: f64, trim: bool) -> Result<bool, ConfigError> {
+    edit(path, |doc| {
+        let pods = table(doc, "podcasts")?;
+        let speed = (speed * 100.0).round() / 100.0;
+        pods.insert("speed", toml_edit::value(speed));
+        pods.insert("trim_silence", toml_edit::value(trim));
+        Ok(true)
+    })
+}
+
+/// Add or remove a library folder in the config file, keeping the rest of
+/// the file as you wrote it. Returns false if nothing needed changing.
+pub fn edit_library_folder(path: &Path, folder: &Path, add: bool) -> Result<bool, ConfigError> {
+    edit(path, |doc| edit_folders(doc, folder, add))
+}
+
+fn edit_folders(
+    doc: &mut toml_edit::DocumentMut,
+    folder: &Path,
+    add: bool,
+) -> Result<bool, String> {
+    let lib = table(doc, "library")?;
+    let arr = lib
+        .entry("folders")
+        .or_insert(toml_edit::value(toml_edit::Array::new()))
+        .as_array_mut()
+        .ok_or("library.folders is not a list")?;
+    let same = |v: &toml_edit::Value| v.as_str().is_some_and(|s| expand_tilde(s) == folder);
+    if add {
+        if arr.iter().any(same) {
+            return Ok(false);
+        }
+        arr.push(contract_tilde(folder));
+        Ok(true)
+    } else {
+        let before = arr.len();
+        arr.retain(|v| !same(v));
+        Ok(arr.len() != before)
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +500,37 @@ mod tests {
     fn tilde_expands() {
         let c = Config::parse("[library]\nfolders = [\"~/Music\"]\n", Path::new("x")).unwrap();
         assert_eq!(c.library.folders[0], home().join("Music"));
+    }
+
+    #[test]
+    fn stations_and_feeds_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, default_text()).unwrap();
+        let st = vec![
+            Station {
+                name: "One".into(),
+                url: "http://a/1.pls".into(),
+            },
+            Station {
+                name: "Two".into(),
+                url: "http://b/2".into(),
+            },
+        ];
+        set_stations(&p, &st).unwrap();
+        assert!(edit_podcast_feed(&p, "https://x/feed.xml", true).unwrap());
+        assert!(!edit_podcast_feed(&p, "https://x/feed.xml", true).unwrap());
+        set_podcast_playback(&p, 1.25, true).unwrap();
+        let c = Config::load_from(&p).unwrap();
+        assert_eq!(c.stations, st);
+        assert_eq!(c.podcasts.feeds, vec!["https://x/feed.xml"]);
+        assert_eq!(c.podcasts.speed, 1.25);
+        assert!(c.podcasts.trim_silence);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("# Starting volume"), "comments survive");
+        // Removing every station leaves a valid file.
+        set_stations(&p, &[]).unwrap();
+        assert!(Config::load_from(&p).unwrap().stations.is_empty());
     }
 
     #[test]

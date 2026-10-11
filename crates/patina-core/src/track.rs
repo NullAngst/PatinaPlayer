@@ -9,9 +9,26 @@ use ffmpeg_next as ffmpeg;
 
 use crate::audio::decoder::{DecodeError, init_ffmpeg};
 
+/// What kind of thing a queue entry is. Decides how it's opened and which
+/// processing applies (tempo and silence trimming only touch podcasts).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MediaKind {
+    #[default]
+    File,
+    /// A live stream: no duration, no seeking, reconnects when it drops.
+    Radio,
+    Podcast,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackInfo {
+    /// Local file. Empty for something only reachable by `url`.
     pub path: PathBuf,
+    pub kind: MediaKind,
+    /// Network location for radio stations and streamed podcast episodes.
+    pub url: Option<String>,
+    /// Podcast episode row, so playback position can be saved against it.
+    pub episode: Option<i64>,
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -122,6 +139,20 @@ impl TrackInfo {
             bits,
             kbps,
             lossless,
+            ..Default::default()
+        }
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.kind == MediaKind::Radio
+    }
+
+    /// What to hand FFmpeg: the local file if there is one, else the URL.
+    pub fn location(&self) -> Option<String> {
+        if !self.path.as_os_str().is_empty() {
+            Some(self.path.to_string_lossy().into_owned())
+        } else {
+            self.url.clone()
         }
     }
 

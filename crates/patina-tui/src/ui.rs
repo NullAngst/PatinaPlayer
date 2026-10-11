@@ -62,6 +62,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::RenamePlaylist { .. } => "Rename playlist",
                 InputPurpose::SaveQueue => "Save queue as playlist",
                 InputPurpose::Search => "",
+                InputPurpose::StationName { edit: None } => "New station: name",
+                InputPurpose::StationName { .. } => "Edit station: name",
+                InputPurpose::StationUrl { .. } => "Station URL (stream, .pls, .m3u or .m3u8)",
+                InputPurpose::FeedUrl => "Podcast feed URL",
             };
             draw_input_box(f, app, area, title, buf);
         }
@@ -115,11 +119,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         };
         let line = match e {
             SideEntry::Section(s) => {
-                let num = Section::NUMBERED
-                    .iter()
-                    .position(|x| x == s)
-                    .map(|n| format!("{}", n + 1))
-                    .unwrap_or_else(|| " ".into());
+                let num = s.key().map(|c| c.to_string()).unwrap_or_else(|| " ".into());
                 let active = *s == app.section;
                 let style = if active {
                     base.fg(t.verdigris).add_modifier(Modifier::BOLD)
@@ -180,6 +180,8 @@ enum Kind {
     Albums,
     Names,
     Info,
+    Stations,
+    Episodes,
 }
 
 fn level_kind(items: &[Item]) -> Kind {
@@ -193,6 +195,14 @@ fn level_kind(items: &[Item]) -> Kind {
         Kind::Tracks
     } else if items.iter().all(|i| matches!(i, Item::Info { .. })) {
         Kind::Info
+    } else if items.iter().all(|i| matches!(i, Item::Station { .. })) {
+        Kind::Stations
+    } else if items.iter().any(|i| matches!(i, Item::Episode(_)))
+        && items
+            .iter()
+            .all(|i| matches!(i, Item::Episode(_) | Item::Header(_) | Item::Info { .. }))
+    {
+        Kind::Episodes
     } else if items.iter().all(|i| matches!(i, Item::Album(_))) && !items.is_empty() {
         Kind::Albums
     } else {
@@ -210,7 +220,13 @@ fn hints(app: &App) -> &'static str {
         (_, Some(Source::Genre { .. })) => "t albums/songs · a add · Esc back",
         (_, Some(Source::Playlist { .. })) => "d remove · J/K move · Esc back",
         (Section::Playlists, _) => "N new · R rename · D delete",
-        (Section::Settings | Section::Downloads, _) => "",
+        (Section::Radio, _) => "Enter play · N new · E edit · T test · D delete · J/K move",
+        (_, Some(Source::Podcast { .. })) => {
+            "Enter play · w download · x delete file · P played · [ ] speed · z trim"
+        }
+        (Section::Podcasts, _) => "Enter open · N subscribe · D unsubscribe · F5 refresh",
+        (Section::Downloads, _) => "Enter play · x delete file · P played",
+        (Section::Settings, _) => "",
         _ => "Enter open · a add · A play next · p playlist",
     }
 }
@@ -288,6 +304,20 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
                 "No playlists yet. Press N to make one.".to_string()
             }
             Source::Playlist { .. } => "Empty. Add tracks with p from any view.".to_string(),
+            Source::Section(Section::Radio) => {
+                "No stations yet. Press N to add one: a name, then its stream or playlist URL."
+                    .to_string()
+            }
+            Source::Section(Section::Podcasts) => {
+                "No podcasts yet. Press N and paste a feed URL.".to_string()
+            }
+            Source::Podcast { .. } => {
+                if app.pod.as_ref().is_some_and(|p| p.status().refreshing) {
+                    "Fetching the feed…".to_string()
+                } else {
+                    "No episodes with audio in this feed.".to_string()
+                }
+            }
             _ => {
                 let scanning = app.service.as_ref().is_some_and(|s| !s.status().ready);
                 if scanning {
@@ -313,6 +343,8 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         Kind::Albums => vec!["", "", "Album", "Artist", "Year", "Length"],
         Kind::Names => vec!["", "", "Name", "", "", ""],
         Kind::Info => vec!["", "", "", "", "", ""],
+        Kind::Stations => vec!["", "", "Station", "Last test", "", ""],
+        Kind::Episodes => vec!["", "", "Episode", "Published", "Progress", "Length"],
     };
     let rows_h = body.height.saturating_sub(1) as usize;
     let n = level.items.len();
@@ -375,6 +407,22 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Min(10),
             Constraint::Length(0),
             Constraint::Length(0),
+        ],
+        Kind::Stations => [
+            Constraint::Length(1),
+            Constraint::Length(0),
+            Constraint::Percentage(40),
+            Constraint::Percentage(60),
+            Constraint::Length(0),
+            Constraint::Length(0),
+        ],
+        Kind::Episodes => [
+            Constraint::Length(1),
+            Constraint::Length(0),
+            Constraint::Min(20),
+            Constraint::Length(11),
+            Constraint::Length(16),
+            Constraint::Length(8),
         ],
     };
     let table = Table::new(rows, widths)
@@ -517,6 +565,118 @@ fn item_row<'a>(
                 muted,
             )),
         ],
+        Item::Station { station, check, .. } => {
+            let now = app
+                .snap
+                .track
+                .as_ref()
+                .is_some_and(|t| t.is_live() && t.url.as_deref() == Some(station.url.as_str()));
+            let style = if now {
+                Style::default()
+                    .fg(t.verdigris)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                text
+            };
+            let (status, st) = match check {
+                Some(c) if c.starts_with("Not working") || c.contains("no stream answered") => {
+                    (c.clone(), Style::default().fg(t.copper))
+                }
+                Some(c) => (c.clone(), muted),
+                None => (station.url.clone(), dim),
+            };
+            vec![
+                Cell::from(Span::styled(
+                    if now { "▶" } else { " " },
+                    Style::default().fg(t.verdigris),
+                )),
+                Cell::from(""),
+                Cell::from(Span::styled(station.name.clone(), style)),
+                Cell::from(Span::styled(status, st)),
+                Cell::from(""),
+                Cell::from(""),
+            ]
+        }
+        Item::Podcast(p) => {
+            let detail = match (&p.last_error, p.episodes) {
+                (Some(e), 0) => {
+                    Span::styled(format!("feed error: {e}"), Style::default().fg(t.copper))
+                }
+                (_, 0) => Span::styled("not fetched yet", dim),
+                (_, n) => Span::styled(format!("{} new of {n}", p.unplayed), muted),
+            };
+            vec![
+                Cell::from(" "),
+                Cell::from(""),
+                Cell::from(Span::styled(p.title.clone(), text)),
+                Cell::from(Span::styled(p.author.clone().unwrap_or_default(), muted)),
+                Cell::from(""),
+                Cell::from(detail),
+            ]
+        }
+        Item::Episode(e) => {
+            let now = app.snap.track.as_ref().and_then(|t| t.episode) == Some(e.id);
+            let dl = app.pod.as_ref().map(|p| p.status());
+            let downloading = dl
+                .as_ref()
+                .and_then(|d| d.downloading)
+                .filter(|d| d.0 == e.id);
+            let queued = dl.as_ref().is_some_and(|d| d.queued.contains(&e.id));
+            let date = e.published.and_then(chrono_date).unwrap_or_default();
+            let progress = if let Some((_, done, total)) = downloading {
+                match total {
+                    Some(t) if t > 0 => format!("↓ {}%", done * 100 / t),
+                    _ => format!("↓ {} MB", done / 1_000_000),
+                }
+            } else if queued {
+                "↓ waiting".into()
+            } else if e.played {
+                "played".into()
+            } else if e.position > std::time::Duration::from_secs(10) {
+                match e.duration {
+                    Some(d) if d > e.position => format!("{} left", fmt_duration(d - e.position)),
+                    _ => format!("at {}", fmt_duration(e.position)),
+                }
+            } else {
+                "new".into()
+            };
+            let style = if now {
+                Style::default()
+                    .fg(t.verdigris)
+                    .add_modifier(Modifier::BOLD)
+            } else if e.played {
+                muted
+            } else {
+                text
+            };
+            vec![
+                Cell::from(Span::styled(
+                    if now {
+                        "▶"
+                    } else if e.download.is_some() {
+                        "●"
+                    } else {
+                        " "
+                    },
+                    Style::default().fg(t.verdigris),
+                )),
+                Cell::from(""),
+                Cell::from(Span::styled(e.title.clone(), style)),
+                Cell::from(Span::styled(date, muted)),
+                Cell::from(Span::styled(
+                    progress,
+                    if downloading.is_some() {
+                        Style::default().fg(t.verdigris)
+                    } else {
+                        muted
+                    },
+                )),
+                Cell::from(Span::styled(
+                    e.duration.map(fmt_duration).unwrap_or_default(),
+                    muted,
+                )),
+            ]
+        }
         Item::Header(h) => vec![
             Cell::from(""),
             Cell::from(""),
@@ -744,11 +904,21 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
                 info.display_title(),
                 Style::default().fg(t.text).add_modifier(Modifier::BOLD),
             ));
-            for part in [&info.artist, &info.album].into_iter().flatten() {
-                left.push(Span::styled(
-                    format!(" · {part}"),
-                    Style::default().fg(t.muted),
-                ));
+            if info.is_live() {
+                // Station name, then what's on.
+                if let Some(now) = &s.live_title {
+                    left.push(Span::styled(
+                        format!(" · {now}"),
+                        Style::default().fg(t.text),
+                    ));
+                }
+            } else {
+                for part in [&info.artist, &info.album].into_iter().flatten() {
+                    left.push(Span::styled(
+                        format!(" · {part}"),
+                        Style::default().fg(t.muted),
+                    ));
+                }
             }
         }
         None => left.push(Span::styled(
@@ -756,11 +926,37 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(t.muted),
         )),
     }
-    if s.buffering {
+    if let Some(r) = &s.reconnect {
+        let secs =
+            r.at.saturating_duration_since(std::time::Instant::now())
+                .as_secs();
+        left.push(Span::styled(
+            format!(
+                "  connection lost, retrying in {secs} s (attempt {})",
+                r.attempt
+            ),
+            Style::default().fg(t.copper),
+        ));
+    } else if s.buffering {
         left.push(Span::styled("  buffering", Style::default().fg(t.copper)));
     }
 
     let mut right = Vec::new();
+    if let Some(info) = s
+        .track
+        .as_ref()
+        .filter(|i| i.kind == patina_core::track::MediaKind::Podcast)
+        && ((s.podcast_tempo - 1.0).abs() > 0.01 || s.podcast_trim)
+    {
+        let mut tag = format!(" {:.1}x", s.podcast_tempo);
+        if s.podcast_trim {
+            tag.push_str(" trim");
+        }
+        tag.push(' ');
+        let _ = info;
+        right.push(Span::styled(tag, Style::default().fg(t.copper)));
+        right.push(Span::raw(" "));
+    }
     if let Some(info) = &s.track {
         let badge = info.badge();
         if !badge.is_empty() {
@@ -796,10 +992,11 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(" "),
     ];
     let elapsed = fmt_duration(s.position);
-    let remaining = s
-        .duration
-        .map(|d| format!("-{}", fmt_duration(d.saturating_sub(s.position))))
-        .unwrap_or_else(|| "--:--".into());
+    let remaining = match s.duration {
+        Some(d) => format!("-{}", fmt_duration(d.saturating_sub(s.position))),
+        None if s.live => String::new(),
+        None => "--:--".into(),
+    };
     let vol_label = if s.muted {
         " mute".to_string()
     } else {
@@ -827,10 +1024,18 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         Some(d) if !d.is_zero() => (s.position.as_secs_f64() / d.as_secs_f64()).clamp(0.0, 1.0),
         _ => 0.0,
     };
-    f.render_widget(
-        Paragraph::new(bar_line(seek.width, frac, t.verdigris, t.wave_raw)),
-        seek,
-    );
+    if s.live {
+        // No length and no seeking: a plain label instead of a bar.
+        f.render_widget(
+            Paragraph::new(Span::styled(" live", Style::default().fg(t.verdigris))),
+            seek,
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(bar_line(seek.width, frac, t.verdigris, t.wave_raw)),
+            seek,
+        );
+    }
     f.render_widget(
         Paragraph::new(Span::styled(
             format!(" {remaining}"),
@@ -1015,5 +1220,31 @@ fn truncate(s: &str, w: usize) -> String {
         let mut out: String = s.chars().take(w - 1).collect();
         out.push('…');
         out
+    }
+}
+
+fn chrono_date(ts: i64) -> Option<String> {
+    let days = ts.div_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm),
+    // to avoid pulling a date crate into the TUI for one column.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn dates() {
+        assert_eq!(super::chrono_date(0).unwrap(), "1970-01-01");
+        assert_eq!(super::chrono_date(1_791_021_600).unwrap(), "2026-10-03");
     }
 }
