@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # 24.04 rather than 22.04: the decoder uses FFmpeg's channel layout
+    # API from 5.1, and 22.04 ships FFmpeg 4.4.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang ffmpeg libmp3lame0 \
+            libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
+            libavfilter-dev libavdevice-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
+
+      - name: Install Rust (latest stable)
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      # No pinned versions: pull the newest compatible crates on every run.
+      - name: Refresh lockfile
+        run: cargo update
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy without PipeWire
+        run: cargo clippy -p patina-core --no-default-features -- -D warnings
+
+      - name: Tests (includes the gapless and seek checks)
+        run: cargo test --all
+
+      - name: Build TUI
+        run: cargo build --release -p patina-tui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patinaplayer-tui-x86_64
+          path: target/release/patinaplayer-tui
