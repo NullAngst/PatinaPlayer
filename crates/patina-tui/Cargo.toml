@@ -1,0 +1,19 @@
+[package]
+name = "patina-tui"
+description = "PatinaPlayer terminal frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "patinaplayer-tui"
+path = "src/main.rs"
+
+[dependencies]
+patina-core = { path = "../patina-core" }
+ratatui = "0.30"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"

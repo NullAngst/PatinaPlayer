@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/patina-core", "crates/patina-tui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/NullAngst/PatinaPlayer"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

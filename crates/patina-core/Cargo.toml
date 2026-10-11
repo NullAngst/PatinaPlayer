@@ -1,0 +1,20 @@
+[package]
+name = "patina-core"
+description = "Shared core for PatinaPlayer: audio engine, queue, playback state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["pipewire"]
+pipewire = ["dep:pipewire"]
+
+[dependencies]
+ffmpeg-next = "9"
+pipewire = { version = "0.10", optional = true }
+alsa = "0.12"
+rtrb = "0.4"
+crossbeam-channel = "0.5"
+thiserror = "2"
+log = "0.4"
