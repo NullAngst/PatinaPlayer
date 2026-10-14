@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/patina-core", "crates/patina-tui"]
+members = ["crates/patina-core", "crates/patina-tui", "crates/patina-gui"]
 
 [workspace.package]
 version = "0.1.0"

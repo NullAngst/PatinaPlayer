@@ -1,0 +1,1619 @@
+// PatinaPlayer desktop UI. Layout follows the design mockup: sidebar,
+// header with back/forward and search, the open view, an optional queue
+// panel, and the bottom bar. All state and every action lives in Rust
+// (patina-core's Browser); this file only draws and forwards input.
+
+import { ListView, ScrollView } from "std-widgets.slint";
+
+import "fonts/Inter-Regular.otf";
+import "fonts/Inter-Medium.otf";
+import "fonts/Inter-SemiBold.otf";
+import "fonts/Inter-Bold.otf";
+import "fonts/NotoSerif-Bold.ttf";
+import "fonts/JetBrainsMono-Regular.ttf";
+
+// ----- Palette (Runout) -----
+
+export global P {
+    out property <color> bg: #0e1917;
+    out property <color> surface: #132220;
+    out property <color> raised: #172a27;
+    out property <color> border: #2a3d39;
+    out property <color> text: #e6ece9;
+    out property <color> muted: #8fa39d;
+    out property <color> verdigris: #5fb8a5;
+    out property <color> verdigris-dim: #2f5f55;
+    out property <color> copper: #d4884a;
+    out property <color> copper-dim: #5a3a22;
+    out property <color> wave: #4a5f5a;
+    out property <color> on-accent: #0b1513;
+    out property <color> playing-bg: #5fb8a51f;
+    out property <string> serif: "Noto Serif";
+    out property <string> mono: "JetBrains Mono";
+}
+
+// ----- Data from Rust -----
+
+export struct SideItem {
+    // 0 section, 1 source, 2 label, 3 gap
+    kind: int,
+    label: string,
+    count: string,
+    icon: string,
+    active: bool,
+    // sources: 0 watching, 1 scanning, 2 missing, 3 idle
+    dot: int,
+}
+
+export struct Row {
+    // 0 track, 1 album, 2 artist, 3 folder, 4 genre, 5 playlist, 6 station,
+    // 7 podcast, 8 episode, 9 header, 10 info, 11 missing file
+    kind: int,
+    num: string,
+    title: string,
+    sub: string,
+    meta: string,
+    right: string,
+    playing: bool,
+    dim: bool,
+    warn: bool,
+    selectable: bool,
+    art: image,
+    has-art: bool,
+    downloaded: bool,
+}
+
+export struct QueueRow {
+    title: string,
+    sub: string,
+    playing: bool,
+    failed: bool,
+    art: image,
+    has-art: bool,
+}
+
+export struct Hero {
+    show: bool,
+    kicker: string,
+    title: string,
+    sub: string,
+    meta: string,
+    art: image,
+    has-art: bool,
+}
+
+// ----- Small parts -----
+
+// Stroke icon from SVG path data on a 24-unit grid.
+component Icon inherits Path {
+    in property <string> d;
+    in property <length> size: 16px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: d;
+    stroke: P.muted;
+    stroke-width: 1.8px;
+    fill: transparent;
+}
+
+component FilledIcon inherits Path {
+    in property <string> d;
+    in property <length> size: 16px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: d;
+    fill: P.muted;
+    stroke-width: 0px;
+}
+
+export global Icons {
+    out property <string> folders: "M3 6h7l2 2h9v11H3z";
+    out property <string> artists: "M8 8a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M4 21c1-4 4-6 8-6s7 2 8 6";
+    out property <string> albums: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0";
+    out property <string> songs: "M9 18V5l11-2v13M3 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M14 16a3 3 0 1 0 6 0a3 3 0 1 0 -6 0";
+    out property <string> genres: "M3 12l9-9 9 9-9 9z";
+    out property <string> playlists: "M4 7h11M4 12h11M4 17h7M18 14v6M15 17h6";
+    out property <string> radio: "M10 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M8 8a6 6 0 0 0 0 8M16 8a6 6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14";
+    out property <string> podcasts: "M12 3a3 3 0 0 0 -3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0 -3 -3M5 11a7 7 0 0 0 14 0M12 18v3";
+    out property <string> queue: "M3 7h18M3 12h18M3 17h12";
+    out property <string> downloads: "M12 3v12M7 10l5 5 5-5M4 20h16";
+    out property <string> settings: "M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1";
+    out property <string> back: "M15 6l-6 6 6 6";
+    out property <string> forward: "M9 6l6 6-6 6";
+    out property <string> search: "M4 11a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M20 20l-4-4";
+    out property <string> shuffle: "M3 7h3l9 10h6M3 17h3l3-3.3M15 7h6M18 4l3 3-3 3M18 14l3 3-3 3";
+    out property <string> repeat: "M4 11V9a3 3 0 0 1 3-3h12l-3-3M20 13v2a3 3 0 0 1-3 3H5l3 3";
+    out property <string> prev: "M6 5h2v14H6zM20 5v14L9 12z";
+    out property <string> next: "M16 5h2v14h-2zM4 5v14l11-7z";
+    out property <string> play: "M7 4l13 8-13 8z";
+    out property <string> pause: "M5.5 4h5v16h-5zM13.5 4h5v16h-5z";
+    out property <string> volume: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11";
+    out property <string> muted: "M4 9h4l5-4v14l-5-4H4zM17 9l5 6M22 9l-5 6";
+    out property <string> queue-panel: "M3 6h13M3 11h13M3 16h8M18 14v6l4-3z";
+    out property <string> plus: "M12 5v14M5 12h14";
+    out property <string> close: "M6 6l12 12M18 6L6 18";
+    out property <string> disc: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0";
+    out property <string> output: "M6 3h12v18H6zM9 14a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M12 7h0";
+}
+
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> filled: false;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <length> icon-size: 18px;
+    in property <string> tip;
+    callback clicked;
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: ta.has-hover && enabled ? P.border : transparent;
+    accessible-role: button;
+    accessible-label: tip;
+    accessible-action-default => { if enabled { clicked(); } }
+    if !filled: Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        d: icon;
+        size: icon-size;
+        stroke: !enabled ? P.border : (active ? P.verdigris : (ta.has-hover ? P.text : P.muted));
+    }
+    if filled: FilledIcon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        d: icon;
+        size: icon-size;
+        fill: !enabled ? P.border : (active ? P.verdigris : (ta.has-hover ? P.text : P.muted));
+    }
+    ta := TouchArea {
+        mouse-cursor: enabled ? pointer : default;
+        clicked => { if enabled { root.clicked(); } }
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> active: false;
+    in property <bool> danger: false;
+    in property <bool> primary: false;
+    in property <length> h: 32px;
+    callback clicked;
+    height: h;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: primary ? P.verdigris : (danger ? P.copper-dim : (active ? P.verdigris-dim : P.border));
+    background: primary ? (ta.has-hover ? #6fc8b5 : P.verdigris) : (ta.has-hover ? #1d332f : P.raised);
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { clicked(); }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 7px;
+        alignment: center;
+        if icon != "": Rectangle {
+            width: 15px;
+            Icon {
+            y: (parent.height - self.height) / 2;
+            d: root.icon;
+            size: 15px;
+            stroke: primary ? P.on-accent : (danger ? P.copper : (active ? P.verdigris : P.text));
+            }
+        }
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            font-size: 12.5px;
+            font-weight: primary ? 600 : 400;
+            color: primary ? P.on-accent : (danger ? P.copper : (active ? P.verdigris : P.text));
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Badge inherits Rectangle {
+    in property <string> text;
+    in property <color> fg: P.muted;
+    height: 20px;
+    width: t.preferred-width + 16px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: P.border;
+    t := Text {
+        text: root.text;
+        font-family: P.mono;
+        font-size: 11px;
+        color: root.fg;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+component Cover inherits Rectangle {
+    in property <image> art;
+    in property <bool> has-art;
+    in property <length> radius: 6px;
+    border-radius: radius;
+    background: P.raised;
+    border-width: has-art ? 0px : 1px;
+    border-color: P.border;
+    clip: true;
+    if has-art: Image {
+        source: art;
+        width: parent.width;
+        height: parent.height;
+        image-fit: cover;
+    }
+    if !has-art: Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        d: Icons.disc;
+        size: min(parent.width, parent.height) * 0.35;
+        stroke: P.wave;
+        stroke-width: 1.2px;
+    }
+}
+
+// Seek or volume bar. While dragging, it shows the drag position and only
+// reports on release when `live` is off, so a seek happens once.
+component Bar inherits Rectangle {
+    in property <float> value;
+    in property <bool> enabled: true;
+    in property <bool> live: false;
+    in property <color> fill: P.verdigris;
+    in property <length> knob: 14px;
+    in property <string> label;
+    callback changed(float);
+    property <float> drag: 0;
+    property <bool> dragging: ta.pressed && enabled;
+    property <float> shown: dragging ? drag : value;
+    height: 18px;
+    accessible-role: slider;
+    accessible-label: label;
+    accessible-value: round(value * 100) + "%";
+    Rectangle {
+        y: (parent.height - 6px) / 2;
+        height: 6px;
+        border-radius: 3px;
+        background: enabled ? P.wave : P.border;
+        Rectangle {
+            x: 0;
+            width: parent.width * clamp(root.shown, 0, 1);
+            border-radius: 3px;
+            background: root.enabled ? root.fill : transparent;
+        }
+    }
+    if enabled && (ta.has-hover || dragging): Rectangle {
+        x: parent.width * clamp(root.shown, 0, 1) - root.knob / 2;
+        y: (parent.height - root.knob) / 2;
+        width: root.knob;
+        height: root.knob;
+        border-radius: root.knob / 2;
+        background: P.text;
+    }
+    ta := TouchArea {
+        mouse-cursor: enabled ? pointer : default;
+        pointer-event(e) => {
+            if !enabled { return; }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.drag = clamp(self.mouse-x / self.width, 0, 1);
+                if root.live { root.changed(root.drag); }
+            }
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.left && !root.live {
+                root.changed(root.drag);
+            }
+        }
+        moved => {
+            if !enabled { return; }
+            root.drag = clamp(self.mouse-x / self.width, 0, 1);
+            if root.live { root.changed(root.drag); }
+        }
+        scroll-event(e) => {
+            if !enabled || !root.live { return reject; }
+            root.changed(clamp(root.value + (e.delta-y > 0 ? 0.05 : -0.05), 0, 1));
+            accept
+        }
+    }
+}
+
+component Field inherits Rectangle {
+    in property <string> label;
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> autofocus: false;
+    callback accepted;
+    callback edited(string);
+    public function focus-field() { ti.focus(); }
+    init => { if autofocus { ti.focus(); } }
+    height: 58px;
+    VerticalLayout {
+        spacing: 6px;
+        Text { text: root.label; font-size: 12px; color: P.muted; }
+        Rectangle {
+            height: 36px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: ti.has-focus ? P.verdigris-dim : P.border;
+            background: P.bg;
+            ti := TextInput {
+                x: 10px;
+                width: parent.width - 20px;
+                text <=> root.text;
+                color: P.text;
+                selection-background-color: P.verdigris-dim;
+                vertical-alignment: center;
+                font-size: 13px;
+                single-line: true;
+                accepted => { root.accepted(); }
+                edited => { root.edited(self.text); }
+            }
+            if ti.text == "": Text {
+                x: 10px;
+                text: root.placeholder;
+                color: P.wave;
+                vertical-alignment: center;
+                font-size: 13px;
+            }
+        }
+    }
+}
+
+// ----- Rows -----
+
+component ListRow inherits Rectangle {
+    // Rows are placed by the list, so they take its width.
+    in property <Row> item;
+    in property <bool> selected;
+    in property <bool> focused;
+    in property <bool> album-tracks;
+    callback select;
+    callback activate;
+    callback act(string);
+    height: item.kind == 9 ? 34px : 40px;
+    background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : #15262380) : (ta.has-hover && item.selectable ? #15262399 : transparent));
+    border-radius: 6px;
+
+    // Header rows (search groups).
+    if item.kind == 9: Text {
+        x: 12px;
+        y: parent.height - self.height - 4px;
+        text: item.title;
+        color: P.verdigris;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.9px;
+    }
+
+    if item.kind != 9: HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 12px;
+        spacing: 12px;
+        // Number, play marker or kind glyph.
+        Rectangle {
+            width: 32px;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: item.playing ? "▶" : item.num;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                font-family: P.mono;
+                font-size: 12px;
+                color: item.playing ? P.verdigris : P.wave;
+            }
+        }
+        if item.kind == 1 || item.kind == 3: Rectangle {
+            width: 30px;
+            Cover {
+                y: (parent.height - self.height) / 2;
+                width: 30px;
+                height: 30px;
+                radius: 4px;
+                art: item.art;
+                has-art: item.has-art;
+            }
+        }
+        Text {
+            // Settings rows give the value most of the room.
+            horizontal-stretch: item.kind == 10 ? 1.2 : 4;
+            preferred-width: 0px;
+            min-width: 120px;
+            text: item.kind == 11 ? "missing: " + item.title : item.title;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: 13px;
+            font-weight: item.playing ? 600 : 400;
+            color: item.warn ? P.copper : (item.playing ? P.verdigris : (item.dim ? P.muted : P.text));
+        }
+        if item.sub != "" || item.kind == 0: Text {
+            horizontal-stretch: item.kind == 10 ? 5 : 2.5;
+            preferred-width: 0px;
+            min-width: 80px;
+            text: item.sub;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: 12.5px;
+            color: item.warn ? P.copper : (item.playing ? P.verdigris : P.muted);
+        }
+        if item.meta != "" || item.kind == 0: Text {
+            horizontal-stretch: 2.5;
+            preferred-width: 0px;
+            min-width: 60px;
+            text: item.meta;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: 12.5px;
+            color: item.playing ? P.verdigris : P.muted;
+        }
+        Text {
+            min-width: 64px;
+            text: item.right;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            font-family: P.mono;
+            font-size: 11.5px;
+            color: P.muted;
+        }
+    }
+
+    cm := ContextMenuArea {
+        enabled: item.selectable;
+        Menu {
+            // Things that play.
+            if item.kind == 0 || item.kind == 1 || item.kind == 2 || item.kind == 3 || item.kind == 4 || item.kind == 5 || item.kind == 6 || item.kind == 7 || item.kind == 8: MenuItem {
+                title: item.kind == 8 ? "Play (resume)" : "Play";
+                activated => { root.act("play"); }
+            }
+            if item.kind != 9 && item.kind != 10 && item.kind != 11: MenuItem {
+                title: "Play next";
+                activated => { root.act("next"); }
+            }
+            if item.kind != 9 && item.kind != 10 && item.kind != 11: MenuItem {
+                title: "Add to queue";
+                activated => { root.act("queue"); }
+            }
+            if item.kind <= 5: MenuItem {
+                title: "Add to playlist…";
+                activated => { root.act("playlist"); }
+            }
+            // Playlist items.
+            if (item.kind == 0 || item.kind == 11) && root.album-tracks == false: MenuItem {
+                title: "Remove from this playlist";
+                enabled: item.dim == false;
+                activated => { root.act("pl-remove"); }
+            }
+            // Stations.
+            if item.kind == 6: MenuSeparator {}
+            if item.kind == 6: MenuItem { title: "Edit…"; activated => { root.act("st-edit"); } }
+            if item.kind == 6: MenuItem { title: "Test"; activated => { root.act("st-test"); } }
+            if item.kind == 6: MenuItem { title: "Move up"; activated => { root.act("st-up"); } }
+            if item.kind == 6: MenuItem { title: "Move down"; activated => { root.act("st-down"); } }
+            if item.kind == 6: MenuItem { title: "Delete…"; activated => { root.act("st-delete"); } }
+            // Podcasts and episodes.
+            if item.kind == 7: MenuSeparator {}
+            if item.kind == 7: MenuItem { title: "Unsubscribe…"; activated => { root.act("unsubscribe"); } }
+            if item.kind == 8: MenuSeparator {}
+            if item.kind == 8: MenuItem {
+                title: item.downloaded ? "Delete download" : "Download";
+                activated => { root.act(item.downloaded ? "dl-delete" : "download"); }
+            }
+            if item.kind == 8: MenuItem {
+                title: item.dim ? "Mark as not played" : "Mark as played";
+                activated => { root.act("played"); }
+            }
+            // Playlists.
+            if item.kind == 5: MenuSeparator {}
+            if item.kind == 5: MenuItem { title: "Rename…"; activated => { root.act("pl-rename"); } }
+            if item.kind == 5: MenuItem { title: "Delete…"; activated => { root.act("pl-delete"); } }
+        }
+        ta := TouchArea {
+            mouse-cursor: item.selectable ? pointer : default;
+            // The TouchArea sees the press before the menu area does, so
+            // a right press opens the menu from here.
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && item.selectable {
+                    root.select();
+                    if e.button == PointerEventButton.right {
+                        cm.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                }
+            }
+            double-clicked => {
+                if item.selectable { root.activate(); }
+            }
+        }
+    }
+}
+
+component AlbumTile inherits Rectangle {
+    in property <Row> item;
+    in property <bool> selected;
+    callback select;
+    callback activate;
+    callback act(string);
+    border-radius: 8px;
+    background: selected ? P.raised : (ta.has-hover ? #15262399 : transparent);
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        Cover {
+            height: self.width;
+            art: item.art;
+            has-art: item.has-art;
+            radius: 6px;
+        }
+        Text {
+            text: item.title;
+            overflow: elide;
+            font-size: 13px;
+            font-weight: 600;
+            color: item.playing ? P.verdigris : P.text;
+        }
+        Text {
+            text: item.sub;
+            overflow: elide;
+            font-size: 12px;
+            color: P.muted;
+        }
+    }
+    tcm := ContextMenuArea {
+        Menu {
+            MenuItem { title: "Play"; activated => { root.act("play"); } }
+            MenuItem { title: "Play next"; activated => { root.act("next"); } }
+            MenuItem { title: "Add to queue"; activated => { root.act("queue"); } }
+            MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
+        }
+        ta := TouchArea {
+            mouse-cursor: pointer;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.select();
+                    if e.button == PointerEventButton.right {
+                        tcm.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                }
+            }
+            double-clicked => { root.activate(); }
+        }
+    }
+}
+
+// ----- Main window -----
+
+export component AppWindow inherits Window {
+    title: "PatinaPlayer";
+    icon: @image-url("../../../assets/patinaplayer.png");
+    preferred-width: 1360px;
+    preferred-height: 860px;
+    min-width: 960px;
+    min-height: 600px;
+    background: P.bg;
+    default-font-family: "Inter";
+    default-font-size: 13px;
+
+    // Sidebar
+    in property <[SideItem]> side;
+    in property <int> side-sel: -1;
+    callback side-clicked(int);
+
+    // Header
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    in-out property <string> search-text;
+    callback back;
+    callback forward;
+    callback search-edited(string);
+    callback search-cancel;
+
+    // The open view
+    in property <[string]> crumbs;
+    in property <string> view-title;
+    in property <string> view-sub;
+    in property <string> empty-text;
+    // 0 list, 1 album grid, 2 queue
+    in property <int> layout;
+    in property <[Row]> rows;
+    in property <[string]> columns;
+    // Rows in this level carry a cover thumbnail (albums, folders).
+    in property <bool> covers;
+    in property <int> selected: -1;
+    in property <bool> album-tracks;
+    in property <Hero> hero;
+    in property <[string]> actions;
+    in property <[string]> action-labels;
+    callback row-select(int);
+    callback row-activate(int);
+    callback row-act(int, string);
+    callback view-action(string);
+    callback crumb-clicked(int);
+
+    // Queue (as a view and as the side panel)
+    in property <[QueueRow]> queue;
+    in property <int> queue-sel: -1;
+    in property <int> queue-current: -1;
+    in property <string> queue-summary;
+    in-out property <bool> queue-panel: false;
+    callback queue-select(int);
+    callback queue-activate(int);
+    callback queue-act(int, string);
+    callback queue-save;
+    callback queue-clear;
+
+    // Now playing
+    in property <string> np-title;
+    in property <string> np-sub;
+    in property <image> np-art;
+    in property <bool> np-has-art;
+    in property <bool> playing;
+    in property <bool> live;
+    in property <bool> has-track;
+    in property <float> position;
+    in property <string> elapsed;
+    in property <string> remaining;
+    in property <string> badge;
+    in property <string> output-label;
+    in property <string> speed-label;
+    // Narrow window: fewer things in the bottom bar.
+    in property <bool> compact;
+    in property <string> status-line;
+    in property <bool> status-warn;
+    in property <bool> shuffle;
+    // 0 off, 1 all, 2 one
+    in property <int> repeat;
+    in property <float> volume;
+    in property <bool> muted;
+    callback play-pause;
+    callback prev;
+    callback next;
+    callback toggle-shuffle;
+    callback cycle-repeat;
+    callback seek(float);
+    callback set-volume(float);
+    callback toggle-mute;
+    callback toggle-queue;
+    callback speed-clicked;
+
+    // Toast
+    in property <string> toast;
+    in property <bool> toast-error;
+
+    // Dialogs: 0 none, 1 text form, 2 pick playlist, 3 confirm, 4 help
+    in-out property <int> dialog;
+    in property <string> dlg-title;
+    in property <string> dlg-label1;
+    in property <string> dlg-label2;
+    in-out property <string> dlg-text1;
+    in-out property <string> dlg-text2;
+    in property <bool> dlg-two-fields;
+    in property <string> dlg-ok;
+    in property <string> dlg-message;
+    in property <[string]> dlg-items;
+    callback dlg-accept;
+    callback dlg-pick(int);
+    callback dlg-cancel;
+
+    // Keys not taken by a text field.
+    callback key(string, bool, bool, bool) -> bool;
+
+    public function focus-root() { keys.focus(); }
+    public function focus-search() { search-input.focus(); search-input.select-all(); }
+    public function scroll-to(index: int) {
+        if layout == 0 {
+            if index * 40px < list.content-y * -1 {
+                list.content-y = -index * 40px;
+            } else if (index + 1) * 40px > -list.content-y + list.visible-height {
+                list.content-y = -((index + 1) * 40px - list.visible-height);
+            }
+        }
+        if layout == 2 {
+            if index * 52px < qlist.content-y * -1 {
+                qlist.content-y = -index * 52px;
+            } else if (index + 1) * 52px > -qlist.content-y + qlist.visible-height {
+                qlist.content-y = -((index + 1) * 52px - qlist.visible-height);
+            }
+        }
+    }
+    public function scroll-top() {
+        list.content-y = 0;
+        grid.content-y = 0;
+    }
+
+    keys := FocusScope {
+        key-pressed(e) => {
+            if root.dialog != 0 {
+                if e.text == Key.Escape { root.dlg-cancel(); return accept; }
+                return reject;
+            }
+            if root.key(e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt) {
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                vertical-stretch: 1;
+
+                // ----- Sidebar -----
+                Rectangle {
+                    width: 228px;
+                    background: P.surface;
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: P.border;
+                    }
+                    VerticalLayout {
+                        padding: 12px;
+                        padding-top: 16px;
+                        spacing: 2px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-bottom: 14px;
+                            Text {
+                                text: "Patina";
+                                font-family: P.serif;
+                                font-weight: 700;
+                                font-size: 20px;
+                                color: P.text;
+                            }
+                            Text {
+                                text: "Player";
+                                font-family: P.serif;
+                                font-weight: 700;
+                                font-size: 20px;
+                                color: P.verdigris;
+                            }
+                            Rectangle {}
+                        }
+                        Flickable {
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 2px;
+                                for item[i] in root.side: Rectangle {
+                                    height: item.kind == 3 ? 12px : (item.kind == 2 ? 28px : 34px);
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: item.active ? P.verdigris-dim : transparent;
+                                    background: item.active ? P.raised : (sta.has-hover && item.kind <= 1 ? P.raised : transparent);
+                                    if item.kind == 2: Text {
+                                        x: 10px;
+                                        y: parent.height - self.height - 4px;
+                                        text: item.label;
+                                        font-size: 11px;
+                                        letter-spacing: 0.9px;
+                                        color: P.muted;
+                                    }
+                                    if item.kind <= 1: HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 10px;
+                                        if item.kind == 0: Rectangle {
+                                            width: 16px;
+                                            Icon {
+                                                y: (parent.height - self.height) / 2;
+                                                d: item.icon;
+                                                stroke: item.active ? P.verdigris : (sta.has-hover ? P.text : P.muted);
+                                            }
+                                        }
+                                        if item.kind == 1: Rectangle {
+                                            width: 16px;
+                                            Rectangle {
+                                                x: 4px;
+                                                y: (parent.height - self.height) / 2;
+                                                width: 8px;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: item.dot == 0 ? P.verdigris : (item.dot == 1 ? P.verdigris-dim : (item.dot == 2 ? P.copper : P.muted));
+                                            }
+                                        }
+                                        Text {
+                                            text: item.label;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            font-size: 13px;
+                                            color: item.active ? P.verdigris : (sta.has-hover ? P.text : P.muted);
+                                        }
+                                        Text {
+                                            text: item.count;
+                                            vertical-alignment: center;
+                                            font-family: P.mono;
+                                            font-size: 11px;
+                                            color: item.dot == 2 ? P.copper : P.muted;
+                                        }
+                                    }
+                                    sta := TouchArea {
+                                        enabled: item.kind <= 1;
+                                        mouse-cursor: item.kind <= 1 ? pointer : default;
+                                        clicked => {
+                                            root.side-clicked(i);
+                                            keys.focus();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ----- Main column -----
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    // Header: back, forward, search
+                    Rectangle {
+                        height: 61px;
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: P.border;
+                        }
+                        HorizontalLayout {
+                            padding-left: 24px;
+                            padding-right: 24px;
+                            spacing: 8px;
+                            alignment: start;
+                            IconButton {
+                                y: (parent.height - self.height) / 2;
+                                icon: Icons.back;
+                                tip: "Back";
+                                enabled: root.can-back;
+                                clicked => { root.back(); keys.focus(); }
+                            }
+                            IconButton {
+                                y: (parent.height - self.height) / 2;
+                                icon: Icons.forward;
+                                tip: "Forward";
+                                enabled: root.can-forward;
+                                clicked => { root.forward(); keys.focus(); }
+                            }
+                            Rectangle {
+                                width: 480px;
+                                height: 36px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: search-input.has-focus ? P.verdigris-dim : P.border;
+                                background: P.bg;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    Icon {
+                                        y: (parent.height - self.height) / 2;
+                                        d: Icons.search;
+                                    }
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        search-input := TextInput {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            text <=> root.search-text;
+                                            single-line: true;
+                                            vertical-alignment: center;
+                                            color: P.text;
+                                            selection-background-color: P.verdigris-dim;
+                                            edited => { root.search-edited(self.text); }
+                                            key-pressed(e) => {
+                                                if e.text == Key.Escape {
+                                                    root.search-cancel();
+                                                    keys.focus();
+                                                    return accept;
+                                                }
+                                                if e.text == Key.UpArrow || e.text == Key.DownArrow || e.text == Key.Return {
+                                                    if root.key(e.text, false, false, false) { return accept; }
+                                                }
+                                                reject
+                                            }
+                                        }
+                                        if search-input.text == "": Text {
+                                            x: 0;
+                                            width: parent.width;
+                                            text: "Search artists, albums, songs";
+                                            color: P.wave;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 18px;
+                                        height: 18px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: P.border;
+                                        Text {
+                                            text: "/";
+                                            font-family: P.mono;
+                                            font-size: 10.5px;
+                                            color: P.muted;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // View body
+                    Rectangle {
+                        vertical-stretch: 1;
+
+                        // Album hero and track list.
+                        Rectangle {
+                        visible: root.layout == 0;
+                        VerticalLayout {
+                            padding-left: 32px;
+                            padding-right: 32px;
+                            padding-top: root.hero.show ? 28px : 20px;
+                            spacing: 0px;
+
+                            if root.hero.show: HorizontalLayout {
+                                spacing: 28px;
+                                padding-bottom: 24px;
+                                Cover {
+                                    width: 200px;
+                                    height: 200px;
+                                    art: root.hero.art;
+                                    has-art: root.hero.has-art;
+                                    radius: 8px;
+                                }
+                                VerticalLayout {
+                                    alignment: end;
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.hero.kicker;
+                                        font-size: 11px;
+                                        letter-spacing: 0.9px;
+                                        color: P.muted;
+                                    }
+                                    Text {
+                                        text: root.hero.title;
+                                        font-family: P.serif;
+                                        font-weight: 700;
+                                        font-size: 40px;
+                                        overflow: elide;
+                                        color: P.text;
+                                    }
+                                    Text { text: root.hero.sub; font-size: 15px; color: P.text; overflow: elide; }
+                                    Text { text: root.hero.meta; font-size: 12.5px; color: P.muted; overflow: elide; }
+                                    HorizontalLayout {
+                                        padding-top: 12px;
+                                        spacing: 8px;
+                                        alignment: start;
+                                        for a[i] in root.actions: Chip {
+                                            h: 40px;
+                                            text: root.action-labels[i];
+                                            primary: i == 0;
+                                            icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "queue" ? Icons.queue : (a == "playlist" ? Icons.playlists : "")));
+                                            clicked => { root.view-action(a); keys.focus(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Title row for everything else.
+                            if !root.hero.show: HorizontalLayout {
+                                padding-bottom: 14px;
+                                spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    if root.crumbs.length > 1: HorizontalLayout {
+                                        spacing: 6px;
+                                        alignment: start;
+                                        for c[i] in root.crumbs: HorizontalLayout {
+                                            spacing: 6px;
+                                            if i > 0: Text { text: "›"; color: P.wave; font-size: 12px; }
+                                            Text {
+                                                text: c;
+                                                font-size: 12px;
+                                                color: i == root.crumbs.length - 1 ? P.text : (cta.has-hover ? P.text : P.muted);
+                                                cta := TouchArea {
+                                                    mouse-cursor: i < root.crumbs.length - 1 ? pointer : default;
+                                                    clicked => { root.crumb-clicked(i); keys.focus(); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.view-title;
+                                        font-family: P.serif;
+                                        font-weight: 700;
+                                        font-size: 28px;
+                                        color: P.text;
+                                        overflow: elide;
+                                    }
+                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: end;
+                                    for a[i] in root.actions: Chip {
+                                        y: parent.height - self.height;
+                                        text: root.action-labels[i];
+                                        icon: a == "new" || a == "subscribe" ? Icons.plus : (a == "play" ? Icons.play : "");
+                                        primary: a == "play";
+                                        clicked => { root.view-action(a); keys.focus(); }
+                                    }
+                                }
+                            }
+
+                            // Column header.
+                            if root.columns.length > 0: Rectangle {
+                                height: 30px;
+                                Rectangle { y: parent.height - 1px; height: 1px; background: P.border; }
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 12px;
+                                    spacing: 12px;
+                                    Text { width: 32px; text: root.columns[0]; horizontal-alignment: right; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    if root.covers: Rectangle { width: 30px; }
+                                    Text { horizontal-stretch: 4; preferred-width: 0px; min-width: 120px; text: root.columns[1]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    if root.columns[2] != "": Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 80px; text: root.columns[2]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    if root.columns[3] != "": Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 60px; text: root.columns[3]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    Text { min-width: 64px; text: root.columns[4]; horizontal-alignment: right; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                }
+                            }
+
+                            Rectangle {
+                                vertical-stretch: 1;
+                                list := ListView {
+                                    for r[i] in root.layout == 0 ? root.rows : []: ListRow {
+                                        item: r;
+                                        selected: i == root.selected;
+                                        focused: keys.has-focus;
+                                        album-tracks: root.album-tracks;
+                                        select => { root.row-select(i); keys.focus(); }
+                                        activate => { root.row-activate(i); }
+                                        act(a) => { root.row-select(i); root.row-act(i, a); }
+                                    }
+                                }
+                                if root.rows.length == 0: Text {
+                                    y: 24px;
+                                    text: root.empty-text;
+                                    color: P.muted;
+                                    horizontal-alignment: center;
+                                    wrap: word-wrap;
+                                    width: min(parent.width - 40px, 520px);
+                                }
+                            }
+                        }
+                        }
+
+                        // Album grid.
+                        Rectangle {
+                        visible: root.layout == 1;
+                        VerticalLayout {
+                            padding-left: 24px;
+                            padding-right: 24px;
+                            padding-top: 20px;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-bottom: 12px;
+                                spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    if root.crumbs.length > 1: HorizontalLayout {
+                                        spacing: 6px;
+                                        alignment: start;
+                                        for c[i] in root.crumbs: HorizontalLayout {
+                                            spacing: 6px;
+                                            if i > 0: Text { text: "›"; color: P.wave; font-size: 12px; }
+                                            Text {
+                                                text: c;
+                                                font-size: 12px;
+                                                color: i == root.crumbs.length - 1 ? P.text : (gta.has-hover ? P.text : P.muted);
+                                                gta := TouchArea {
+                                                    mouse-cursor: i < root.crumbs.length - 1 ? pointer : default;
+                                                    clicked => { root.crumb-clicked(i); keys.focus(); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.view-title;
+                                        font-family: P.serif;
+                                        font-weight: 700;
+                                        font-size: 28px;
+                                        color: P.text;
+                                    }
+                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    for a[i] in root.actions: Chip {
+                                        y: parent.height - self.height;
+                                        text: root.action-labels[i];
+                                        clicked => { root.view-action(a); keys.focus(); }
+                                    }
+                                }
+                            }
+                            grid := Flickable {
+                                vertical-stretch: 1;
+                                property <int> cols: max(1, floor(self.width / 188px));
+                                property <length> cell: self.width / cols;
+                                content-height: ceil(root.rows.length / cols) * (cell + 44px);
+                                for r[i] in root.layout == 1 ? root.rows : []: AlbumTile {
+                                    x: mod(i, grid.cols) * grid.cell;
+                                    y: floor(i / grid.cols) * (grid.cell + 44px);
+                                    width: grid.cell;
+                                    height: grid.cell + 44px;
+                                    item: r;
+                                    selected: i == root.selected;
+                                    select => { root.row-select(i); keys.focus(); }
+                                    activate => { root.row-activate(i); }
+                                    act(a) => { root.row-select(i); root.row-act(i, a); }
+                                }
+                            }
+                        }
+                        }
+
+                        // Queue as the main view.
+                        Rectangle {
+                        visible: root.layout == 2;
+                        VerticalLayout {
+                            padding-left: 32px;
+                            padding-right: 32px;
+                            padding-top: 20px;
+                            HorizontalLayout {
+                                padding-bottom: 18px;
+                                spacing: 8px;
+                                VerticalLayout {
+                                    Text { text: "Queue"; font-family: P.serif; font-weight: 700; font-size: 28px; color: P.text; }
+                                    Text { text: root.queue-summary; font-size: 12.5px; color: P.muted; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Chip { y: parent.height - self.height; text: "Save as playlist"; clicked => { root.queue-save(); } }
+                                Chip { y: parent.height - self.height; text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
+                            }
+                            qlist := ListView {
+                                vertical-stretch: 1;
+                                for q[i] in root.queue: Rectangle {
+                                    height: 52px;
+                                    border-radius: 6px;
+                                    background: q.playing ? P.playing-bg : (i == root.queue-sel ? P.raised : (qta.has-hover ? #15262399 : transparent));
+                                    HorizontalLayout {
+                                        padding: 6px;
+                                        padding-right: 12px;
+                                        spacing: 12px;
+                                        Text {
+                                            width: 32px;
+                                            text: q.playing ? "▶" : (i + 1);
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                            font-family: P.mono;
+                                            font-size: 12px;
+                                            color: q.playing ? P.verdigris : P.wave;
+                                        }
+                                        Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 600 : 400; color: q.failed ? P.copper : (q.playing ? P.verdigris : P.text); }
+                                            Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
+                                        }
+                                    }
+                                    ContextMenuArea {
+                                        Menu {
+                                            MenuItem { title: "Play"; activated => { root.queue-act(i, "play"); } }
+                                            MenuItem { title: "Move up"; activated => { root.queue-act(i, "up"); } }
+                                            MenuItem { title: "Move down"; activated => { root.queue-act(i, "down"); } }
+                                            MenuItem { title: "Add to playlist…"; activated => { root.queue-act(i, "playlist"); } }
+                                            MenuSeparator {}
+                                            MenuItem { title: "Remove"; activated => { root.queue-act(i, "remove"); } }
+                                        }
+                                        qta := TouchArea {
+                                            pointer-event(e) => {
+                                                if e.kind == PointerEventKind.down { root.queue-select(i); keys.focus(); }
+                                            }
+                                            double-clicked => { root.queue-activate(i); }
+                                        }
+                                    }
+                                }
+                            }
+                            if root.queue.length == 0: Text {
+                                text: "The queue is empty. Play something, or add it with Add to queue.";
+                                color: P.muted;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        }
+                    }
+                }
+
+                // ----- Queue panel -----
+                if root.queue-panel: Rectangle {
+                    width: 300px;
+                    background: P.surface;
+                    Rectangle { width: 1px; x: 0; background: P.border; }
+                    VerticalLayout {
+                        padding-top: 16px;
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-bottom: 10px;
+                            Text { text: "Queue"; font-family: P.serif; font-weight: 700; font-size: 17px; color: P.text; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text { text: root.queue-summary; font-size: 11.5px; color: P.muted; vertical-alignment: center; }
+                        }
+                        Flickable {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 2px;
+                                for q[i] in root.queue: Rectangle {
+                                    height: 52px;
+                                    border-radius: 6px;
+                                    border-width: q.playing ? 1px : 0px;
+                                    border-color: P.verdigris-dim;
+                                    background: q.playing ? P.playing-bg : (pta.has-hover ? P.raised : transparent);
+                                    HorizontalLayout {
+                                        padding: 7px;
+                                        spacing: 10px;
+                                        Cover { width: 36px; height: 36px; radius: 4px; art: q.art; has-art: q.has-art; }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 600 : 400; color: q.playing ? P.verdigris : P.text; }
+                                            Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
+                                        }
+                                    }
+                                    pta := TouchArea {
+                                        double-clicked => { root.queue-activate(i); }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            height: 58px;
+                            Rectangle { height: 1px; y: 0; background: P.border; }
+                            HorizontalLayout {
+                                padding: 12px;
+                                padding-left: 16px;
+                                spacing: 8px;
+                                alignment: start;
+                                Chip { text: "Save as playlist"; clicked => { root.queue-save(); } }
+                                Chip { text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ----- Bottom bar -----
+            Rectangle {
+                height: 84px;
+                background: P.surface;
+                Rectangle { height: 1px; y: 0; background: P.border; }
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 20px;
+
+                    // Now playing.
+                    HorizontalLayout {
+                        horizontal-stretch: 1;
+                        min-width: 240px;
+                        spacing: 12px;
+                        Cover {
+                            width: 56px;
+                            height: 56px;
+                            y: (parent.height - self.height) / 2;
+                            art: root.np-art;
+                            has-art: root.np-has-art;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: root.has-track ? root.np-title : "Nothing playing";
+                                overflow: elide;
+                                font-weight: 600;
+                                color: root.has-track ? P.text : P.muted;
+                            }
+                            Text { text: root.np-sub; overflow: elide; font-size: 12px; color: P.muted; }
+                            if root.status-line != "": Text {
+                                text: root.status-line;
+                                overflow: elide;
+                                font-size: 11.5px;
+                                color: root.status-warn ? P.copper : P.verdigris;
+                            }
+                        }
+                    }
+
+                    // Transport and seek.
+                    VerticalLayout {
+                        horizontal-stretch: 2;
+                        min-width: 380px;
+                        alignment: center;
+                        spacing: 2px;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            IconButton { icon: Icons.shuffle; tip: "Shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); keys.focus(); } }
+                            IconButton { icon: Icons.prev; filled: true; icon-size: 20px; tip: "Back"; clicked => { root.prev(); keys.focus(); } }
+                            Rectangle {
+                                width: 44px;
+                                height: 44px;
+                                border-radius: 22px;
+                                background: pp.has-hover ? #6fc8b5 : P.verdigris;
+                                accessible-role: button;
+                                accessible-label: root.playing ? "Pause" : "Play";
+                                // Two bars as rectangles: a two-shape path draws its
+                                // gap filled in.
+                                if root.playing: Rectangle {
+                                    x: 15px;
+                                    y: 14px;
+                                    width: 5px;
+                                    height: 16px;
+                                    border-radius: 1px;
+                                    background: P.on-accent;
+                                }
+                                if root.playing: Rectangle {
+                                    x: 24px;
+                                    y: 14px;
+                                    width: 5px;
+                                    height: 16px;
+                                    border-radius: 1px;
+                                    background: P.on-accent;
+                                }
+                                if !root.playing: FilledIcon {
+                                    x: (parent.width - self.width) / 2 + 1px;
+                                    y: (parent.height - self.height) / 2;
+                                    d: Icons.play;
+                                    size: 18px;
+                                    fill: P.on-accent;
+                                }
+                                pp := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.play-pause(); keys.focus(); }
+                                }
+                            }
+                            IconButton { icon: Icons.next; filled: true; icon-size: 20px; tip: "Next"; clicked => { root.next(); keys.focus(); } }
+                            Rectangle {
+                                width: 36px;
+                                height: 36px;
+                                IconButton {
+                                    icon: Icons.repeat;
+                                    tip: root.repeat == 0 ? "Repeat off" : (root.repeat == 1 ? "Repeat all" : "Repeat one");
+                                    active: root.repeat != 0;
+                                    clicked => { root.cycle-repeat(); keys.focus(); }
+                                }
+                                if root.repeat == 2: Text {
+                                    x: 24px;
+                                    y: 4px;
+                                    text: "1";
+                                    font-size: 9px;
+                                    font-weight: 700;
+                                    color: P.verdigris;
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Text {
+                                width: 52px;
+                                text: root.elapsed;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                font-family: P.mono;
+                                font-size: 11.5px;
+                                color: P.muted;
+                            }
+                            if !root.live: Bar {
+                                horizontal-stretch: 1;
+                                label: "Seek";
+                                value: root.position;
+                                enabled: root.has-track;
+                                changed(v) => { root.seek(v); keys.focus(); }
+                            }
+                            if root.live: Text {
+                                horizontal-stretch: 1;
+                                text: "live";
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                font-size: 12px;
+                                color: P.verdigris;
+                            }
+                            Text {
+                                width: 52px;
+                                text: root.remaining;
+                                vertical-alignment: center;
+                                font-family: P.mono;
+                                font-size: 11.5px;
+                                color: P.muted;
+                            }
+                        }
+                    }
+
+                    // Badges, output, queue toggle, volume.
+                    HorizontalLayout {
+                        horizontal-stretch: 1;
+                        min-width: 300px;
+                        alignment: end;
+                        spacing: 8px;
+                        if root.speed-label != "": Rectangle {
+                            width: sp.preferred-width + 16px;
+                            height: 22px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 11px;
+                            border-width: 1px;
+                            border-color: root.speed-label == "1.0x" ? P.border : P.copper-dim;
+                            sp := Text {
+                                text: root.speed-label;
+                                font-family: P.mono;
+                                font-size: 11px;
+                                color: root.speed-label == "1.0x" ? P.muted : P.copper;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.speed-clicked(); } }
+                        }
+                        if root.badge != "" && !root.compact: Badge {
+                            y: (parent.height - self.height) / 2;
+                            text: root.badge;
+                        }
+                        if root.output-label != "" && !root.compact: Chip {
+                            y: (parent.height - self.height) / 2;
+                            icon: Icons.output;
+                            text: root.output-label;
+                        }
+                        IconButton {
+                            y: (parent.height - self.height) / 2;
+                            icon: Icons.queue-panel;
+                            tip: "Queue panel";
+                            active: root.queue-panel;
+                            clicked => { root.toggle-queue(); keys.focus(); }
+                        }
+                        IconButton {
+                            y: (parent.height - self.height) / 2;
+                            icon: root.muted ? Icons.muted : Icons.volume;
+                            tip: root.muted ? "Unmute" : "Mute";
+                            active: root.muted;
+                            clicked => { root.toggle-mute(); keys.focus(); }
+                        }
+                        Bar {
+                            width: 96px;
+                            y: (parent.height - self.height) / 2;
+                            label: "Volume";
+                            value: root.volume;
+                            fill: root.muted ? P.wave : P.verdigris;
+                            knob: 12px;
+                            live: true;
+                            changed(v) => { root.set-volume(v); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ----- Toast -----
+        if root.toast != "": Rectangle {
+            x: parent.width - self.width - 24px;
+            y: parent.height - 84px - self.height - 16px;
+            width: min(tt.preferred-width + 36px, 520px);
+            height: tt.preferred-height + 20px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.toast-error ? P.copper-dim : P.verdigris-dim;
+            background: P.raised;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000080;
+            tt := Text {
+                x: 18px;
+                width: parent.width - 36px;
+                text: root.toast;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                color: root.toast-error ? P.copper : P.text;
+            }
+        }
+
+        // ----- Dialogs -----
+        if root.dialog != 0: Rectangle {
+            background: #050b0acc;
+            TouchArea { clicked => { root.dlg-cancel(); } }
+            Rectangle {
+                width: root.dialog == 4 ? 620px : 460px;
+                height: dlg.preferred-height;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: P.border;
+                background: P.surface;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000099;
+                TouchArea {}
+                dlg := VerticalLayout {
+                    padding: 22px;
+                    spacing: 14px;
+                    Text {
+                        text: root.dlg-title;
+                        font-family: P.serif;
+                        font-weight: 700;
+                        font-size: 19px;
+                        color: P.text;
+                    }
+
+                    if root.dialog == 1: VerticalLayout {
+                        spacing: 12px;
+                        f1 := Field {
+                            autofocus: true;
+                            label: root.dlg-label1;
+                            text <=> root.dlg-text1;
+                            accepted => {
+                                if root.dlg-two-fields { f2.focus-field(); } else { root.dlg-accept(); }
+                            }
+                        }
+                        f2 := Field {
+                            visible: root.dlg-two-fields;
+                            height: root.dlg-two-fields ? 58px : 0px;
+                            label: root.dlg-label2;
+                            text <=> root.dlg-text2;
+                            accepted => { root.dlg-accept(); }
+                        }
+                    }
+
+                    if root.dialog == 2: VerticalLayout {
+                        spacing: 2px;
+                        for it[i] in root.dlg-items: Rectangle {
+                            height: 36px;
+                            border-radius: 6px;
+                            background: dta.has-hover ? P.raised : transparent;
+                            Text {
+                                x: 12px;
+                                text: it;
+                                vertical-alignment: center;
+                                color: i == 0 ? P.verdigris : P.text;
+                            }
+                            dta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.dlg-pick(i); }
+                            }
+                        }
+                    }
+
+                    if root.dialog == 3: Text {
+                        text: root.dlg-message;
+                        wrap: word-wrap;
+                        color: P.text;
+                    }
+
+                    if root.dialog == 4: Text {
+                        text: root.dlg-message;
+                        wrap: word-wrap;
+                        font-family: P.mono;
+                        font-size: 12px;
+                        color: P.text;
+                    }
+
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        padding-top: 4px;
+                        Chip {
+                            text: root.dialog == 4 ? "Close" : "Cancel";
+                            h: 36px;
+                            clicked => { root.dlg-cancel(); }
+                        }
+                        if root.dialog == 1 || root.dialog == 3: Chip {
+                            text: root.dlg-ok;
+                            h: 36px;
+                            primary: root.dialog == 1;
+                            danger: root.dialog == 3;
+                            clicked => { root.dlg-accept(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

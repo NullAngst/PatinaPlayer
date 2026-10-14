@@ -1,20 +1,17 @@
 //! PatinaPlayer TUI. Browses the library index and plays through the core.
 
 mod app;
+mod art;
 mod theme;
 mod ui;
-mod views;
 
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use patina_core::config::{self, Config};
-use patina_core::library::{Library, LibraryService};
-use patina_core::player::Hooks;
-use patina_core::podcast::PodcastService;
-use patina_core::{Backend, Command, OutputConfig, Player, PlayerConfig, TrackInfo, track};
+use patina_core::Backend;
+use patina_core::browse::Section;
+use patina_core::session::{self, Options, Session};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,64 +64,32 @@ struct Args {
     #[arg(long)]
     shuffle: bool,
 
+    /// Cover art: auto, kitty, sixel, iterm2, blocks or off.
+    #[arg(long, default_value = "auto")]
+    art: art::Mode,
+
     /// Write a log here. The terminal is busy drawing, so logs never go
     /// to stderr while the TUI runs.
     #[arg(long, value_name = "FILE")]
     log: Option<PathBuf>,
 }
 
-fn absolute(p: &Path) -> Result<PathBuf> {
-    let expanded = config::expand_tilde(&p.to_string_lossy());
-    std::fs::canonicalize(&expanded)
-        .or_else(|_| std::path::absolute(&expanded))
-        .with_context(|| format!("can't resolve {}", p.display()))
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
-    let config_path = args.config.clone().unwrap_or_else(config::config_path);
 
     // Folder management: edit the config and leave.
     if args.add_folder.is_some() || args.remove_folder.is_some() {
-        if let Some(dir) = &args.add_folder {
-            let dir = absolute(dir)?;
-            if !dir.is_dir() {
-                bail!("{} isn't a folder", dir.display());
-            }
-            let changed = config::edit_library_folder(&config_path, &dir, true)?;
-            println!(
-                "{} {} {}",
-                if changed { "Added" } else { "Already have" },
-                dir.display(),
-                if changed {
-                    "to the library"
-                } else {
-                    "in the library"
-                }
-            );
+        let lines = session::edit_folders(
+            args.config.as_deref(),
+            args.add_folder.as_deref(),
+            args.remove_folder.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        for l in lines {
+            println!("{l}");
         }
-        if let Some(dir) = &args.remove_folder {
-            let dir = absolute(dir).unwrap_or_else(|_| dir.clone());
-            let changed = config::edit_library_folder(&config_path, &dir, false)?;
-            println!(
-                "{} {}",
-                if changed {
-                    "Removed"
-                } else {
-                    "Not in the library:"
-                },
-                dir.display()
-            );
-        }
-        println!("Config: {}", config_path.display());
         return Ok(());
     }
-
-    let cfg = if args.config.is_some() {
-        Config::load_from(&config_path)?
-    } else {
-        Config::load_or_create()?
-    };
 
     if let Some(path) = &args.log {
         let file = std::fs::File::create(path)
@@ -134,218 +99,54 @@ fn main() -> Result<()> {
             .init();
     }
 
-    let output = OutputConfig {
-        backend: args.backend.unwrap_or(cfg.output.backend),
-        device: args.device.clone().or(cfg.output.device.clone()),
-        buffer_ms: args.buffer_ms.unwrap_or(cfg.output.buffer_ms),
+    let session = match Session::open(Options {
+        config: args.config.clone(),
+        no_library: args.no_library,
+        backend: args.backend,
+        device: args.device.clone(),
+        buffer_ms: args.buffer_ms,
+        volume: args.volume,
+        fade_ms: args.fade_ms,
+        shuffle: args.shuffle,
+        paths: args.paths.clone(),
+    }) {
+        Ok(s) => s,
+        Err(session::SessionError::NoFiles) => bail!("no audio files found in the paths given"),
+        Err(e) => return Err(e.into()),
     };
-    let volume = args.volume.unwrap_or(cfg.playback.volume);
-    let fade_ms = args.fade_ms.unwrap_or(cfg.playback.fade_ms);
-
-    // Library: the index for the views, the service for scanning, and a
-    // separate connection on the core thread for play counts.
-    let db_path = config::library_db_path();
-    let (lib, service, hook_lib) = if args.no_library {
-        (None, None, None)
+    let start = if session.playing_files {
+        Section::Queue
     } else {
-        let lib = Library::open(&db_path)
-            .with_context(|| format!("can't open the library at {}", db_path.display()))?;
-        let svc = LibraryService::start(&db_path, cfg.library.folders.clone(), cfg.library.watch)?;
-        let hook = Library::open(&db_path)?;
-        (Some(lib), Some(svc), Some(Mutex::new(hook)))
-    };
-
-    let hook_lib = hook_lib.map(std::sync::Arc::new);
-    let played = hook_lib.clone().map(|l| {
-        Box::new(move |t: &TrackInfo| {
-            // Only library files have play counts.
-            if t.kind == patina_core::track::MediaKind::File
-                && let Err(e) = l.lock().unwrap().record_play(&t.path)
-            {
-                log::warn!("couldn't record play: {e}");
-            }
-        }) as patina_core::player::PlayedHook
-    });
-    let progress = hook_lib.map(|l| {
-        Box::new(
-            move |t: &TrackInfo, pos: std::time::Duration, finished: bool| {
-                if let Some(id) = t.episode
-                    && let Err(e) = l.lock().unwrap().set_episode_progress(id, pos, finished)
-                {
-                    log::warn!("couldn't save episode position: {e}");
-                }
-            },
-        ) as patina_core::player::ProgressHook
-    });
-    let pod = if args.no_library {
-        None
-    } else {
-        match PodcastService::start(
-            &db_path,
-            config::offline_dir().join("podcasts"),
-            cfg.podcasts.feeds.clone(),
-        ) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                log::warn!("podcasts unavailable: {e}");
-                None
-            }
-        }
-    };
-    let player = Player::spawn_with(
-        PlayerConfig {
-            output: output.clone(),
-            volume: volume as f64 / 100.0,
-            fade_ms,
-            podcast_tempo: cfg.podcasts.speed,
-            podcast_trim: cfg.podcasts.trim_silence,
-        },
-        Hooks {
-            played,
-            progress,
-            ..Default::default()
-        },
-    );
-
-    let files = track::expand_paths(&args.paths);
-    if !args.paths.is_empty() && files.is_empty() {
-        bail!("no audio files found in the paths given");
-    }
-    if !files.is_empty() {
-        if args.shuffle {
-            // Shuffle first so the starting track is a random one too.
-            player.send(Command::Append(files));
-            player.send(Command::ToggleShuffle);
-            player.send(Command::Play);
-        } else {
-            player.send(Command::SetQueue {
-                paths: files,
-                start: 0,
-            });
-        }
-    } else if args.shuffle {
-        player.send(Command::ToggleShuffle);
-    }
-
-    let settings = views::Settings {
-        lines: settings_lines(
-            &config_path,
-            &cfg,
-            &output,
-            volume,
-            fade_ms,
-            &db_path,
-            args.no_library,
-        ),
-    };
-    let start = if args.paths.is_empty() {
-        views::Section::Folders
-    } else {
-        views::Section::Queue
+        Section::Folders
     };
 
     let mut terminal = ratatui::init();
+    // Ask the terminal what it can draw. This has to happen inside the
+    // alternate screen and before the event loop starts reading input.
+    let art = art::ArtView::new(args.art);
+    // The query switches raw mode off when it's done, which would leave
+    // keys line-buffered. Put it back.
+    let _ = ratatui::crossterm::terminal::enable_raw_mode();
     let _ = ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::EnableMouseCapture
     );
-    let extras = app::Extras {
-        config_path: config_path.clone(),
-        stations: cfg.stations.clone(),
-        feeds: cfg.podcasts.feeds.clone(),
-        pod,
-        podcast_tempo: cfg.podcasts.speed,
-        podcast_trim: cfg.podcasts.trim_silence,
-    };
-    let mut app = app::App::new(player.clone(), lib, service, settings, extras);
-    app.switch(start);
+    let Session {
+        browser, fade_ms, ..
+    } = session;
+    let player = browser.player.clone();
+    let mut app = app::App::new(browser, art);
+    app.b.switch(start);
     let result = app.run(&mut terminal);
     let _ = ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::DisableMouseCapture
     );
     ratatui::restore();
-    player.send(Command::Quit);
+    player.send(patina_core::Command::Quit);
     // Give the core a moment to fade out instead of cutting the sound.
     std::thread::sleep(std::time::Duration::from_millis(
         fade_ms.min(300) as u64 + 50,
     ));
     result
-}
-
-fn settings_lines(
-    config_path: &Path,
-    cfg: &Config,
-    output: &OutputConfig,
-    volume: u8,
-    fade_ms: u32,
-    db: &Path,
-    no_library: bool,
-) -> Vec<(String, String)> {
-    let mut v = vec![("Config file".to_string(), config_path.display().to_string())];
-    if no_library {
-        v.push(("Library".into(), "off (--no-library)".into()));
-    } else if cfg.library.folders.is_empty() {
-        v.push((
-            "Library folders".into(),
-            "none. Add one with --add-folder DIR".into(),
-        ));
-    } else {
-        for (i, f) in cfg.library.folders.iter().enumerate() {
-            let label = if i == 0 { "Library folders" } else { "" };
-            v.push((label.into(), f.display().to_string()));
-        }
-    }
-    v.push((
-        "Watch for changes".into(),
-        if cfg.library.watch { "on" } else { "off" }.into(),
-    ));
-    v.push(("Library index".into(), db.display().to_string()));
-    v.push((
-        "Output".into(),
-        format!(
-            "{:?}{}",
-            output.backend,
-            output
-                .device
-                .as_ref()
-                .map(|d| format!(", device {d}"))
-                .unwrap_or_default()
-        )
-        .to_lowercase(),
-    ));
-    v.push(("Buffer".into(), format!("{} ms", output.buffer_ms)));
-    v.push(("Starting volume".into(), format!("{volume}%")));
-    v.push((
-        "Fades".into(),
-        if fade_ms == 0 {
-            "off".into()
-        } else {
-            format!("{fade_ms} ms")
-        },
-    ));
-    v.push(("Radio stations".into(), cfg.stations.len().to_string()));
-    v.push(("Podcast feeds".into(), cfg.podcasts.feeds.len().to_string()));
-    v.push((
-        "Podcast speed".into(),
-        format!(
-            "{:.1}x{}",
-            cfg.podcasts.speed,
-            if cfg.podcasts.trim_silence {
-                ", trimming silence"
-            } else {
-                ""
-            }
-        ),
-    ));
-    v.push((
-        "Downloaded episodes".into(),
-        config::offline_dir().join("podcasts").display().to_string(),
-    ));
-    v.push(("".into(), "".into()));
-    v.push((
-        "Changing settings".into(),
-        "edit the config file and restart, since there's no settings screen yet".into(),
-    ));
-    v
 }

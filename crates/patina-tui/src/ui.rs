@@ -8,8 +8,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table};
 
-use crate::app::{App, Focus, InputPurpose, Modal, SideEntry};
-use crate::views::{Item, Section, Source, fmt_duration, fmt_length};
+use crate::app::{App, Focus, InputPurpose, Modal};
+use patina_core::browse::SideEntry;
+use patina_core::browse::{Item, Section, Source, fmt_duration, fmt_length};
 
 const SIDEBAR_W: u16 = 24;
 const QUEUE_W: u16 = 42;
@@ -43,7 +44,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(main);
 
     draw_sidebar(f, app, side);
-    if app.section == Section::Queue {
+    if app.b.section == Section::Queue {
         draw_queue(f, app, content);
     } else {
         draw_level(f, app, content);
@@ -107,11 +108,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let t = &app.theme;
     f.render_widget(Block::default().style(Style::default().bg(t.surface)), area);
-    let status = app.service.as_ref().map(|s| s.status());
+    let status = app.b.service.as_ref().map(|s| s.status());
     let focused = app.focus == Focus::Sidebar;
     let mut lines = Vec::new();
-    for (i, e) in app.sidebar.iter().enumerate() {
-        let sel = i == app.sidebar_sel;
+    for (i, e) in app.b.sidebar.iter().enumerate() {
+        let sel = i == app.b.sidebar_sel;
         let base = if sel && focused {
             Style::default().bg(t.raised)
         } else {
@@ -120,7 +121,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let line = match e {
             SideEntry::Section(s) => {
                 let num = s.key().map(|c| c.to_string()).unwrap_or_else(|| " ".into());
-                let active = *s == app.section;
+                let active = *s == app.b.section;
                 let style = if active {
                     base.fg(t.verdigris).add_modifier(Modifier::BOLD)
                 } else {
@@ -211,8 +212,8 @@ fn level_kind(items: &[Item]) -> Kind {
 }
 
 fn hints(app: &App) -> &'static str {
-    let src = app.level().map(|l| &l.source);
-    match (app.section, src) {
+    let src = app.b.level().map(|l| &l.source);
+    match (app.b.section, src) {
         (_, Some(Source::Search(_))) => "Enter open · a add · A play next · Esc back",
         (Section::Albums, Some(Source::Section(_))) => "o sort · a add · p playlist",
         (Section::Songs, _) => "o sort · O reverse · a add · p playlist",
@@ -233,7 +234,7 @@ fn hints(app: &App) -> &'static str {
 
 fn title_line<'a>(app: &'a App, width: u16, right: &'a str) -> Line<'a> {
     let t = &app.theme;
-    let crumbs = app.crumbs();
+    let crumbs = app.b.crumbs();
     let mut spans = vec![Span::raw(" ")];
     let n = crumbs.len();
     for (i, c) in crumbs.iter().enumerate() {
@@ -282,8 +283,9 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let t = &app.theme;
-    let Some(level) = app.stacks.get(&app.section).and_then(|s| s.last()) else {
+    let Some(level) = app.b.stacks.get(&app.b.section).and_then(|s| s.last()) else {
         let msg = app
+            .b
             .view_error
             .clone()
             .unwrap_or_else(|| "Nothing here".into());
@@ -312,14 +314,14 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
                 "No podcasts yet. Press N and paste a feed URL.".to_string()
             }
             Source::Podcast { .. } => {
-                if app.pod.as_ref().is_some_and(|p| p.status().refreshing) {
+                if app.b.pod.as_ref().is_some_and(|p| p.status().refreshing) {
                     "Fetching the feed…".to_string()
                 } else {
                     "No episodes with audio in this feed.".to_string()
                 }
             }
             _ => {
-                let scanning = app.service.as_ref().is_some_and(|s| !s.status().ready);
+                let scanning = app.b.service.as_ref().is_some_and(|s| !s.status().ready);
                 if scanning {
                     "Scanning your folders…".into()
                 } else {
@@ -430,7 +432,12 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         .column_spacing(1);
     f.render_widget(table, body);
 
-    if let Some(l) = app.stacks.get_mut(&app.section).and_then(|s| s.last_mut()) {
+    if let Some(l) = app
+        .b
+        .stacks
+        .get_mut(&app.b.section)
+        .and_then(|s| s.last_mut())
+    {
         l.offset = offset;
     }
 }
@@ -616,7 +623,7 @@ fn item_row<'a>(
         }
         Item::Episode(e) => {
             let now = app.snap.track.as_ref().and_then(|t| t.episode) == Some(e.id);
-            let dl = app.pod.as_ref().map(|p| p.status());
+            let dl = app.b.pod.as_ref().map(|p| p.status());
             let downloading = dl
                 .as_ref()
                 .and_then(|d| d.downloading)
@@ -712,7 +719,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
     app.list_area = area;
     let [title_a, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     let t = &app.theme;
-    let q = app.player.queue();
+    let q = app.b.player.queue();
     let n = q.len();
     let total: std::time::Duration = q
         .play_order()
@@ -833,15 +840,31 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Compact "up next" list beside whatever view is open.
-fn draw_queue_panel(f: &mut Frame, app: &App, area: Rect) {
+fn draw_queue_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let t = &app.theme;
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(t.border))
         .style(Style::default().bg(t.surface));
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     f.render_widget(block, area);
-    let q = app.player.queue();
+    // Cover art on top, about square: terminal cells are roughly twice as
+    // tall as they are wide.
+    if app.art.enabled() && inner.height > 12 {
+        let art_h = ((inner.width.saturating_sub(2)) / 2).min(inner.height / 2);
+        let art_area = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), art_h);
+        if let Some(img) = app.art.image.as_mut() {
+            f.render_stateful_widget(crate::art::ArtView::widget(), art_area, img);
+        }
+        inner = Rect::new(
+            inner.x,
+            inner.y + art_h + 1,
+            inner.width,
+            inner.height - art_h - 1,
+        );
+    }
+    let t = &app.theme;
+    let q = app.b.player.queue();
     let start = q.current().and_then(|c| q.position(c)).unwrap_or(0);
     let mut lines = vec![Line::from(Span::styled(
         " Up next",

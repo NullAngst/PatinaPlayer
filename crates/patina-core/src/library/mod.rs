@@ -161,10 +161,14 @@ pub struct AlbumRow {
     pub play_count: i64,
     pub dir: PathBuf,
     pub lossless: bool,
+    /// First track on the album, which is where its cover art is looked up.
+    pub cover_track: Option<PathBuf>,
 }
 
 impl AlbumRow {
-    const COLS: &'static str = "key, name, artist, year, genre, track_count, duration_ms, added_at, play_count, dir, lossless";
+    const COLS: &'static str = "key, name, artist, year, genre, track_count, duration_ms, added_at, \
+        play_count, dir, lossless, \
+        (SELECT path FROM tracks t WHERE t.album_key = albums.key ORDER BY disc_no, track_no LIMIT 1)";
 
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -179,6 +183,7 @@ impl AlbumRow {
             play_count: r.get(8)?,
             dir: bytes_path(r.get(9)?),
             lossless: r.get::<_, i64>(10)? != 0,
+            cover_track: r.get::<_, Option<Vec<u8>>>(11)?.map(bytes_path),
         })
     }
 }

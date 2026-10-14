@@ -1,0 +1,23 @@
+[package]
+name = "patina-gui"
+description = "PatinaPlayer desktop frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "patinaplayer"
+path = "src/main.rs"
+
+[dependencies]
+patina-core = { path = "../patina-core" }
+slint = "1.18"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+log = "0.4"
+env_logger = "0.11"
+
+[build-dependencies]
+slint-build = "1.18"

@@ -2,9 +2,24 @@
 
 PatinaPlayer is a Linux music player for Subsonic servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 3 of the build plan: the audio engine, the library index and every library view from milestones 1 and 2, plus internet radio and podcasts. The GUI comes next, then bit-perfect, Subsonic and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 4 of the build plan: the audio engine, the library, internet radio and podcasts from milestones 1 to 3, plus the desktop app and cover art. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Bit-perfect comes next, then Subsonic and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
+
+**Desktop app**
+- A Slint window in the dark verdigris look from the mockup: sidebar of sections and sources, a header with back, forward and search, the open view, an optional queue panel, and the bottom bar with art, transport, seek, format badge, output and volume.
+- Albums, and an artist's or a genre's albums, show as a cover grid. An album opens with a header showing its cover, year, track count and length, and buttons to play, shuffle, queue or add it to a playlist.
+- Right-click any row for everything you can do with it: play, play next, add to queue, add to a playlist, and per kind edit, test, move or delete stations, unsubscribe, download, mark played, rename or delete playlists.
+- Dialogs for new and edited stations, subscribing, new and renamed playlists, picking a playlist, and confirming deletes.
+- The keyboard works the same as the TUI for almost everything. `?` lists the keys.
+- The podcast speed chip in the bottom bar cycles 1.0x, 1.2x, 1.5x and 2.0x on click.
+- On a narrow window the queue panel folds away and the bottom bar drops the format badge and output chip, so nothing gets cut off.
+- Inter, Noto Serif and JetBrains Mono are bundled, so it looks the same on any system.
+
+**Cover art**
+- Embedded art first, then a cover image in the folder (`cover`, `folder`, `front`, `album` and the like, as jpg, png or webp). Disc folders look in their parent too.
+- The desktop app loads it on background threads, so scrolling a big grid doesn't stall.
+- The TUI draws it at the top of the queue panel, with kitty graphics, sixel or iTerm2 images where the terminal supports them and half blocks everywhere else. `--art` picks one by hand.
 
 **Library**
 - Indexes your local folders into one SQLite database, so browsing is instant and works offline.
@@ -57,14 +72,18 @@ A note on how albums are grouped. Tracks with an album artist tag group by album
 - FFmpeg 5.1 or newer, with dev headers
 - PipeWire and ALSA dev headers
 - clang and pkg-config, since the FFmpeg and PipeWire bindings are generated at build time
+- For the desktop app: xkbcommon, Wayland, fontconfig, freetype, the X11 cursor, randr and input libraries, and OpenGL headers
 
 SQLite is built into the binary, so there's nothing to install for it.
 
 On Kubuntu (or any Ubuntu 24.04 based system):
 
 ```
-sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libavfilter-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
+sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libavfilter-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev libasound2-dev \
+  libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
 ```
+
+If you only want the TUI, skip the second line and build with `-p patina-tui`.
 
 On another distro the package names differ but the list is the same: FFmpeg, PipeWire, libspa, ALSA, clang. Fedora calls them `ffmpeg-free-devel` (or `ffmpeg-devel` from RPM Fusion), `pipewire-devel` and `alsa-lib-devel`, for example. You'll have to check yours.
 
@@ -73,19 +92,23 @@ The tests also need the `ffmpeg` command itself, since they generate their own a
 ## Building
 
 1. Extract the archive and go into it: `cd patinaplayer`
-2. Build it: `cargo build --release`
-3. Copy the binary somewhere on your PATH, like `cp target/release/patinaplayer-tui ~/.local/bin/`, since that's where user binaries usually live.
-4. Optionally run the tests: `cargo test`
+2. Build both: `cargo build --release`. The first build takes a while, since Slint compiles a lot.
+3. Copy the binaries somewhere on your PATH: `cp target/release/patinaplayer target/release/patinaplayer-tui ~/.local/bin/`, since that's where user binaries usually live.
+4. Optionally run the tests: `cargo test --workspace`
+
+There's no `.desktop` file or AppImage yet, so start the desktop app from a terminal or KRunner (or whichever launcher you use) by name. Packaging is milestone 14.
 
 ## First run
 
-1. Run it once: `patinaplayer-tui`. That writes `~/.config/patinaplayer/config.toml`. If your system has a Music folder (`xdg-user-dir MUSIC`), it's already in the list.
-2. Add any other folders: `patinaplayer-tui --add-folder /mnt/storage/music`. This edits the config and exits. Your comments in the file are kept.
+Everything below works the same with `patinaplayer` or `patinaplayer-tui`. They share the config and the library, though you'd only run one at a time.
+
+1. Run it once: `patinaplayer`. That writes `~/.config/patinaplayer/config.toml`. If your system has a Music folder (`xdg-user-dir MUSIC`), it's already in the list.
+2. Add any other folders: `patinaplayer --add-folder /mnt/storage/music`. This edits the config and exits. Your comments in the file are kept.
 3. Run it again. The first scan shows progress next to the folder in the sidebar, and the views fill in as it goes.
 
-To take a folder back out: `patinaplayer-tui --remove-folder /mnt/storage/music`. Its tracks leave the index on the next start.
+To take a folder back out: `patinaplayer --remove-folder /mnt/storage/music`. Its tracks leave the index on the next start.
 
-You can still play files directly without touching the library: `patinaplayer-tui song.flac ~/Downloads/SomeAlbum`. They go straight into the queue.
+You can still play files directly without touching the library: `patinaplayer song.flac ~/Downloads/SomeAlbum`. They go straight into the queue.
 
 ## Config
 
@@ -126,10 +149,13 @@ Where everything else goes:
 | Settings | `~/.config/patinaplayer/config.toml` |
 | Library index, playlists, play counts, podcast positions | `~/.local/share/patinaplayer/library.db` |
 | Downloaded podcast episodes | `~/.local/share/patinaplayer/offline/podcasts/` |
+| Resized cover art | `~/.cache/patinaplayer/art/` |
 
-The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists to that.
+The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists to that. The art cache is safe to wipe. It refills from your files.
 
 ## Keys
+
+These are the TUI keys. The desktop app uses the same ones, with these differences: there's no Tab focus switching, `Delete` removes from the queue or the open playlist, `Ctrl+F` also searches, `Alt+Left` and `Alt+Right` go back and forward, and the per-view letter commands (new station, rename, unsubscribe and so on) live in the right-click menu and the buttons at the top of each view instead.
 
 | Key | Action |
 |---|---|
@@ -161,26 +187,36 @@ In the Queue: `d` remove, `J`/`K` move down or up, `S` save as a playlist, `C` c
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
-The mouse works too: click to select, double-click to play or open, right-click to go back, and click or drag the seek and volume bars.
+The mouse works in the TUI too: click to select, double-click to play or open, right-click to go back, and click or drag the seek and volume bars.
+
+TUI cover art picks a protocol on its own by asking the terminal. To force one: `patinaplayer-tui --art kitty` (or `sixel`, `iterm2`, `blocks`, or `off`). Konsole supports kitty images, so on Kubuntu auto should land there. Inside tmux, auto usually falls back to blocks.
 
 ## How it's put together
 
 ```
 crates/
-  patina-core/          shared core, used by the TUI now and the GUI later
+  patina-core/          shared core, used by both frontends
     src/audio/          decoder, gapless feeder, real-time renderer, outputs
     src/library/        SQLite index, tag reading, scanner, inotify service, podcast rows
+    src/browse/         every view and every action on it, shared by both frontends
+    src/session.rs      startup both frontends share: config, library, player
+    src/art.rs          finding, cropping and caching cover art
     src/radio.rs        station URL resolving: pls, m3u, HLS detection, mirror checks
     src/podcast.rs      feed fetching, episode downloads with resume
     src/config.rs       config file and XDG paths
     src/player.rs       core thread: commands in, snapshots and events out
     src/queue.rs        queue on stable entry ids, shuffle, repeat
     examples/scan.rs    time an index of your own folders
-    tests/              gapless, seek, library, watcher, player, filter and network tests
-  patina-tui/           the terminal frontend (ratatui)
+    tests/              gapless, seek, library, watcher, player, filter, network and browser tests
+  patina-tui/           the terminal frontend (ratatui, ratatui-image)
+  patina-gui/           the desktop app (Slint)
+    ui/app.slint        the whole window
+    ui/fonts/           bundled fonts and their license
+    src/bridge.rs       turns the shared browser into Slint models and back
+assets/                 app icon
 ```
 
-The core owns all the state. Frontends send commands and draw what the core and the index report, which is what keeps the TUI and GUI identical later.
+The core owns all the state. The views and what each action does live in `patina-core/src/browse`, so the TUI and the desktop app are only drawing and input. A fix to how a view behaves lands in both at once.
 
 The library runs on its own thread with its own database connection. SQLite is in WAL mode, so the views keep reading while a scan writes. Paths are stored as raw bytes, since Linux file names don't have to be valid UTF-8.
 
@@ -192,10 +228,12 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 
 ## Known gaps in this milestone
 
-- Cover art isn't drawn yet, in either frontend. The plan is to add it alongside the GUI in milestone 4, with kitty and sixel support in the TUI.
-- There's no settings screen. Edit the config file and restart.
+- Podcasts and stations have no art yet. Podcast feed images and station logos come later, cover art for tracks works now.
+- There's no settings screen. Edit the config file and restart. The Settings view shows what's in effect.
+- No tray icon, no MPRIS media keys, no `.desktop` file and no AppImage yet. Those are milestone 14.
+- The desktop app was checked under X11 (Xvfb) here, not on a real Plasma Wayland session. Slint supports Wayland natively, so it should be fine, but that's untested from this box.
 - When the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 12.
-- The TUI binary links FFmpeg, PipeWire and ALSA dynamically. The static TUI build is packaging work for milestone 14.
+- Both binaries link FFmpeg, PipeWire and ALSA dynamically. The static TUI build is packaging work for milestone 14.
 - 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
 - Radio has no loudness leveling yet. The live normalizer for radio comes with leveling in milestone 9.
 - Stations and podcasts from a Subsonic server come with the Subsonic client in milestone 6. For now it's only the ones you add.
@@ -208,4 +246,6 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 
 GPL-3.0-or-later. See `LICENSE`.
 
-Now PatinaPlayer is indexing your folders, playing your stations and podcasts, and keeping your place in every episode.
+The bundled fonts (Inter, Noto Serif, JetBrains Mono) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/OFL.txt`.
+
+Now PatinaPlayer is running as a desktop app and in the terminal, both on the same library, with your covers showing in each.

@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 patina-core = { path = "../patina-core" }
 ratatui = "0.30"
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false }
 anyhow = "1"
 crossbeam-channel = "0.5"
 clap = { version = "4", features = ["derive"] }

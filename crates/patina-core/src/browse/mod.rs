@@ -1,0 +1,1056 @@
+//! Browsing and every action you can take from a view, shared by the TUI
+//! and the GUI. Frontends turn keys and clicks into calls on [`Browser`]
+//! and draw what it holds; neither one decides what a key does to the
+//! library, the queue or the config. That's how the two stay identical.
+
+pub mod model;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use crossbeam_channel::{Receiver, Sender, unbounded};
+
+use crate::config::{self, Station};
+use crate::library::podcasts::EpisodeRow;
+use crate::library::{ArtistMode, LibEvent, Library, LibraryService, PlaylistRow, TrackRow};
+use crate::podcast::{PodEvent, PodcastService};
+use crate::{Command, Event, Player, TrackInfo};
+
+pub use model::*;
+
+/// A message for the person, shown however the frontend shows them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Note {
+    Info(String),
+    Error(String),
+}
+
+/// A row in the sidebar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SideEntry {
+    Section(Section),
+    Source { path: PathBuf, tracks: i64 },
+    Label(&'static str),
+    Gap,
+}
+
+/// What [`Browser::activate`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activated {
+    Nothing,
+    Opened,
+    Played,
+}
+
+/// Everything the browser needs at startup.
+pub struct Startup {
+    pub player: Player,
+    pub lib: Option<Library>,
+    pub service: Option<LibraryService>,
+    pub pod: Option<PodcastService>,
+    pub config_path: PathBuf,
+    pub stations: Vec<Station>,
+    pub feeds: Vec<String>,
+    pub podcast_tempo: f64,
+    pub podcast_trim: bool,
+    pub settings: Settings,
+}
+
+pub struct Browser {
+    pub player: Player,
+    pub lib: Option<Library>,
+    pub service: Option<LibraryService>,
+    pub pod: Option<PodcastService>,
+    pub section: Section,
+    /// Drill-down stack per section, so switching away and back returns
+    /// you to where you were.
+    pub stacks: HashMap<Section, Vec<Level>>,
+    /// Levels backed out of, per section, for a Forward button.
+    forward: HashMap<Section, Vec<Source>>,
+    pub prefs: ViewPrefs,
+    pub settings: Settings,
+    pub sidebar: Vec<SideEntry>,
+    pub sidebar_sel: usize,
+    pub view_error: Option<String>,
+    pub config_path: PathBuf,
+    pub stations: Vec<Station>,
+    pub feeds: Vec<String>,
+    /// Podcast speed and trimming as last set. The player's snapshot lags a
+    /// tick behind, so repeated changes build on these.
+    pub podcast_tempo: f64,
+    pub podcast_trim: bool,
+    /// Station test results by URL.
+    pub checks: HashMap<String, String>,
+    check_tx: Sender<(String, String)>,
+    check_rx: Receiver<(String, String)>,
+    notes: Vec<Note>,
+    /// Bumped whenever anything a view draws changes, so a frontend that
+    /// keeps its own models (the GUI) knows when to rebuild them.
+    generation: u64,
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+pub fn count(n: usize) -> String {
+    format!("{n} track{}", plural(n))
+}
+
+impl Browser {
+    pub fn new(s: Startup) -> Self {
+        let (check_tx, check_rx) = unbounded();
+        let mut b = Self {
+            player: s.player,
+            lib: s.lib,
+            service: s.service,
+            pod: s.pod,
+            section: Section::Folders,
+            stacks: HashMap::new(),
+            forward: HashMap::new(),
+            prefs: ViewPrefs::default(),
+            settings: s.settings,
+            sidebar: Vec::new(),
+            sidebar_sel: 0,
+            view_error: None,
+            config_path: s.config_path,
+            stations: s.stations,
+            feeds: s.feeds,
+            podcast_tempo: s.podcast_tempo,
+            podcast_trim: s.podcast_trim,
+            checks: HashMap::new(),
+            check_tx,
+            check_rx,
+            notes: Vec::new(),
+            generation: 0,
+        };
+        b.rebuild_sidebar();
+        b
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn touch(&mut self) {
+        self.generation += 1;
+    }
+
+    pub fn note(&mut self, msg: impl Into<String>) {
+        self.notes.push(Note::Info(msg.into()));
+    }
+
+    pub fn error(&mut self, msg: impl Into<String>) {
+        self.notes.push(Note::Error(msg.into()));
+    }
+
+    /// Messages since the last call.
+    pub fn take_notes(&mut self) -> Vec<Note> {
+        std::mem::take(&mut self.notes)
+    }
+
+    /// Handle everything the background threads reported. Returns the
+    /// player's events, which frontends may want too (track changes).
+    pub fn poll(&mut self) -> Vec<Event> {
+        let events: Vec<Event> = self.player.events().try_iter().collect();
+        for ev in &events {
+            if let Event::Error(e) = ev {
+                self.error(e.clone());
+            }
+            if matches!(ev, Event::QueueChanged | Event::TrackChanged(_)) {
+                self.touch();
+            }
+        }
+        let mut changed = false;
+        if let Some(svc) = &self.service {
+            let evs: Vec<LibEvent> = svc.events().try_iter().collect();
+            for ev in evs {
+                match ev {
+                    LibEvent::Changed(_) => changed = true,
+                    LibEvent::Error(e) => self.notes.push(Note::Error(e)),
+                    LibEvent::Progress(_) | LibEvent::Ready => self.generation += 1,
+                }
+            }
+        }
+        let mut pods_changed = false;
+        if let Some(pod) = &self.pod {
+            let evs: Vec<PodEvent> = pod.events().try_iter().collect();
+            for ev in evs {
+                match ev {
+                    PodEvent::Updated => pods_changed = true,
+                    PodEvent::Downloaded(id) => {
+                        pods_changed = true;
+                        let title = self
+                            .lib
+                            .as_ref()
+                            .and_then(|l| l.episode(id).ok().flatten())
+                            .map(|e| e.title)
+                            .unwrap_or_default();
+                        self.notes
+                            .push(Note::Info(format!("Downloaded \"{title}\"")));
+                    }
+                    PodEvent::Error(e) => self.notes.push(Note::Error(e)),
+                    PodEvent::Download { .. } => self.generation += 1,
+                }
+            }
+        }
+        while let Ok((url, summary)) = self.check_rx.try_recv() {
+            self.checks.insert(url, summary.clone());
+            self.note(summary);
+            self.refresh_section(Section::Radio);
+        }
+        if changed {
+            self.refresh_all();
+            self.rebuild_sidebar();
+        } else if pods_changed {
+            self.refresh_section(Section::Podcasts);
+            self.refresh_section(Section::Downloads);
+        }
+        events
+    }
+
+    // ----- Sidebar -----
+
+    pub fn rebuild_sidebar(&mut self) {
+        let mut s: Vec<SideEntry> = Section::NUMBERED
+            .iter()
+            .map(|&x| SideEntry::Section(x))
+            .collect();
+        if let Some(lib) = &self.lib
+            && let Ok(sources) = lib.sources()
+            && !sources.is_empty()
+        {
+            s.push(SideEntry::Gap);
+            s.push(SideEntry::Label("Sources"));
+            for src in sources {
+                s.push(SideEntry::Source {
+                    path: src.root,
+                    tracks: src.tracks,
+                });
+            }
+        }
+        s.push(SideEntry::Gap);
+        s.push(SideEntry::Section(Section::Settings));
+        self.sidebar = s;
+        self.sync_sidebar_sel();
+        self.touch();
+    }
+
+    fn sync_sidebar_sel(&mut self) {
+        if let Some(i) = self
+            .sidebar
+            .iter()
+            .position(|e| *e == SideEntry::Section(self.section))
+        {
+            self.sidebar_sel = i;
+        }
+    }
+
+    /// Move the sidebar selection to the next selectable entry, opening it.
+    pub fn sidebar_move(&mut self, d: isize) {
+        let n = self.sidebar.len() as isize;
+        let mut i = self.sidebar_sel as isize;
+        loop {
+            i += d;
+            if !(0..n).contains(&i) {
+                return;
+            }
+            if matches!(
+                self.sidebar[i as usize],
+                SideEntry::Section(_) | SideEntry::Source { .. }
+            ) {
+                break;
+            }
+        }
+        self.activate_sidebar(i as usize);
+    }
+
+    /// Open a sidebar entry. A source opens its folder tree under Folders.
+    pub fn activate_sidebar(&mut self, index: usize) {
+        match self.sidebar.get(index).cloned() {
+            Some(SideEntry::Section(s)) => self.switch(s),
+            Some(SideEntry::Source { path, .. }) => {
+                self.switch(Section::Folders);
+                if let Some(stack) = self.stacks.get_mut(&Section::Folders) {
+                    stack.truncate(1);
+                }
+                self.push(Source::Folder(path));
+                self.sidebar_sel = index;
+            }
+            _ => return,
+        }
+        self.touch();
+    }
+
+    // ----- Levels -----
+
+    pub fn switch(&mut self, s: Section) {
+        self.section = s;
+        self.view_error = None;
+        if s != Section::Queue && !self.stacks.contains_key(&s) {
+            let level = self.build(&Source::Section(s));
+            self.stacks.insert(s, level.into_iter().collect());
+        }
+        self.sync_sidebar_sel();
+        self.touch();
+    }
+
+    fn ctx(&self) -> Ctx<'_> {
+        Ctx {
+            lib: self.lib.as_ref(),
+            prefs: &self.prefs,
+            settings: &self.settings,
+            stations: &self.stations,
+            checks: &self.checks,
+        }
+    }
+
+    fn build(&mut self, src: &Source) -> Option<Level> {
+        match build(&self.ctx(), src) {
+            Ok((title, items)) => {
+                let mut l = Level {
+                    title,
+                    source: src.clone(),
+                    items,
+                    selected: 0,
+                    offset: 0,
+                };
+                l.selected = l.snap(0, 1);
+                Some(l)
+            }
+            Err(e) => {
+                self.view_error = Some(e);
+                None
+            }
+        }
+    }
+
+    pub fn level(&self) -> Option<&Level> {
+        self.stacks.get(&self.section).and_then(|s| s.last())
+    }
+
+    pub fn level_mut(&mut self) -> Option<&mut Level> {
+        self.generation += 1;
+        self.stacks
+            .get_mut(&self.section)
+            .and_then(|s| s.last_mut())
+    }
+
+    pub fn depth(&self) -> usize {
+        self.stacks.get(&self.section).map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Breadcrumb titles for the open stack.
+    pub fn crumbs(&self) -> Vec<String> {
+        self.stacks
+            .get(&self.section)
+            .map(|s| s.iter().map(|l| l.title.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn push(&mut self, src: Source) {
+        if let Some(l) = self.build(&src) {
+            self.stacks.entry(self.section).or_default().push(l);
+            self.forward.remove(&self.section);
+            self.touch();
+        }
+    }
+
+    /// Back up one level. False if already at the top.
+    pub fn pop(&mut self) -> bool {
+        if let Some(stack) = self.stacks.get_mut(&self.section)
+            && stack.len() > 1
+        {
+            let l = stack.pop().unwrap();
+            // A search isn't worth going forward to; everything else is.
+            if !matches!(l.source, Source::Search(_)) {
+                self.forward.entry(self.section).or_default().push(l.source);
+            }
+            self.touch();
+            return true;
+        }
+        false
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        self.forward
+            .get(&self.section)
+            .is_some_and(|f| !f.is_empty())
+    }
+
+    /// Re-open the level last backed out of.
+    pub fn go_forward(&mut self) -> bool {
+        let Some(src) = self.forward.get_mut(&self.section).and_then(|f| f.pop()) else {
+            return false;
+        };
+        let rest = self.forward.remove(&self.section);
+        if let Some(l) = self.build(&src) {
+            self.stacks.entry(self.section).or_default().push(l);
+            self.touch();
+        }
+        if let Some(rest) = rest {
+            self.forward.insert(self.section, rest);
+        }
+        true
+    }
+
+    /// Back up to a breadcrumb.
+    pub fn pop_to(&mut self, depth: usize) {
+        if let Some(stack) = self.stacks.get_mut(&self.section)
+            && depth >= 1
+        {
+            stack.truncate(depth);
+            self.touch();
+        }
+    }
+
+    /// Re-run the query behind one level, keeping the selection on the
+    /// same row if it's still there.
+    fn rebuild_level(&mut self, section: Section, idx: usize) {
+        let Some(level) = self.stacks.get(&section).and_then(|s| s.get(idx)) else {
+            return;
+        };
+        let src = level.source.clone();
+        let key = level.selected_item().map(Item::key);
+        let (old_sel, old_off) = (level.selected, level.offset);
+        let built = build(&self.ctx(), &src);
+        let Some(level) = self.stacks.get_mut(&section).and_then(|s| s.get_mut(idx)) else {
+            return;
+        };
+        match built {
+            Ok((title, items)) => {
+                level.title = title;
+                level.items = items;
+                level.selected = key
+                    .and_then(|k| level.items.iter().position(|i| i.key() == k))
+                    .unwrap_or(old_sel);
+                level.selected = level.snap(level.selected, 1);
+                level.offset = old_off;
+            }
+            Err(e) => self.view_error = Some(e),
+        }
+        self.touch();
+    }
+
+    pub fn refresh_current(&mut self) {
+        if let Some(n) = self.stacks.get(&self.section).map(|s| s.len())
+            && n > 0
+        {
+            self.rebuild_level(self.section, n - 1);
+        }
+    }
+
+    pub fn refresh_section(&mut self, s: Section) {
+        if let Some(n) = self.stacks.get(&s).map(|v| v.len()) {
+            for i in 0..n {
+                self.rebuild_level(s, i);
+            }
+        }
+    }
+
+    pub fn refresh_all(&mut self) {
+        let sections: Vec<Section> = self.stacks.keys().copied().collect();
+        for s in sections {
+            let n = self.stacks[&s].len();
+            if n == 0 {
+                // A section that failed to open (no library yet) may work now.
+                self.stacks.remove(&s);
+                continue;
+            }
+            for i in 0..n {
+                self.rebuild_level(s, i);
+            }
+        }
+        if !self.stacks.contains_key(&self.section) {
+            self.switch(self.section);
+        }
+    }
+
+    // ----- Selection -----
+
+    pub fn selected_item(&self) -> Option<Item> {
+        self.level().and_then(|l| l.selected_item().cloned())
+    }
+
+    /// Select a row by index, if it can be selected.
+    pub fn select(&mut self, index: usize) -> bool {
+        if let Some(l) = self.level_mut()
+            && index < l.items.len()
+            && l.items[index].selectable()
+        {
+            l.selected = index;
+            return true;
+        }
+        false
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if let Some(l) = self.level_mut() {
+            if l.items.is_empty() {
+                return;
+            }
+            let target =
+                (l.selected as isize + delta).clamp(0, l.items.len() as isize - 1) as usize;
+            l.selected = l.snap(target, if delta < 0 { -1 } else { 1 });
+        }
+    }
+
+    fn selection_tracks(&self) -> Vec<TrackRow> {
+        match (&self.lib, self.selected_item()) {
+            (Some(lib), Some(item)) => tracks_of(lib, &item, &self.prefs),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Enter on the selected row: open it, or play it in context.
+    pub fn activate(&mut self) -> Activated {
+        let Some(item) = self.selected_item() else {
+            return Activated::Nothing;
+        };
+        if let Some(src) = open(&item) {
+            self.push(src);
+            return Activated::Opened;
+        }
+        let play = |b: &Self, tracks: Vec<TrackInfo>, start: usize, pos: Duration| {
+            b.player
+                .send(Command::SetQueueTracks { tracks, start, pos });
+        };
+        match &item {
+            Item::Station { station, .. } => {
+                play(self, vec![station_info(station)], 0, Duration::ZERO);
+                Activated::Played
+            }
+            Item::Episode(e) => {
+                // Fresh from the database, so the resume point is current.
+                let e = self
+                    .lib
+                    .as_ref()
+                    .and_then(|l| l.episode(e.id).ok().flatten())
+                    .unwrap_or_else(|| e.clone());
+                play(self, vec![e.to_info()], 0, e.resume_at());
+                Activated::Played
+            }
+            Item::Track(t) => {
+                // Play the whole list this track sits in, starting here, the
+                // way picking a song in an album plays the album from there.
+                let Some(level) = self.level() else {
+                    return Activated::Nothing;
+                };
+                let tracks: Vec<TrackRow> = level
+                    .items
+                    .iter()
+                    .filter_map(|i| match i {
+                        Item::Track(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let start = tracks.iter().position(|x| x.path == t.path).unwrap_or(0);
+                play(
+                    self,
+                    tracks.iter().map(TrackRow::to_info).collect(),
+                    start,
+                    Duration::ZERO,
+                );
+                Activated::Played
+            }
+            _ => Activated::Nothing,
+        }
+    }
+
+    /// Add the selection to the queue, at the end or right after the
+    /// current track.
+    pub fn add_selected_to_queue(&mut self, next: bool) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let infos = infos_of(self.lib.as_ref(), &item, &self.prefs);
+        if infos.is_empty() {
+            return;
+        }
+        let n = infos.len();
+        if next {
+            self.player.send(Command::PlayNext(infos));
+            self.note(format!("Playing next: {}", count(n)));
+        } else {
+            self.player.send(Command::AppendTracks(infos));
+            self.note(format!("Added {} to the queue", count(n)));
+        }
+    }
+
+    // ----- Playlists -----
+
+    /// Library files the selection stands for, for adding to a playlist.
+    pub fn playlist_paths_for_selection(&self) -> Vec<PathBuf> {
+        self.selection_tracks()
+            .into_iter()
+            .map(|t| t.path)
+            .collect()
+    }
+
+    pub fn playlists(&self) -> Vec<PlaylistRow> {
+        self.lib
+            .as_ref()
+            .and_then(|l| l.playlists().ok())
+            .unwrap_or_default()
+    }
+
+    pub fn add_to_playlist(&mut self, id: i64, name: &str, paths: &[PathBuf]) {
+        let Some(lib) = self.lib.as_mut() else { return };
+        match lib.append_to_playlist(id, paths) {
+            Ok(()) => self.note(format!("Added {} to \"{name}\"", count(paths.len()))),
+            Err(e) => self.error(e.to_string()),
+        }
+        self.refresh_section(Section::Playlists);
+    }
+
+    pub fn create_playlist(&mut self, name: &str, paths: &[PathBuf]) {
+        if name.is_empty() {
+            return;
+        }
+        let Some(lib) = self.lib.as_mut() else {
+            return self.error("Playlists need the library");
+        };
+        let res = lib
+            .create_playlist(name)
+            .and_then(|id| lib.append_to_playlist(id, paths));
+        match res {
+            Ok(()) if paths.is_empty() => self.note(format!("Created \"{name}\"")),
+            Ok(()) => self.note(format!("Added {} to \"{name}\"", count(paths.len()))),
+            Err(e) => self.error(e.to_string()),
+        }
+        self.refresh_section(Section::Playlists);
+    }
+
+    pub fn rename_playlist(&mut self, id: i64, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        if let Some(lib) = &self.lib
+            && let Err(e) = lib.rename_playlist(id, name)
+        {
+            self.error(e.to_string());
+        }
+        self.refresh_section(Section::Playlists);
+    }
+
+    pub fn delete_playlist(&mut self, id: i64) {
+        if let Some(lib) = &self.lib
+            && let Err(e) = lib.delete_playlist(id)
+        {
+            self.error(e.to_string());
+        }
+        if let Some(stack) = self.stacks.get_mut(&Section::Playlists) {
+            stack.truncate(1);
+        }
+        self.refresh_section(Section::Playlists);
+    }
+
+    /// The open playlist's id, if a playlist is open.
+    pub fn in_playlist(&self) -> Option<i64> {
+        match self.level().map(|l| &l.source) {
+            Some(Source::Playlist { id, .. }) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Remove (`remove`) or move by `delta` the selected item of the open
+    /// playlist.
+    pub fn edit_playlist(&mut self, remove: bool, delta: isize) {
+        let Some(id) = self.in_playlist() else { return };
+        let Some(level) = self.level() else { return };
+        let mut uris: Vec<Vec<u8>> = level
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Track(t) => Some(crate::library::file_uri(&t.path)),
+                Item::Missing { uri } => Some(uri.clone()),
+                _ => None,
+            })
+            .collect();
+        let sel = level.selected;
+        if sel >= uris.len() {
+            return;
+        }
+        let new_sel = if remove {
+            uris.remove(sel);
+            sel.min(uris.len().saturating_sub(1))
+        } else {
+            let to = (sel as isize + delta).clamp(0, uris.len() as isize - 1) as usize;
+            if to == sel {
+                return;
+            }
+            let u = uris.remove(sel);
+            uris.insert(to, u);
+            to
+        };
+        if let Some(lib) = self.lib.as_mut()
+            && let Err(e) = lib.set_playlist_items(id, &uris)
+        {
+            return self.error(e.to_string());
+        }
+        self.refresh_current();
+        if let Some(l) = self.level_mut() {
+            l.selected = new_sel;
+        }
+        // The Playlists list shows item counts.
+        if self
+            .stacks
+            .get(&Section::Playlists)
+            .is_some_and(|s| !s.is_empty())
+        {
+            self.rebuild_level(Section::Playlists, 0);
+        }
+    }
+
+    // ----- Queue -----
+
+    pub fn play_queue_position(&self, pos: usize) {
+        let id = self.player.queue().at(pos).map(|e| e.id);
+        if let Some(id) = id {
+            self.player.send(Command::PlayEntry(id));
+        }
+    }
+
+    pub fn remove_queue_position(&self, pos: usize) {
+        let id = self.player.queue().at(pos).map(|e| e.id);
+        if let Some(id) = id {
+            self.player.send(Command::RemoveEntry(id));
+        }
+    }
+
+    /// Move the entry at `pos` by `delta`. Returns its new position.
+    pub fn move_queue_position(&self, pos: usize, delta: isize) -> usize {
+        let (id, to) = {
+            let q = self.player.queue();
+            let Some(e) = q.at(pos) else { return pos };
+            let to = (pos as isize + delta).clamp(0, q.len() as isize - 1) as usize;
+            (e.id, to)
+        };
+        self.player.send(Command::MoveEntry { id, to });
+        to
+    }
+
+    pub fn clear_queue(&self) {
+        self.player.send(Command::ClearQueue);
+    }
+
+    pub fn save_queue(&mut self, name: &str) {
+        let paths = self.player.queue().paths_in_order();
+        self.create_playlist(name, &paths);
+        self.note(format!("Saved the queue as \"{name}\""));
+    }
+
+    /// The queue entry at `pos` as a playlist addition.
+    pub fn queue_paths_at(&self, pos: usize) -> Vec<PathBuf> {
+        let q = self.player.queue();
+        q.at(pos)
+            .filter(|e| !e.info.path.as_os_str().is_empty())
+            .map(|e| vec![e.info.path.clone()])
+            .unwrap_or_default()
+    }
+
+    // ----- Sorting and modes -----
+
+    pub fn cycle_sort(&mut self) {
+        match self.section {
+            Section::Albums => self.prefs.album_sort = self.prefs.album_sort.next(),
+            Section::Songs => self.prefs.song_sort = self.prefs.song_sort.next(),
+            _ => return,
+        }
+        if let Some(stack) = self.stacks.get_mut(&self.section) {
+            stack.truncate(1);
+        }
+        self.refresh_current();
+        if let Some(l) = self.level_mut() {
+            l.selected = l.snap(0, 1);
+            l.offset = 0;
+        }
+    }
+
+    pub fn reverse_songs(&mut self) {
+        if self.section == Section::Songs {
+            self.prefs.song_desc = !self.prefs.song_desc;
+            self.refresh_current();
+        }
+    }
+
+    /// Artists: album or track artist. Genre: albums or songs.
+    pub fn toggle_mode(&mut self) {
+        match self.level().map(|l| l.source.clone()) {
+            Some(Source::Section(Section::Artists)) => {
+                self.prefs.artist_mode = match self.prefs.artist_mode {
+                    ArtistMode::AlbumArtist => ArtistMode::TrackArtist,
+                    ArtistMode::TrackArtist => ArtistMode::AlbumArtist,
+                };
+                self.refresh_current();
+            }
+            Some(Source::Genre { .. }) => {
+                self.prefs.genre_songs = !self.prefs.genre_songs;
+                self.refresh_current();
+                if let Some(l) = self.level_mut() {
+                    l.selected = l.snap(0, 1);
+                    l.offset = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ----- Search -----
+
+    /// Open (or reuse) a search level. Returns the query already there.
+    pub fn start_search(&mut self) -> String {
+        if matches!(
+            self.section,
+            Section::Queue
+                | Section::Settings
+                | Section::Downloads
+                | Section::Radio
+                | Section::Podcasts
+        ) {
+            self.switch(Section::Songs);
+        }
+        let existing = match self.level().map(|l| &l.source) {
+            Some(Source::Search(q)) => Some(q.clone()),
+            _ => None,
+        };
+        if existing.is_none() {
+            self.push(Source::Search(String::new()));
+        }
+        existing.unwrap_or_default()
+    }
+
+    pub fn in_search(&self) -> bool {
+        matches!(self.level().map(|l| &l.source), Some(Source::Search(_)))
+    }
+
+    pub fn set_search(&mut self, q: &str) {
+        if let Some(l) = self.level_mut()
+            && let Source::Search(_) = l.source
+        {
+            l.source = Source::Search(q.to_string());
+            l.offset = 0;
+            l.selected = 0;
+        }
+        self.refresh_current();
+        if let Some(l) = self.level_mut() {
+            l.selected = l.snap(0, 1);
+        }
+    }
+
+    // ----- Library and feeds -----
+
+    pub fn rescan(&mut self) {
+        if let Some(svc) = &self.service {
+            svc.rescan();
+        }
+        if let Some(pod) = &self.pod {
+            pod.refresh();
+        }
+        self.note("Checking folders and feeds for changes");
+    }
+
+    // ----- Radio -----
+
+    fn save_stations(&mut self) {
+        if let Err(e) = config::set_stations(&self.config_path, &self.stations) {
+            self.error(format!("couldn't save stations: {e}"));
+        }
+        self.refresh_section(Section::Radio);
+        self.sync_settings();
+    }
+
+    /// Keep the Settings lines that the app itself can change in step with
+    /// what was just saved.
+    fn sync_settings(&mut self) {
+        let speed = format!(
+            "{:.1}x{}",
+            self.podcast_tempo,
+            if self.podcast_trim {
+                ", trimming silence"
+            } else {
+                ""
+            }
+        );
+        let live = [
+            ("Radio stations", self.stations.len().to_string()),
+            ("Podcast feeds", self.feeds.len().to_string()),
+            ("Podcast speed", speed),
+        ];
+        for (label, value) in live {
+            if let Some(line) = self.settings.lines.iter_mut().find(|(l, _)| l == label) {
+                line.1 = value;
+            }
+        }
+        self.refresh_section(Section::Settings);
+    }
+
+    /// Add a station, or replace station `edit`. Tests it straight away.
+    pub fn save_station(&mut self, edit: Option<usize>, name: &str, url: &str) {
+        let (name, url) = (name.trim(), url.trim());
+        if name.is_empty() || url.is_empty() {
+            return self.error("A station needs a name and a URL");
+        }
+        let st = Station {
+            name: name.to_string(),
+            url: url.to_string(),
+        };
+        match edit {
+            Some(i) if i < self.stations.len() => self.stations[i] = st,
+            _ => self.stations.push(st),
+        }
+        self.save_stations();
+        self.test_station(url.to_string());
+    }
+
+    pub fn delete_station(&mut self, i: usize) {
+        if i < self.stations.len() {
+            self.stations.remove(i);
+            self.save_stations();
+        }
+    }
+
+    /// Move station `i` by `delta`. Returns its new index.
+    pub fn move_station(&mut self, i: usize, delta: isize) -> usize {
+        let to = i as isize + delta;
+        if to < 0 || to as usize >= self.stations.len() || i >= self.stations.len() {
+            return i;
+        }
+        self.stations.swap(i, to as usize);
+        self.save_stations();
+        if let Some(l) = self.level_mut() {
+            l.selected = to as usize;
+        }
+        to as usize
+    }
+
+    /// Resolve and open a station in the background; the result arrives
+    /// through [`poll`](Self::poll) as a note and in `checks`.
+    pub fn test_station(&mut self, url: String) {
+        self.note(format!("Testing {url}"));
+        let tx = self.check_tx.clone();
+        std::thread::spawn(move || {
+            let summary = match crate::radio::check(&url) {
+                Ok(c) => c.summary(),
+                Err(e) => format!("Not working: {e}"),
+            };
+            let _ = tx.send((url, summary));
+        });
+    }
+
+    // ----- Podcasts -----
+
+    pub fn subscribe(&mut self, url: &str) {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        if self.feeds.contains(&url) {
+            return self.note("Already subscribed");
+        }
+        match config::edit_podcast_feed(&self.config_path, &url, true) {
+            Ok(_) => {
+                self.feeds.push(url);
+                if let Some(pod) = &self.pod {
+                    pod.set_feeds(self.feeds.clone());
+                }
+                self.sync_settings();
+                self.note("Subscribed. Fetching the feed…");
+            }
+            Err(e) => self.error(format!("couldn't save the feed: {e}")),
+        }
+    }
+
+    pub fn unsubscribe(&mut self, url: &str) {
+        match config::edit_podcast_feed(&self.config_path, url, false) {
+            Ok(_) => {
+                self.feeds.retain(|f| f != url);
+                if let Some(pod) = &self.pod {
+                    pod.set_feeds(self.feeds.clone());
+                }
+                self.sync_settings();
+                if let Some(stack) = self.stacks.get_mut(&Section::Podcasts) {
+                    stack.truncate(1);
+                }
+                self.note("Unsubscribed");
+            }
+            Err(e) => self.error(format!("couldn't save: {e}")),
+        }
+    }
+
+    /// Start a download, or cancel the one running or queued.
+    pub fn toggle_download(&mut self, e: &EpisodeRow) {
+        let Some(pod) = &self.pod else { return };
+        let busy = pod.status();
+        if busy.downloading.is_some_and(|d| d.0 == e.id) || busy.queued.contains(&e.id) {
+            pod.cancel_download(e.id);
+            self.note("Download cancelled");
+        } else if e.download.is_some() {
+            self.note("Already downloaded");
+        } else {
+            pod.download(e.id);
+            self.note(format!("Downloading \"{}\"", e.title));
+        }
+        self.touch();
+    }
+
+    pub fn delete_download(&mut self, id: i64) {
+        if let Some(lib) = &self.lib {
+            match crate::podcast::delete_download(lib, id) {
+                Ok(()) => self.note("Download deleted"),
+                Err(err) => self.error(err.to_string()),
+            }
+        }
+        self.refresh_current();
+        self.refresh_section(Section::Downloads);
+    }
+
+    pub fn toggle_played(&mut self, e: &EpisodeRow) {
+        if let Some(lib) = &self.lib
+            && let Err(err) = lib.set_episode_played(e.id, !e.played)
+        {
+            self.error(err.to_string());
+        }
+        self.refresh_current();
+        if self
+            .stacks
+            .get(&Section::Podcasts)
+            .is_some_and(|s| !s.is_empty())
+        {
+            self.rebuild_level(Section::Podcasts, 0);
+        }
+    }
+
+    pub fn set_podcast_playback(&mut self, tempo: f64, trim: bool) {
+        let tempo = ((tempo * 10.0).round() / 10.0).clamp(0.5, 3.0);
+        self.player.send(Command::SetPodcastPlayback {
+            tempo,
+            trim_silence: trim,
+        });
+        self.podcast_tempo = tempo;
+        self.podcast_trim = trim;
+        if let Err(e) = config::set_podcast_playback(&self.config_path, tempo, trim) {
+            self.error(format!("couldn't save to the config: {e}"));
+        }
+        self.sync_settings();
+        self.touch();
+    }
+
+    pub fn nudge_tempo(&mut self, d: f64) {
+        let t = self.podcast_tempo + d;
+        self.set_podcast_playback(t, self.podcast_trim);
+        let t = self.podcast_tempo;
+        self.note(format!("Podcast speed {t:.1}x"));
+    }
+
+    pub fn toggle_trim(&mut self) {
+        let trim = !self.podcast_trim;
+        self.set_podcast_playback(self.podcast_tempo, trim);
+        self.note(if trim {
+            "Silence trimming on (podcasts)"
+        } else {
+            "Silence trimming off"
+        });
+    }
+}
