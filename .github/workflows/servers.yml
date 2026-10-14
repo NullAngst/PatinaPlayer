@@ -1,0 +1,180 @@
+name: Servers
+
+# The Subsonic and Ampache clients against real servers in containers:
+# Navidrome and Gonic (latest images), and Ampache. A small library is made
+# with FFmpeg, every server indexes it, and tests/real_servers.rs logs in,
+# syncs, edits a playlist, saves the queue and plays a song through each.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # How many songs the generated library holds; the tests check them all.
+  PATINA_SERVER_SONGS: "6"
+
+jobs:
+  servers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang ffmpeg jq \
+            libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
+            libavfilter-dev libavdevice-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
+
+      - name: Install Rust (latest stable)
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Refresh lockfile
+        run: cargo update
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the tests
+        run: cargo test -p patina-core --test real_servers --no-run
+
+      - name: Make a small library
+        run: |
+          mk() { # dir file title artist album track
+            mkdir -p "music/$1"
+            ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=f=440:r=44100:d=3" -ac 2 \
+              -metadata title="$3" -metadata artist="$4" -metadata album_artist="$4" \
+              -metadata album="$5" -metadata track="$6" -metadata genre="Rock" -metadata date="1999" \
+              "music/$1/$2"
+          }
+          mk "Test Band/First Album" "01 One.flac" "One" "Test Band" "First Album" 1
+          mk "Test Band/First Album" "02 Two.flac" "Two" "Test Band" "First Album" 2
+          mk "Test Band/First Album" "03 Three.flac" "Three" "Test Band" "First Album" 3
+          mk "Other Band/Second Album" "01 Alpha.mp3" "Alpha" "Other Band" "Second Album" 1
+          mk "Other Band/Second Album" "02 Beta.mp3" "Beta" "Other Band" "Second Album" 2
+          mk "Other Band/Second Album" "03 Gamma.mp3" "Gamma" "Other Band" "Second Album" 3
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=teal:s=300x300" -frames:v 1 "music/Test Band/First Album/cover.jpg"
+          chmod -R a+rX music
+
+      - name: Start Navidrome and Gonic
+        run: |
+          docker run -d --name navidrome -p 4533:4533 \
+            -v "$PWD/music:/music:ro" -e ND_LOGLEVEL=info \
+            deluan/navidrome:latest
+          docker run -d --name gonic -p 4747:80 \
+            -v "$PWD/music:/music:ro" -e GONIC_SCAN_AT_START_ENABLED=true \
+            sentriz/gonic:latest
+
+      - name: Set up Navidrome
+        run: |
+          for i in $(seq 60); do curl -fs http://localhost:4533/app/ >/dev/null && break; sleep 2; done
+          curl -fsS -X POST http://localhost:4533/auth/createAdmin \
+            -H 'Content-Type: application/json' -d '{"username":"admin","password":"patina-pw"}'
+          q="u=admin&p=patina-pw&v=1.16.1&c=ci&f=json"
+          curl -fsS "http://localhost:4533/rest/startScan?$q" >/dev/null || true
+          for i in $(seq 90); do
+            n=$(curl -fs "http://localhost:4533/rest/getScanStatus?$q" | jq '."subsonic-response".scanStatus.count // 0')
+            scanning=$(curl -fs "http://localhost:4533/rest/getScanStatus?$q" | jq '."subsonic-response".scanStatus.scanning')
+            [ "$n" = "$PATINA_SERVER_SONGS" ] && [ "$scanning" = "false" ] && break
+            sleep 2
+          done
+          echo "Navidrome has $n songs"
+
+      - name: Set up Gonic
+        run: |
+          q="u=admin&p=admin&v=1.16.1&c=ci&f=json"
+          for i in $(seq 60); do curl -fs "http://localhost:4747/rest/ping?$q" >/dev/null && break; sleep 2; done
+          curl -fsS "http://localhost:4747/rest/startScan?$q" >/dev/null || true
+          for i in $(seq 90); do
+            n=$(curl -fs "http://localhost:4747/rest/getScanStatus?$q" | jq '."subsonic-response".scanStatus.count // 0')
+            scanning=$(curl -fs "http://localhost:4747/rest/getScanStatus?$q" | jq '."subsonic-response".scanStatus.scanning')
+            [ "$scanning" = "false" ] && [ "$n" != "0" ] && break
+            sleep 2
+          done
+          echo "Gonic has $n songs"
+
+      - name: Navidrome
+        env:
+          PATINA_NAVIDROME: http://localhost:4533
+        run: cargo test -p patina-core --test real_servers navidrome -- --ignored --nocapture
+
+      - name: Gonic
+        env:
+          PATINA_GONIC: http://localhost:4747
+        run: cargo test -p patina-core --test real_servers gonic -- --ignored --nocapture
+
+      - name: Server logs
+        if: failure()
+        run: |
+          docker logs navidrome | tail -50
+          docker logs gonic | tail -50
+
+  # Ampache needs a database and its installer, which makes it the most
+  # likely of the three to break on an image update. Its failures are
+  # reported without failing the run.
+  ampache:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang ffmpeg jq \
+            libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
+            libavfilter-dev libavdevice-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
+
+      - name: Install Rust (latest stable)
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Refresh lockfile
+        run: cargo update
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Make a small library
+        run: |
+          mkdir -p "music/Test Band/First Album" "music/Other Band/Second Album"
+          for t in One Two Three; do
+            ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=f=440:r=44100:d=3" -ac 2 \
+              -metadata title="$t" -metadata artist="Test Band" -metadata album="First Album" \
+              "music/Test Band/First Album/$t.flac"
+          done
+          for t in Alpha Beta Gamma; do
+            ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=f=440:r=44100:d=3" -ac 2 \
+              -metadata title="$t" -metadata artist="Other Band" -metadata album="Second Album" \
+              "music/Other Band/Second Album/$t.mp3"
+          done
+          chmod -R a+rX music
+
+      - name: Start and set up Ampache
+        run: |
+          docker run -d --name ampache -p 8080:80 -v "$PWD/music:/media:ro" ampache/ampache:latest
+          for i in $(seq 90); do curl -fs http://localhost:8080/ >/dev/null && break; sleep 2; done
+          # The image's own database, then Ampache's command-line installer.
+          docker exec ampache sh -c 'php /var/www/bin/installer install \
+            --dbhost localhost --dbname ampache --dbuser root --dbpassword "" \
+            --webpath "" --force --createconfig --createdb' || true
+          docker exec ampache sh -c 'php /var/www/bin/cli admin:addUser admin -p patina-pw -l 100' || true
+          docker exec ampache sh -c 'php /var/www/bin/cli run:addCatalog Music /media' || true
+          docker exec ampache sh -c 'php /var/www/bin/cli run:updateCatalog -a' || true
+          curl -fsS "http://localhost:8080/server/json.server.php?action=ping" || true
+
+      - name: Ampache
+        env:
+          PATINA_AMPACHE: http://localhost:8080
+        run: cargo test -p patina-core --test real_servers ampache -- --ignored --nocapture
+
+      - name: Server logs
+        if: failure()
+        run: docker logs ampache | tail -80
