@@ -1,0 +1,90 @@
+name: AppImage
+
+# Push a tag like v0.2.0 and this builds the AppImage and publishes it as a
+# GitHub release. Run it by hand from the Actions tab to get a test build
+# as a workflow artifact instead, without making a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    # The AppImage needs a glibc at least as new as the runner's (2.39):
+    # Ubuntu 24.04, Fedora 40, Debian 13 or newer.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe needs the tags
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang nasm file desktop-file-utils \
+            libgnutls28-dev zlib1g-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      - name: Install Rust (latest stable)
+        run: |
+          rustup update stable
+          rustup default stable
+
+      # No pinned versions: newest compatible crates on every run.
+      - name: Refresh lockfile
+        run: cargo update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/appimage-build"
+
+      # The static FFmpeg only rebuilds when its branch moves or the build
+      # script changes.
+      - name: FFmpeg cache key
+        id: ffkey
+        run: |
+          branch="release/$(awk '/^name = "ffmpeg-sys-next"/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock | cut -d. -f1,2)"
+          head="$(git ls-remote https://github.com/FFmpeg/FFmpeg "refs/heads/$branch" | cut -c1-12)"
+          echo "key=ffmpeg-${head:-latest}-${{ hashFiles('packaging/build-ffmpeg.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        id: ffcache
+        with:
+          path: target/ffmpeg-static
+          key: ${{ steps.ffkey.outputs.key }}
+
+      - name: Build AppImage
+        env:
+          SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          UPDATE_INFORMATION: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|PatinaPlayer-*x86_64.AppImage.zsync
+        run: bash packaging/build-appimage.sh
+
+      - name: Smoke test
+        run: |
+          app="$(ls target/appimage/PatinaPlayer-*-x86_64.AppImage)"
+          chmod +x "$app"
+          APPIMAGE_EXTRACT_AND_RUN=1 "$app" --version
+          APPIMAGE_EXTRACT_AND_RUN=1 "$app" --tui --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PatinaPlayer-AppImage
+          path: |
+            target/appimage/PatinaPlayer-*.AppImage
+            target/appimage/PatinaPlayer-*.AppImage.zsync
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            target/appimage/PatinaPlayer-*.AppImage
+            target/appimage/PatinaPlayer-*.AppImage.zsync
