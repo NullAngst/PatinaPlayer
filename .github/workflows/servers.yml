@@ -1,9 +1,10 @@
 name: Servers
 
-# The Subsonic and Ampache clients against real servers in containers:
-# Navidrome and Gonic (latest images), and Ampache. A small library is made
-# with FFmpeg, every server indexes it, and tests/real_servers.rs logs in,
-# syncs, edits a playlist, saves the queue and plays a song through each.
+# The server clients against real servers: Navidrome and Gonic (latest
+# images), Ampache, and MiniDLNA and Gerbera from Ubuntu. A small library is made with
+# FFmpeg, every server indexes it, and tests/real_servers.rs logs in (or
+# finds the DLNA server on the network), syncs, edits a playlist, saves the
+# queue and plays a song through each, as far as each server allows.
 
 on:
   push:
@@ -25,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config clang ffmpeg jq \
+            pkg-config clang ffmpeg jq minidlna gerbera \
             libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
             libavfilter-dev libavdevice-dev \
             libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
@@ -98,6 +99,46 @@ jobs:
           done
           echo "Gonic has $n songs"
 
+      - name: Start MiniDLNA
+        run: |
+          # Ubuntu starts its own copy as a service; this test runs its own.
+          sudo systemctl stop minidlna || true
+          mkdir -p dlna/db
+          cat > dlna/minidlna.conf <<EOF
+          media_dir=A,$PWD/music
+          db_dir=$PWD/dlna/db
+          log_dir=$PWD/dlna
+          port=8200
+          friendly_name=PatinaPlayer CI
+          inotify=no
+          album_art_names=cover.jpg
+          EOF
+          minidlnad -f "$PWD/dlna/minidlna.conf" -P "$PWD/dlna/pid" -R
+          for i in $(seq 60); do
+            n=$(curl -fs http://127.0.0.1:8200/ | sed 's/<[^>]*>/ /g' | grep -o 'Audio files *[0-9]*' | grep -o '[0-9]*$' || true)
+            [ "$n" = "$PATINA_SERVER_SONGS" ] && break
+            sleep 2
+          done
+          echo "MiniDLNA has ${n:-0} songs"
+
+      - name: Start Gerbera
+        continue-on-error: true
+        run: |
+          sudo systemctl stop gerbera || true
+          mkdir -p gerbera
+          gerbera --create-config --home "$PWD/gerbera" > gerbera/config.xml
+          # Its own name and id, and a timed scan of the library. Adding
+          # files on the command line crashes Gerbera 2.0 here.
+          sed -i -e 's|<name>Gerbera</name>|<name>PatinaPlayer Gerbera</name>|' \
+            -e "s|<import hidden-files=\"no\">|<import hidden-files=\"no\"><autoscan use-inotify=\"no\"><directory location=\"$PWD/music\" mode=\"timed\" interval=\"5\" recursive=\"yes\" hidden-files=\"no\"/></autoscan>|" \
+            gerbera/config.xml
+          nohup gerbera -c "$PWD/gerbera/config.xml" -p 49200 </dev/null > gerbera/log.txt 2>&1 &
+          # It listens on the network address only, not on localhost.
+          ip=$(hostname -I | awk '{print $1}')
+          echo "GERBERA=http://$ip:49200/description.xml" >> "$GITHUB_ENV"
+          for i in $(seq 30); do curl -fs "http://$ip:49200/description.xml" >/dev/null && break; sleep 2; done
+          sleep 10
+
       - name: Navidrome
         env:
           PATINA_NAVIDROME: http://localhost:4533
@@ -108,11 +149,24 @@ jobs:
           PATINA_GONIC: http://localhost:4747
         run: cargo test -p patina-core --test real_servers gonic -- --ignored --nocapture
 
+      - name: MiniDLNA
+        env:
+          PATINA_DLNA: http://127.0.0.1:8200/rootDesc.xml
+        run: cargo test -p patina-core --test real_servers dlna -- --ignored --nocapture
+
+      - name: Gerbera
+        continue-on-error: true
+        env:
+          PATINA_DLNA: ${{ env.GERBERA }}
+        run: cargo test -p patina-core --test real_servers dlna -- --ignored --nocapture
+
       - name: Server logs
         if: failure()
         run: |
           docker logs navidrome | tail -50
           docker logs gonic | tail -50
+          tail -50 dlna/minidlna.log || true
+          tail -50 gerbera/log.txt || true
 
   # Ampache needs a database and its installer, which makes it the most
   # likely of the three to break on an image update. Its failures are
