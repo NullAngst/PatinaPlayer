@@ -33,6 +33,8 @@ pub enum Key {
     /// What a server streams: the original file, or a transcode.
     ServerStream(String),
     AddServer,
+    /// Look for DLNA servers on the network.
+    FindDlna,
     /// Read-only facts: where files are.
     Info(&'static str),
 }
@@ -209,6 +211,22 @@ pub fn rows(
                 .find(|s| s.name == sc.name)
                 .map(ServerStatus::summary)
                 .unwrap_or_else(|| "starting".into());
+            if !sc.kind.logs_in() {
+                let host = url::Url::parse(&sc.url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string))
+                    .unwrap_or_else(|| sc.url.clone());
+                push(
+                    "Servers",
+                    Setting {
+                        key: Key::Server(sc.name.clone()),
+                        label: sc.name.clone(),
+                        help: "A DLNA server on your network. Sync reads its library again now. Edit renames it.",
+                        control: Control::Server(format!("{host} · {status}")),
+                    },
+                );
+                continue;
+            }
             let who = if sc.user.is_empty() {
                 "API key".to_string()
             } else {
@@ -257,6 +275,15 @@ pub fn rows(
                 control: Control::Action("Add server"),
             },
         );
+        push(
+            "Servers",
+            Setting {
+                key: Key::FindDlna,
+                label: "Find DLNA servers".into(),
+                help: "MiniDLNA, Gerbera, Jellyfin, Plex, Serviio or a NAS on your network. No login needed.",
+                control: Control::Action("Find servers"),
+            },
+        );
     }
 
     // Appearance
@@ -265,7 +292,7 @@ pub fn rows(
         Setting {
             key: Key::Theme,
             label: "Theme".into(),
-            help: "How the app looks. Runout is dark verdigris and copper; the kawaii themes are pastel and rounded.",
+            help: "Runout, plain Light or Dark, OLED true black (saves power on OLED screens), or the pastel kawaii pair.",
             control: Control::Choice {
                 options: Theme::ALL
                     .iter()

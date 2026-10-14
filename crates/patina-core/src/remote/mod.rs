@@ -1,4 +1,5 @@
-//! Music servers: Subsonic (Navidrome, Gonic and the rest) and Ampache.
+//! Music servers: Subsonic (Navidrome, Gonic and the rest), Ampache, and
+//! DLNA media servers on the local network.
 //!
 //! Each server is a source like a local folder. Its songs are synced into
 //! the same SQLite index (see [`sync`]), so every view, search and the
@@ -8,11 +9,13 @@
 //! song id sits beside it; that's what playing, playlists and covers use.
 //!
 //! [`Client`] is what a server can do. [`subsonic::Subsonic`] and
-//! [`ampache::Ampache`] are the two kinds. [`service::RemoteService`] keeps
+//! [`ampache::Ampache`] log in; [`dlna::Dlna`] is found on the network and
+//! needs no login. [`service::RemoteService`] keeps
 //! them connected and synced in the background, and [`registry`] lets the
 //! player and the art loader reach a connected server from any thread.
 
 pub mod ampache;
+pub mod dlna;
 mod http;
 pub mod service;
 pub mod subsonic;
@@ -39,6 +42,8 @@ pub enum ServerKind {
     #[default]
     Subsonic,
     Ampache,
+    /// A UPnP/DLNA media server. No login, no playlists, no play queue.
+    Dlna,
 }
 
 impl ServerKind {
@@ -46,7 +51,18 @@ impl ServerKind {
         match self {
             ServerKind::Subsonic => "subsonic",
             ServerKind::Ampache => "ampache",
+            ServerKind::Dlna => "dlna",
         }
+    }
+
+    /// Whether it takes a user name and password.
+    pub fn logs_in(self) -> bool {
+        self != ServerKind::Dlna
+    }
+
+    /// Whether it can convert songs as it streams them.
+    pub fn transcodes(self) -> bool {
+        self != ServerKind::Dlna
     }
 }
 
@@ -56,8 +72,9 @@ impl std::str::FromStr for ServerKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "subsonic" => Ok(ServerKind::Subsonic),
             "ampache" => Ok(ServerKind::Ampache),
+            "dlna" | "upnp" => Ok(ServerKind::Dlna),
             other => Err(format!(
-                "unknown server kind \"{other}\" (subsonic, ampache)"
+                "unknown server kind \"{other}\" (subsonic, ampache, dlna)"
             )),
         }
     }
@@ -96,16 +113,20 @@ impl std::str::FromStr for StreamFormat {
 }
 
 /// One `[[server]]` in the config. The password is in the keyring.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ServerConfig {
     /// Shown in the sidebar, and part of every song's path. Unique.
     pub name: String,
+    /// For DLNA, the device description URL.
     pub url: String,
     pub user: String,
     pub kind: ServerKind,
     pub stream: StreamFormat,
     /// For Opus and MP3, in kbps.
     pub bitrate: u32,
+    /// A DLNA server's unique id, to find it again when its address
+    /// changes. Empty for the rest.
+    pub udn: String,
 }
 
 impl ServerConfig {
@@ -323,6 +344,7 @@ pub fn connect(cfg: &ServerConfig, secret: &str) -> Result<Arc<dyn Client>> {
             cfg.stream,
             cfg.bitrate,
         )?),
+        ServerKind::Dlna => Arc::new(dlna::Dlna::connect(cfg.url.trim(), &cfg.udn)?),
     })
 }
 

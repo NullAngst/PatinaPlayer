@@ -503,15 +503,14 @@ fn settings_are_saved_and_applied() {
     );
 
     // The theme switches live and is saved.
-    b.change_setting(&Key::Theme, Change::Choose(2));
+    b.change_setting(&Key::Theme, Change::Choose(5));
     assert_eq!(setting(&mut b, Key::Theme), "Kawaii Dark");
-    assert_eq!(
-        b.config.appearance.theme,
-        patina_core::config::Theme::KawaiiDark
-    );
+    b.change_setting(&Key::Theme, Change::Choose(3));
+    assert_eq!(setting(&mut b, Key::Theme), "OLED (true black)");
+    assert_eq!(b.config.appearance.theme, patina_core::config::Theme::Oled);
 
     let cfg = Config::load_from(&fx.config).unwrap();
-    assert_eq!(cfg.appearance.theme, patina_core::config::Theme::KawaiiDark);
+    assert_eq!(cfg.appearance.theme, patina_core::config::Theme::Oled);
     assert_eq!(cfg.output.buffer_ms, 300);
     assert_eq!(cfg.playback.fade_ms, 0);
     assert_eq!(cfg.output.device.as_deref(), Some("hw:1,0"));

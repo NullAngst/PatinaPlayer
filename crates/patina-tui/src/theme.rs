@@ -1,5 +1,6 @@
 //! The TUI's colours: Runout's palette (ui/src/styles.css) by default, or
-//! one of the kawaii palettes the GUI uses. Truecolor where the terminal
+//! one of the others the GUI uses: plain light, dark and OLED black, and the
+//! two kawaii ones. Truecolor where the terminal
 //! says it supports it, nearest xterm-256 match everywhere else.
 
 use patina_core::config::Theme as Kind;
@@ -13,7 +14,8 @@ pub struct Theme {
     pub border: Color,
     pub text: Color,
     pub muted: Color,
-    /// The main accent: verdigris in Runout, pink in the kawaii themes.
+    /// The main accent: verdigris in Runout, blue in the plain themes, pink
+    /// in the kawaii ones.
     pub verdigris: Color,
     pub verdigris_dim: Color,
     /// The warm accent, also used for warnings.
@@ -69,6 +71,53 @@ const KAWAII_DARK: Palette = [
     (0x7a, 0x5a, 0x6a), // faint
 ];
 
+/// Plain light: white and cool grey, one blue. Accents a shade deeper
+/// than the GUI's, as text on white.
+const LIGHT: Palette = [
+    (0xff, 0xff, 0xff), // bg
+    (0xf5, 0xf6, 0xf8), // surface
+    (0xe6, 0xe9, 0xee), // raised
+    (0xd3, 0xd7, 0xde), // border
+    (0x1d, 0x1f, 0x23), // text
+    (0x62, 0x67, 0x70), // muted
+    (0x25, 0x5f, 0xc8), // blue
+    (0xc6, 0xd8, 0xf7), // blue, soft
+    (0xb0, 0x52, 0x10), // orange
+    (0xf1, 0xd6, 0xc2), // orange, soft
+    (0xc3, 0xc8, 0xd0), // faint
+];
+
+/// Plain dark: neutral charcoal and the same blue.
+const DARK: Palette = [
+    (0x1c, 0x1d, 0x21), // bg
+    (0x24, 0x26, 0x2b), // surface
+    (0x2d, 0x30, 0x36), // raised
+    (0x3a, 0x3d, 0x44), // border
+    (0xe8, 0xe9, 0xec), // text
+    (0x9a, 0x9e, 0xa7), // muted
+    (0x5b, 0x9c, 0xf5), // blue
+    (0x2b, 0x46, 0x70), // blue, deep
+    (0xe0, 0x9a, 0x5b), // orange
+    (0x5a, 0x3e, 0x26), // orange, deep
+    (0x4a, 0x4e, 0x57), // faint
+];
+
+/// OLED: true black, so the screen's pixels are off. Only the selection
+/// and borders light up.
+const OLED: Palette = [
+    (0x00, 0x00, 0x00), // bg
+    (0x00, 0x00, 0x00), // surface
+    (0x14, 0x14, 0x14), // raised
+    (0x26, 0x26, 0x26), // border
+    (0xf2, 0xf2, 0xf2), // text
+    (0x8a, 0x8a, 0x8a), // muted
+    (0x6a, 0xa8, 0xff), // blue
+    (0x1d, 0x33, 0x54), // blue, deep
+    (0xf0, 0xa8, 0x68), // orange
+    (0x3d, 0x2a, 0x18), // orange, deep
+    (0x33, 0x33, 0x33), // faint
+];
+
 impl Theme {
     pub fn new(kind: Kind) -> Self {
         let truecolor = std::env::var("COLORTERM")
@@ -78,6 +127,9 @@ impl Theme {
             Kind::Runout => &RUNOUT,
             Kind::KawaiiLight => &KAWAII_LIGHT,
             Kind::KawaiiDark => &KAWAII_DARK,
+            Kind::Light => &LIGHT,
+            Kind::Dark => &DARK,
+            Kind::Oled => &OLED,
         };
         let c = |i: usize| {
             let (r, g, b) = pal[i];
@@ -140,5 +192,10 @@ mod tests {
     #[test]
     fn grey_maps_to_ramp() {
         assert_eq!(nearest_256(0x80, 0x80, 0x80), 244);
+    }
+
+    #[test]
+    fn oled_is_black_in_256_colours() {
+        assert_eq!(nearest_256(0, 0, 0), 16);
     }
 }

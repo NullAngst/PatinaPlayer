@@ -4611,6 +4611,7 @@ dependencies = [
  "notify",
  "pipewire",
  "reqwest",
+ "roxmltree",
  "rss",
  "rtrb",
  "rusqlite",

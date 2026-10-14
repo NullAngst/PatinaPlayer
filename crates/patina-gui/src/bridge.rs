@@ -37,6 +37,10 @@ enum Dlg {
     Feed,
     /// Adding a server, or editing the one with this name.
     Server(Option<String>),
+    /// Renaming a DLNA server, which has nothing else to edit.
+    RenameServer(String),
+    /// Picking one of the DLNA servers a search found.
+    Dlna(Vec<patina_core::remote::dlna::Found>),
     /// The paths, the servers offering "New playlist on…", the playlists.
     Pick(Vec<PathBuf>, Vec<String>, Vec<PlaylistRow>),
     /// Naming a new playlist on a server.
@@ -406,6 +410,7 @@ impl State {
                     Control::Text { value, .. } => (4, !value.is_empty()),
                     Control::Folder => (5, false),
                     Control::Action(_) if st.key == SettingKey::AddServer => (9, false),
+                    Control::Action(_) if st.key == SettingKey::FindDlna => (10, false),
                     Control::Action(_) => (6, false),
                     Control::Info(_) => (7, false),
                     Control::Server(_) => (8, false),
@@ -1045,14 +1050,13 @@ impl State {
         }
         self.snap = self.b.player.snapshot();
         self.poll_folder_pick();
+        if let Some(found) = self.b.take_dlna_found() {
+            self.open_dlna(ui, found);
+        }
         let theme = self.b.config.appearance.theme;
         if self.theme != Some(theme) {
             self.theme = Some(theme);
-            ui.global::<P>().set_theme(match theme {
-                Theme::Runout => 0,
-                Theme::KawaiiLight => 1,
-                Theme::KawaiiDark => 2,
-            });
+            ui.global::<P>().set_theme(theme.index());
             // The sidebar's Japanese names and the album kicker change too.
             self.last_gen = u64::MAX;
         }
@@ -1294,6 +1298,18 @@ impl State {
     /// The add or edit form for a server.
     fn open_server(&mut self, ui: &AppWindow, edit: Option<String>) {
         let cur = edit.as_ref().and_then(|n| self.b.server(n).cloned());
+        if let Some(c) = cur.as_ref().filter(|c| !c.kind.logs_in()) {
+            open_text(
+                ui,
+                "Rename DLNA server",
+                "Name, as the sidebar shows it",
+                &c.name,
+                None,
+                "Rename",
+            );
+            self.dlg = Dlg::RenameServer(c.name.clone());
+            return;
+        }
         let (name, url, user) = cur.map(|c| (c.name, c.url, c.user)).unwrap_or_default();
         open_text(
             ui,
@@ -1342,6 +1358,20 @@ impl State {
         );
     }
 
+    /// The servers a DLNA search found, to pick one to add.
+    fn open_dlna(&mut self, ui: &AppWindow, found: Vec<patina_core::remote::dlna::Found>) {
+        let items = found.iter().map(|f| ss(f.label()));
+        set_strings(&self.dlg_items, items);
+        ui.set_dlg_title(ss(if found.len() == 1 {
+            "Found a DLNA server. Add it?"
+        } else {
+            "Found DLNA servers. Add which?"
+        }));
+        ui.set_dlg_new_first(false);
+        ui.set_dialog(2);
+        self.dlg = Dlg::Dlna(found);
+    }
+
     fn confirm(&mut self, ui: &AppWindow, msg: String, ok: &str, c: Confirm) {
         ui.set_dlg_title(ss("Are you sure?"));
         ui.set_dlg_message(ss(msg));
@@ -1360,6 +1390,7 @@ impl State {
             Control::Choice { .. } => "choose",
             Control::Number { .. } | Control::Text { .. } => "edit",
             Control::Action(_) if st.key == SettingKey::AddServer => "add-server",
+            Control::Action(_) if st.key == SettingKey::FindDlna => "find-dlna",
             Control::Action(_) => "browse",
             Control::Server(_) => "sync",
             Control::Folder | Control::Info(_) => return,
@@ -1397,6 +1428,7 @@ impl State {
                 }
             }
             "add-server" => self.open_server(ui, None),
+            "find-dlna" => self.b.find_dlna(),
             "sync" => {
                 if let SettingKey::Server(n) = &key {
                     self.b.sync_server(Some(n));
@@ -1409,9 +1441,14 @@ impl State {
             }
             "srv-remove" => {
                 if let SettingKey::Server(n) = key {
+                    let login = self.b.server(&n).is_some_and(|c| c.kind.logs_in());
                     self.confirm(
                         ui,
-                        format!("Remove {n}? Its songs and playlists leave the library here, and its password leaves the keyring. Nothing changes on the server."),
+                        if login {
+                            format!("Remove {n}? Its songs and playlists leave the library here, and its password leaves the keyring. Nothing changes on the server.")
+                        } else {
+                            format!("Remove {n}? Its songs leave the library here. Nothing changes on the server, and Find servers can add it again.")
+                        },
                         "Remove",
                         Confirm::RemoveServer(n),
                     );
@@ -1659,6 +1696,7 @@ impl State {
                     None => self.b.add_server(&t1, &t2, &t3, &t4),
                 }
             }
+            Dlg::RenameServer(old) => self.b.edit_server(&old, &t1, "", "", None),
             Dlg::ServerPlaylist(server, paths) => {
                 self.b.create_server_playlist(&server, &t1, &paths)
             }
@@ -1671,7 +1709,7 @@ impl State {
                 Confirm::Unsubscribe(url) => self.b.unsubscribe(&url),
                 Confirm::RemoveServer(n) => self.b.remove_server(&n),
             },
-            Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Help | Dlg::None => {}
+            Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Dlna(_) | Dlg::Help | Dlg::None => {}
         }
         ui.set_dialog(0);
         ui.invoke_focus_root();
@@ -1685,6 +1723,16 @@ impl State {
             ui.invoke_focus_root();
             // A confirm may open in place of the picker.
             self.change_setting(ui, key, Change::Choose(i));
+            return;
+        }
+        if let Dlg::Dlna(found) = &self.dlg {
+            if let Some(f) = found.get(i) {
+                let f = f.clone();
+                self.b.add_dlna_server(&f);
+            }
+            self.dlg = Dlg::None;
+            ui.set_dialog(0);
+            ui.invoke_focus_root();
             return;
         }
         if let Dlg::Pick(paths, servers, rows) = std::mem::replace(&mut self.dlg, Dlg::None) {

@@ -1,8 +1,8 @@
 # PatinaPlayer
 
-PatinaPlayer is a Linux music player for Subsonic servers and local folders, for people who want a minimal interface on top of a serious playback chain.
+PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 6 of the build plan: everything from milestones 1 to 5.5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view and the kawaii themes), plus music servers: Subsonic (Navidrome, Gonic, Airsonic and the rest) and Ampache, with their playlists, stations, podcasts and play queue, and passwords kept in your keyring. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The cache and offline copies come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 6.5 of the build plan: everything from milestones 1 to 6 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the kawaii themes, and Subsonic and Ampache servers with their playlists, stations, podcasts and play queue), plus DLNA media servers found on your network (MiniDLNA, Gerbera, Jellyfin, Plex, Serviio, a NAS), and plain Light, Dark and OLED themes. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The cache and offline copies come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -19,6 +19,17 @@ This is milestone 6 of the build plan: everything from milestones 1 to 5.5 (the 
 - Passwords and API keys go in the desktop keyring through the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in config.toml. With no keyring running (a TTY, the TUI over SSH), they go in `~/.config/patinaplayer/secrets.toml`, readable only by you, and the app says so when it does it.
 - Logins use a salted token, or an API key where the server offers OpenSubsonic API keys (leave the user name empty and put the key in the password box). The plain password is never put in a URL.
 
+**DLNA servers**
+- MiniDLNA, Gerbera, Jellyfin, Plex, Serviio, Twonky and the media server on most NAS boxes, as sources in the sidebar like any other server.
+- No address to type and no login. Settings, Find DLNA servers asks the network who's there, lists what answered (name, model, address), and you pick one. DLNA has no passwords, so nothing goes in the keyring.
+- Its library is copied into the index like a Subsonic server's, so its songs are in every view, search and the stats, and browsing never waits on the network.
+- The library is read the best way the server allows. A folder view (MiniDLNA's Browse Folders, Gerbera's PC Directory, Serviio's and Twonky's Folders) gives the real folder tree, and where the server can also search, the tags come from the search, since some folder views title songs by file name. Without a folder view it searches for every song. Without either it walks the whole tree, and keeps each song once even though it shows under Artist, Album, Genre and All Tracks.
+- A sync only walks the server again when the server says its content changed (its update id), or every six hours, since some servers never say.
+- Songs stream as the original file, so bit-perfect works for them. DLNA servers that offer a converted copy alongside the original get the original.
+- Cover art comes from the server, or from a cover.jpg in the song's folder where the server lists one.
+- Songs are kept without the server's address, and the server is remembered by its unique id. If its address changes (a router handing out a new IP), PatinaPlayer finds it again on the network and the songs, play counts and playlists stay as they were.
+- Edit on a DLNA server renames it. There's nothing else to change.
+
 **Desktop app**
 - A Slint window in the dark verdigris look from the mockup (or one of the kawaii themes, below): sidebar of sections and sources, a header with back, forward and search, the open view, an optional queue panel, and the bottom bar with art, transport, seek, format badge, output and volume.
 - Albums, and an artist's or a genre's albums, show as a cover grid. An album opens with a header showing its cover, year, track count and length, and buttons to play, shuffle, queue or add it to a playlist.
@@ -30,8 +41,11 @@ This is milestone 6 of the build plan: everything from milestones 1 to 5.5 (the 
 - Inter, Noto Serif and JetBrains Mono are bundled, so it looks the same on any system.
 
 **Themes**
-- Three looks, picked in Settings under Appearance. The switch is instant, no restart.
+- Six looks, picked in Settings under Appearance. The switch is instant, no restart.
 - Runout: the default dark verdigris and copper.
+- Light: white and cool grey with one blue accent, and Inter for the headings. A plain light theme with nothing to get used to.
+- Dark: the same on neutral charcoal.
+- OLED: true black for the background, the sidebar, the bars and the dialogs, so an OLED screen switches those pixels off. Panes are told apart by thin borders instead of shades of grey. It's for OLED monitors now, and it's what phones will want when the Android app comes.
 - Kawaii Light: cream and strawberry pink with mint and butter accents, rounded everything, a faint dot pattern behind the views, a pink pill for the open section, hearts for the seek and volume knobs, sparkles on the album header, and a kaomoji here and there.
 - Kawaii Dark: the same thing on cocoa plum, for night.
 - The kawaii themes switch the type to M PLUS Rounded 1c and Zen Maru Gothic (both bundled) and put the Japanese name next to each sidebar section (アルバム, ラジオ, プレイリスト).
@@ -204,6 +218,15 @@ To add a music server:
 
 Now the server's albums fill in under Albums alongside your folders, and its playlists, stations and podcasts show up in their views.
 
+To add a DLNA server:
+
+1. Make sure it's on and on the same network as you (same router, same subnet).
+2. Open Settings and find Servers.
+3. Click Find servers… next to Find DLNA servers (in the TUI: select it and press Enter). It listens for about three seconds.
+4. Pick the server from the list. It's added under its own name and the sync starts.
+
+If nothing answers, the note says so. A firewall that drops incoming UDP is the usual cause: the answers come back to a random port, so ufw (or whichever firewall you run) has to let replies from the server's address in. Kubuntu ships with ufw off.
+
 You can still play files directly without touching the library: `patinaplayer song.flac ~/Downloads/SomeAlbum`. They go straight into the queue.
 
 ## Config
@@ -223,7 +246,7 @@ bit_perfect = "off"      # off, on or auto
 bit_perfect_device = ""  # like "hw:CARD=DAC,DEV=0"; empty is the first card
 
 [appearance]
-theme = "runout"         # runout, kawaii-light or kawaii-dark
+theme = "runout"         # runout, light, dark, oled, kawaii-light or kawaii-dark
 
 [playback]
 volume = 80              # starting volume, 0 to 100
@@ -245,6 +268,12 @@ user = "me"
 kind = "subsonic"                   # subsonic or ampache; Settings finds out
 stream = "raw"                      # raw (the original file), opus or mp3
 bitrate = 192                       # kbps, for opus and mp3
+
+[[server]]
+name = "NAS"                        # a DLNA server, as Find DLNA servers adds it
+url = "http://192.168.1.5:8200/rootDesc.xml"   # its description address
+kind = "dlna"
+udn = "uuid:4d696e69-444c-164e-9d41-363da121361f"   # its id, to find it again
 ```
 
 Settings, Radio and Podcasts edit this file for you, and keep the rest of it as you wrote it. Server passwords are never in it; they're in your keyring.
@@ -296,7 +325,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
 
-In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
@@ -316,7 +345,7 @@ crates/
     src/art.rs          finding, cropping and caching cover art
     src/radio.rs        station URL resolving: pls, m3u, HLS detection, mirror checks
     src/podcast.rs      feed fetching, episode downloads with resume
-    src/remote/         music servers: the Subsonic and Ampache clients, syncing into the index, the server threads
+    src/remote/         music servers: the Subsonic, Ampache and DLNA clients, syncing into the index, the server threads
     src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
     src/config.rs       config file and XDG paths
     src/player.rs       core thread: commands in, snapshots and events out
@@ -348,6 +377,8 @@ Server songs live in the same index as local files, under made-up paths like `se
 
 The server tests run stand-in servers inside the test itself: one that answers like Navidrome (OpenSubsonic fields, made-up paths), one like Gonic (prefixed ids, real paths, missing fields, one-item lists sent as a lone object) and an Ampache one whose sessions run out every few calls. `.github/workflows/servers.yml` then runs the same clients against real Navidrome, Gonic and Ampache containers. The keyring test runs its own small Secret Service on a private D-Bus, locked keyring and unlock prompt included.
 
+The DLNA tests run a stand-in media server that answers SSDP searches on a private address and ContentDirectory calls three ways: a folder view that titles songs by file name (like Gerbera), search only (like Jellyfin, with the media server nested in another device and a URLBase), and neither, with every song under three views. It also lists a converted MP3 before each original FLAC and hands out two items per page, so the paging and the pick of the original both get used. The servers workflow then runs the same client against real MiniDLNA and Gerbera.
+
 To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
 
 The network tests run a small HTTP server inside the test itself: an ICY stream that hangs up on purpose to check reconnects, a `.pls` with a dead first mirror, real HLS segments, an RSS feed, and a download that breaks halfway to check resume. No internet needed.
@@ -369,6 +400,12 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
 - Radio has no loudness leveling yet. The live normalizer for radio comes with leveling in milestone 9.
 - The server clients were tested here against stand-in servers built to the Subsonic, OpenSubsonic and Ampache API documents, with the quirks Navidrome and Gonic are known for. They haven't met a real server from this box, which can't reach the internet or run containers. The servers workflow runs them against real Navidrome and Gonic on GitHub; it hasn't run yet, so its first run is the real test. Its Ampache job sets Ampache up through Ampache's command-line installer, which I couldn't try here, so that job reports failures without failing the run.
+- DLNA was tested here against real MiniDLNA 1.3.3 and Gerbera 2.0 (found on the network, synced, covers, a song played through), and against the stand-in above. Jellyfin, Plex, Serviio and Twonky haven't been tried. The search and walk paths are there for the way they lay out their trees, but their first real run is yours. Jellyfin 10.9 and later ship DLNA as a plugin, so install it from the plugin catalogue first. Plex has its own DLNA switch in its settings.
+- DLNA servers have no playlists, play queue, stations or podcasts PatinaPlayer can reach, so a DLNA source is songs only. Its songs still go in your local playlists.
+- Folder paths on a DLNA server come from its folder view, and the file names are made from the track number and title, since DLNA doesn't send file names. On a server with no folder view they're Artist/Album/01 - Title, like Navidrome's.
+- Finding servers needs multicast on the local network. A server on another subnet or behind a VPN won't answer. Its description address (the `rootDesc.xml` or `description.xml` URL) can go in config.toml by hand as a `kind = "dlna"` server.
+- Gerbera only listens on the machine's network address, not on localhost, so on the machine it runs on it's found under that address.
+- The Light, Dark and OLED themes were checked under Xvfb like the rest. OLED was only looked at on a normal screen here, so how much power it saves on yours is your screen's business, but every background in it is #000000.
 - Server songs only play while the server can be reached. Offline copies and a cache come with milestone 7.
 - Play counts from server songs count here, and the server's own counts are taken in at sync, but plays aren't reported back to the server yet. That comes with Last.fm in milestone 11, along with the choice of who scrobbles (the app, the server, or both) so a play isn't counted twice.
 - Starring and ratings aren't synced yet, and neither are lyrics.
@@ -387,4 +424,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono, M PLUS Rounded 1c, Zen Maru Gothic) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/`.
 
-Now PatinaPlayer plays from your Navidrome, Gonic or Ampache server alongside your folders, with the server's library, playlists, stations and podcasts in the same views and the password kept in your keyring.
+Now PatinaPlayer plays from your Navidrome, Gonic or Ampache server and whatever DLNA box is on your network, alongside your folders, in Runout, plain Light or Dark, OLED black or the kawaii pair, and everything is working as it should be.

@@ -10,6 +10,7 @@ use patina_core::browse::{
     Browser, Change, Control, Item, Key as SettingKey, Note, Section, SideEntry, Source,
 };
 use patina_core::library::PlaylistRow;
+use patina_core::remote::dlna::Found;
 use patina_core::{Command, Event, Snapshot};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
@@ -45,6 +46,8 @@ pub enum InputPurpose {
     ServerUser(ServerForm),
     /// The password or API key. Drawn as dots, and not trimmed.
     ServerSecret(ServerForm),
+    /// A new name for a DLNA server, the one thing it has to edit.
+    RenameServer(String),
     /// A new playlist on a server.
     ServerPlaylist {
         server: String,
@@ -103,6 +106,11 @@ pub enum Modal {
     Confirm {
         msg: String,
         action: ConfirmAction,
+    },
+    /// DLNA servers a search found, to add one.
+    PickDlna {
+        found: Vec<Found>,
+        selected: usize,
     },
 }
 
@@ -172,6 +180,11 @@ impl App {
                 }
             }
             self.take_notes();
+            if matches!(self.modal, Modal::None)
+                && let Some(found) = self.b.take_dlna_found()
+            {
+                self.modal = Modal::PickDlna { found, selected: 0 };
+            }
             self.snap = self.b.player.snapshot();
             if self.theme.kind != self.b.config.appearance.theme {
                 self.theme = Theme::new(self.b.config.appearance.theme);
@@ -292,6 +305,25 @@ impl App {
                 rows,
                 selected,
             } => return self.pick_key(k, title, add, servers, rows, selected),
+            Modal::PickDlna {
+                found,
+                mut selected,
+            } => {
+                match k.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter => self.b.add_dlna_server(&found[selected]),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        self.modal = Modal::PickDlna { found, selected };
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(found.len() - 1);
+                        self.modal = Modal::PickDlna { found, selected };
+                    }
+                    _ => self.modal = Modal::PickDlna { found, selected },
+                }
+                return;
+            }
             Modal::Confirm { msg, action } => {
                 match k.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm(action),
@@ -598,6 +630,7 @@ impl App {
                         buf: value.clone(),
                     };
                 }
+                Control::Action(_) if st.key == SettingKey::FindDlna => self.b.find_dlna(),
                 Control::Action(_) if st.key == SettingKey::AddServer => {
                     self.modal = Modal::Input {
                         purpose: InputPurpose::ServerName(ServerForm::default()),
@@ -624,6 +657,13 @@ impl App {
                 let Some(sc) = self.b.server(name).cloned() else {
                     return false;
                 };
+                if !sc.kind.logs_in() {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::RenameServer(sc.name.clone()),
+                        buf: sc.name,
+                    };
+                    return true;
+                }
                 self.modal = Modal::Input {
                     purpose: InputPurpose::ServerName(ServerForm {
                         old: Some(sc.name.clone()),
@@ -755,6 +795,7 @@ impl App {
             InputPurpose::ServerPlaylist { server, add } => {
                 self.b.create_server_playlist(&server, &text, &add)
             }
+            InputPurpose::RenameServer(old) => self.b.edit_server(&old, &text, "", "", None),
             InputPurpose::ServerName(mut f) => {
                 if text.is_empty() {
                     return;

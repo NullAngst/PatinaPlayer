@@ -5,6 +5,8 @@
 //! - `PATINA_NAVIDROME=http://localhost:4533` (user `admin`, password `patina-pw`)
 //! - `PATINA_GONIC=http://localhost:4747` (user `admin`, password `admin`)
 //! - `PATINA_AMPACHE=http://localhost:8080` (user `admin`, password `patina-pw`)
+//! - `PATINA_DLNA=http://localhost:8200/rootDesc.xml` (MiniDLNA or
+//!   Gerbera; the server's description URL)
 //!
 //! `PATINA_SERVER_SONGS` says how many songs the test library holds.
 //! Run with `cargo test --test real_servers -- --ignored`.
@@ -43,6 +45,7 @@ fn check(name: &str, url: &str, user: &str, pw: &str, want: ServerKind) {
         kind,
         stream: StreamFormat::Raw,
         bitrate: 192,
+        udn: String::new(),
     };
     let c = remote::connect(&cfg, pw).unwrap();
 
@@ -176,4 +179,95 @@ fn ampache() {
         return;
     };
     check("Ampache", &url, "admin", "patina-pw", ServerKind::Ampache);
+}
+
+#[test]
+#[ignore = "needs a DLNA server (CI starts MiniDLNA)"]
+fn dlna() {
+    let Some(url) = env("PATINA_DLNA") else {
+        return;
+    };
+    let dev = remote::dlna::describe(&url).expect("its description");
+    eprintln!("DLNA: {} ({}), {}", dev.name, dev.model, dev.udn);
+    // It answers a search on the network, by the same id.
+    let found = remote::dlna::discover(Duration::from_secs(3));
+    eprintln!("DLNA: found {found:?}");
+    assert!(
+        found.iter().any(|f| f.udn == dev.udn),
+        "the server answered a search"
+    );
+    let cfg = ServerConfig {
+        name: "NAS".into(),
+        url: url.clone(),
+        kind: ServerKind::Dlna,
+        udn: dev.udn.clone(),
+        ..Default::default()
+    };
+    let c = remote::connect(&cfg, "").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.db");
+    let mut lib = Library::open(&db).unwrap();
+    let sync = |lib: &mut Library| {
+        sync::sync_library(
+            lib,
+            "NAS",
+            ServerKind::Dlna,
+            c.as_ref(),
+            false,
+            &|_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    };
+    let stats = sync(&mut lib);
+    eprintln!("DLNA: {stats:?}");
+    let songs = lib.songs(Default::default(), false).unwrap();
+    for t in &songs {
+        eprintln!("  {} | {:?} | {:?}", t.path.display(), t.album, t.codec);
+    }
+    assert_eq!(songs.len(), songs_expected(), "every song synced once");
+    assert!(
+        songs.iter().all(|t| t.duration.is_some()),
+        "every song has a length"
+    );
+    assert_eq!(
+        sync(&mut lib).albums,
+        0,
+        "a second sync fetches nothing new"
+    );
+
+    // A song plays all the way through from the server, with its cover.
+    remote::registry().set_client("NAS", Some(c.clone()));
+    remote::registry().set_db("NAS", Some(Library::open(&db).unwrap()));
+    // The test library has a cover.jpg in one album.
+    assert!(
+        songs
+            .iter()
+            .any(|t| patina_core::art::load(&t.path, 64).is_some()),
+        "DLNA: a cover loads"
+    );
+    let player = Player::spawn(PlayerConfig {
+        output: OutputConfig {
+            backend: Backend::Null,
+            ..Default::default()
+        },
+        fade_ms: 0,
+        ..Default::default()
+    });
+    player.send(Command::SetQueueTracks {
+        tracks: vec![songs[0].to_info()],
+        start: 0,
+        pos: Duration::ZERO,
+    });
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        assert!(Instant::now() < deadline, "DLNA: never finished playing");
+        match player.events().recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Finished) => break,
+            Ok(Event::Error(e)) => panic!("DLNA: {e}"),
+            _ => {}
+        }
+    }
+    player.send(Command::Quit);
+    remote::registry().remove("NAS");
 }

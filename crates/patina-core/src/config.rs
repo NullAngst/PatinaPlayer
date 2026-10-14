@@ -103,10 +103,24 @@ pub enum Theme {
     KawaiiLight,
     /// The same, on dreamy lavender.
     KawaiiDark,
+    /// Plain light: white and grey, one blue accent.
+    Light,
+    /// Plain dark: charcoal grey, the same blue.
+    Dark,
+    /// True black, so an OLED screen switches those pixels off. Saves
+    /// battery on phones and stops grey glow in a dark room.
+    Oled,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 3] = [Theme::Runout, Theme::KawaiiLight, Theme::KawaiiDark];
+    pub const ALL: [Theme; 6] = [
+        Theme::Runout,
+        Theme::Light,
+        Theme::Dark,
+        Theme::Oled,
+        Theme::KawaiiLight,
+        Theme::KawaiiDark,
+    ];
 
     /// As written in config.toml.
     pub fn as_str(self) -> &'static str {
@@ -114,6 +128,9 @@ impl Theme {
             Theme::Runout => "runout",
             Theme::KawaiiLight => "kawaii-light",
             Theme::KawaiiDark => "kawaii-dark",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+            Theme::Oled => "oled",
         }
     }
 
@@ -122,11 +139,31 @@ impl Theme {
             Theme::Runout => "Runout",
             Theme::KawaiiLight => "Kawaii Light",
             Theme::KawaiiDark => "Kawaii Dark",
+            Theme::Light => "Light",
+            Theme::Dark => "Dark",
+            Theme::Oled => "OLED (true black)",
+        }
+    }
+
+    /// The GUI's palette number.
+    pub fn index(self) -> i32 {
+        match self {
+            Theme::Runout => 0,
+            Theme::KawaiiLight => 1,
+            Theme::KawaiiDark => 2,
+            Theme::Light => 3,
+            Theme::Dark => 4,
+            Theme::Oled => 5,
         }
     }
 
     pub fn is_kawaii(self) -> bool {
-        self != Theme::Runout
+        matches!(self, Theme::KawaiiLight | Theme::KawaiiDark)
+    }
+
+    /// Dark text on a pale ground.
+    pub fn is_light(self) -> bool {
+        matches!(self, Theme::KawaiiLight | Theme::Light)
     }
 }
 
@@ -136,7 +173,11 @@ impl std::str::FromStr for Theme {
         Theme::ALL
             .into_iter()
             .find(|t| t.as_str().eq_ignore_ascii_case(s.trim()))
-            .ok_or_else(|| format!("unknown theme \"{s}\" (runout, kawaii-light, kawaii-dark)"))
+            .ok_or_else(|| {
+                format!(
+                    "unknown theme \"{s}\" (runout, light, dark, oled, kawaii-light, kawaii-dark)"
+                )
+            })
     }
 }
 
@@ -217,6 +258,7 @@ struct RawServer {
     kind: Option<String>,
     stream: Option<String>,
     bitrate: Option<u32>,
+    udn: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -311,16 +353,22 @@ impl Config {
             if servers.iter().any(|x| x.name == name) {
                 return Err(parse_err(format!("two servers are called \"{name}\"")));
             }
+            let kind = match s.kind {
+                Some(k) => k
+                    .parse::<ServerKind>()
+                    .map_err(|m| parse_err(format!("server.kind: {m}")))?,
+                None => ServerKind::Subsonic,
+            };
             servers.push(ServerConfig {
                 name,
-                url: crate::remote::normalize_url(&s.url),
-                user: s.user.trim().to_string(),
-                kind: match s.kind {
-                    Some(k) => k
-                        .parse::<ServerKind>()
-                        .map_err(|m| parse_err(format!("server.kind: {m}")))?,
-                    None => ServerKind::Subsonic,
+                // A DLNA address is the exact description URL.
+                url: if kind == ServerKind::Dlna {
+                    s.url.trim().to_string()
+                } else {
+                    crate::remote::normalize_url(&s.url)
                 },
+                user: s.user.trim().to_string(),
+                kind,
                 stream: match s.stream {
                     Some(f) => f
                         .parse::<StreamFormat>()
@@ -328,6 +376,7 @@ impl Config {
                     None => StreamFormat::Raw,
                 },
                 bitrate: s.bitrate.unwrap_or(192).clamp(32, 512),
+                udn: s.udn.unwrap_or_default().trim().to_string(),
             });
         }
         let theme = match look.theme {
@@ -458,9 +507,10 @@ bit_perfect = "off"
 bit_perfect_device = ""
 
 [appearance]
-# How the app looks: runout (dark verdigris and copper), kawaii-light
-# (pastel pink and cream) or kawaii-dark (pastel on lavender). The TUI
-# follows it too.
+# How the app looks: runout (dark verdigris and copper), light or dark
+# (plain grey with a blue accent), oled (true black, for OLED screens),
+# kawaii-light (pastel pink and cream) or kawaii-dark (pastel on lavender).
+# The TUI follows it too.
 theme = "runout"
 
 [playback]
@@ -575,10 +625,17 @@ pub fn set_servers(path: &Path, servers: &[ServerConfig]) -> Result<bool, Config
             let mut t = toml_edit::Table::new();
             t.insert("name", toml_edit::value(s.name.clone()));
             t.insert("url", toml_edit::value(s.url.clone()));
-            t.insert("user", toml_edit::value(s.user.clone()));
             t.insert("kind", toml_edit::value(s.kind.as_str()));
-            t.insert("stream", toml_edit::value(s.stream.as_str()));
-            t.insert("bitrate", toml_edit::value(i64::from(s.bitrate)));
+            if s.kind.logs_in() {
+                t.insert("user", toml_edit::value(s.user.clone()));
+            }
+            if s.kind.transcodes() {
+                t.insert("stream", toml_edit::value(s.stream.as_str()));
+                t.insert("bitrate", toml_edit::value(i64::from(s.bitrate)));
+            }
+            if !s.udn.is_empty() {
+                t.insert("udn", toml_edit::value(s.udn.clone()));
+            }
             arr.push(t);
         }
         if arr.is_empty() {
@@ -715,10 +772,19 @@ mod tests {
             kind: ServerKind::Ampache,
             stream: StreamFormat::Opus,
             bitrate: 128,
+            udn: String::new(),
         };
-        set_servers(&p, std::slice::from_ref(&s)).unwrap();
+        let dlna = ServerConfig {
+            name: "NAS".into(),
+            url: "http://192.168.1.5:8200/rootDesc.xml".into(),
+            kind: ServerKind::Dlna,
+            bitrate: 192,
+            udn: "uuid:4d696e69-444c-164e-9d41-363da121361f".into(),
+            ..Default::default()
+        };
+        set_servers(&p, &[s.clone(), dlna.clone()]).unwrap();
         let c = Config::load_from(&p).unwrap();
-        assert_eq!(c.servers, vec![s]);
+        assert_eq!(c.servers, vec![s, dlna]);
         assert_eq!(c.playback.volume, 50);
         assert!(std::fs::read_to_string(&p).unwrap().contains("# mine"));
         set_servers(&p, &[]).unwrap();
@@ -733,6 +799,8 @@ mod tests {
     fn themes_parse() {
         let c = Config::parse("[appearance]\ntheme = \"kawaii-dark\"\n", Path::new("x")).unwrap();
         assert_eq!(c.appearance.theme, Theme::KawaiiDark);
+        let c = Config::parse("[appearance]\ntheme = \"OLED\"\n", Path::new("x")).unwrap();
+        assert_eq!(c.appearance.theme, Theme::Oled);
         assert!(Config::parse("[appearance]\ntheme = \"neon\"\n", Path::new("x")).is_err());
         for t in Theme::ALL {
             assert_eq!(t.as_str().parse::<Theme>(), Ok(t));

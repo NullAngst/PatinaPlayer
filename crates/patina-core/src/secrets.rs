@@ -51,6 +51,8 @@ pub enum Stored {
     Keyring,
     /// No keyring answered, so it's in this file.
     File(PathBuf),
+    /// Nothing to keep: the server has no login.
+    NotNeeded,
 }
 
 /// (session, parameters, value, content type)

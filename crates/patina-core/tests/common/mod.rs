@@ -5,7 +5,9 @@
 //! the flavor: Navidrome's OpenSubsonic fields, made-up paths and hex ids;
 //! Gonic's "al-"/"tr-" ids, real paths, missing fields and lists sent as a
 //! lone object. The Ampache one follows the JSON API 6 documentation,
-//! sessions that run out included.
+//! sessions that run out included. The DLNA one answers SSDP searches and
+//! ContentDirectory calls three ways: a folder view like MiniDLNA, search
+//! only like Jellyfin, or neither, with every song under several views.
 
 #![allow(dead_code)]
 
@@ -27,6 +29,7 @@ pub struct Request {
     pub path: String,
     pub query: Vec<(String, String)>,
     pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
 }
 
 impl Request {
@@ -123,7 +126,11 @@ fn handle(s: TcpStream, h: &Handler) -> std::io::Result<()> {
     let mut query: Vec<(String, String)> = url::form_urlencoded::parse(q.as_bytes())
         .into_owned()
         .collect();
-    if method == "POST" {
+    if method == "POST"
+        && headers
+            .get("content-type")
+            .is_some_and(|c| c.contains("form-urlencoded"))
+    {
         query.extend(url::form_urlencoded::parse(&body).into_owned());
     }
     let req = Request {
@@ -131,6 +138,7 @@ fn handle(s: TcpStream, h: &Handler) -> std::io::Result<()> {
         path: path.to_string(),
         query,
         headers,
+        body,
     };
     let resp = h(&req);
     let mut out = s;
@@ -879,4 +887,419 @@ pub fn write_secret(path: &Path, server: &str, user: &str, secret: &str) {
     patina_core::secrets::Secrets::with(None, path.to_path_buf())
         .set(server, user, secret)
         .unwrap();
+}
+
+// ----- DLNA -----
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DlnaFlavor {
+    /// MiniDLNA: "Browse Folders" at the top, the real folder tree in it.
+    Folders,
+    /// Jellyfin and friends: no folder view, but Search by class works.
+    Search,
+    /// Neither: Artists, Albums and All Tracks, every song under each.
+    Tree,
+}
+
+pub struct DlnaState {
+    pub lib: State,
+    pub update_id: u32,
+    /// "Browse <id>" and "Search" for every call.
+    pub calls: Vec<String>,
+}
+
+pub struct Dlna {
+    /// The description URL.
+    pub url: String,
+    pub udn: String,
+    pub name: String,
+    /// Where it answers SSDP searches.
+    pub ssdp: std::net::SocketAddr,
+    pub state: Arc<Mutex<DlnaState>>,
+}
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// A DIDL child: a container, or a song.
+enum Node {
+    Dir(String, String),
+    Song(String, Box<(MAlbum, MSong)>),
+}
+
+impl Dlna {
+    pub fn start(flavor: DlnaFlavor, name: &str) -> Self {
+        let state = Arc::new(Mutex::new(DlnaState {
+            lib: library(false),
+            update_id: 1,
+            calls: Vec::new(),
+        }));
+        let udn = format!("uuid:patina-test-{:?}-{}", flavor, name.len());
+        let base = Arc::new(Mutex::new(String::new()));
+        let st = state.clone();
+        let (u, n, b) = (udn.clone(), name.to_string(), base.clone());
+        let url = serve(Arc::new(move |r: &Request| {
+            let base = b.lock().unwrap().clone();
+            dlna(flavor, &st, &u, &n, &base, r)
+        }));
+        *base.lock().unwrap() = url.clone();
+        let desc = format!("{url}/desc.xml");
+        // SSDP, answered on a private address instead of the multicast group.
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let ssdp = sock.local_addr().unwrap();
+        let (d, u) = (desc.clone(), udn.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, from)) = sock.recv_from(&mut buf) {
+                let msg = String::from_utf8_lossy(&buf[..n]);
+                if msg.starts_with("M-SEARCH") && msg.contains("ssdp:discover") {
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: {d}\r\n\
+                         SERVER: Linux UPnP/1.0 PatinaMock/1\r\n\
+                         ST: urn:schemas-upnp-org:device:MediaServer:1\r\n\
+                         USN: {u}::urn:schemas-upnp-org:device:MediaServer:1\r\n\r\n"
+                    );
+                    let _ = sock.send_to(reply.as_bytes(), from);
+                }
+            }
+        });
+        Self {
+            url: desc,
+            udn,
+            name: name.into(),
+            ssdp,
+            state,
+        }
+    }
+
+    pub fn browses(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|c| c.starts_with("Browse") || c.starts_with("Search"))
+            .count()
+    }
+}
+
+fn soap_ok(action: &str, inner: &str) -> Response {
+    Response::bytes(
+        "text/xml; charset=\"utf-8\"",
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
+             s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>\
+             <u:{action}Response xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">{inner}\
+             </u:{action}Response></s:Body></s:Envelope>"
+        )
+        .into_bytes(),
+    )
+}
+
+fn soap_fault(code: u32, msg: &str) -> Response {
+    Response {
+        status: 500,
+        ctype: "text/xml".into(),
+        body: format!(
+            "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
+             <s:Fault><faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring><detail>\
+             <UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>{code}</errorCode>\
+             <errorDescription>{msg}</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>"
+        )
+        .into_bytes(),
+    }
+}
+
+fn didl_item(flavor: DlnaFlavor, base: &str, id: &str, a: &MAlbum, s: &MSong) -> String {
+    let num: String = s.id.chars().filter(char::is_ascii_digit).collect();
+    // Search servers name the album artist with a role, like Jellyfin.
+    let album_artist = if flavor == DlnaFlavor::Search {
+        format!(
+            "<upnp:artist role=\"AlbumArtist\">{}</upnp:artist>",
+            esc(&a.artist)
+        )
+    } else {
+        String::new()
+    };
+    // A converted copy first, to check the original wins.
+    format!(
+        "<item id=\"{id}\" parentID=\"p\" restricted=\"1\"><dc:title>{}</dc:title>\
+         <upnp:class>object.item.audioItem.musicTrack</upnp:class>\
+         <dc:creator>{}</dc:creator><upnp:artist>{}</upnp:artist>{album_artist}\
+         <upnp:album>{}</upnp:album><upnp:genre>{}</upnp:genre><dc:date>{}-01-01</dc:date>\
+         <upnp:originalTrackNumber>{}</upnp:originalTrackNumber>\
+         <upnp:albumArtURI dlna:profileID=\"PNG_TN\">{base}/art/{}.png</upnp:albumArtURI>\
+         <res protocolInfo=\"http-get:*:audio/mpeg:DLNA.ORG_PN=MP3;DLNA.ORG_CI=1\">{base}/transcode/{num}.mp3</res>\
+         <res size=\"{}\" duration=\"0:00:01.000\" sampleFrequency=\"44100\" nrAudioChannels=\"2\" \
+         protocolInfo=\"http-get:*:audio/x-flac:*\">{base}/media/{num}.flac</res></item>",
+        esc(&s.title),
+        esc(&s.artist),
+        esc(&s.artist),
+        esc(&a.name),
+        esc(&a.genre),
+        a.year,
+        s.track,
+        a.id,
+        audio().len(),
+    )
+}
+
+/// The children of a container, by flavor.
+fn children(flavor: DlnaFlavor, lib: &State, id: &str) -> Option<Vec<Node>> {
+    let dir = |id: &str, t: &str| Node::Dir(id.to_string(), t.to_string());
+    let artists = || {
+        let mut v: Vec<String> = lib.albums.iter().map(|a| a.artist.clone()).collect();
+        v.dedup();
+        v
+    };
+    let all_songs = |prefix: &str| {
+        lib.albums
+            .iter()
+            .flat_map(|a| {
+                a.songs.iter().map(move |s| {
+                    Node::Song(
+                        format!("{prefix}{}", s.id),
+                        Box::new((a.clone(), s.clone())),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let album_songs = |prefix: &str, aid: &str| {
+        lib.albums.iter().find(|a| a.id == aid).map(|a| {
+            a.songs
+                .iter()
+                .map(|s| {
+                    Node::Song(
+                        format!("{prefix}{}", s.id),
+                        Box::new((a.clone(), s.clone())),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    Some(match (flavor, id) {
+        (DlnaFlavor::Folders, "0") => vec![
+            dir("1", "Music"),
+            dir("2", "Video"),
+            dir("64", "Browse Folders"),
+        ],
+        (DlnaFlavor::Folders, "1") => vec![dir("1$7", "All Music")],
+        (DlnaFlavor::Folders, "1$7") => all_songs("1$7$"),
+        (DlnaFlavor::Folders, "64") => vec![
+            dir("64$0", "Music"),
+            dir("64$1", "Pictures"),
+            dir("64$2", "Video"),
+        ],
+        (DlnaFlavor::Folders, "64$0") => artists()
+            .iter()
+            .enumerate()
+            .map(|(i, a)| dir(&format!("64$0${i}"), a))
+            .collect(),
+        (DlnaFlavor::Folders, f) if f.starts_with("64$0$") => {
+            let rest = &f["64$0$".len()..];
+            match rest.split_once('$') {
+                None => {
+                    let artist = artists().get(rest.parse::<usize>().ok()?)?.clone();
+                    lib.albums
+                        .iter()
+                        .filter(|a| a.artist == artist)
+                        .map(|a| dir(&format!("{f}${}", a.id), &a.name))
+                        .collect()
+                }
+                // Titled by file name, as Gerbera's folder view does; the
+                // tags come from search.
+                Some((_, aid)) => album_songs(&format!("{f}$"), aid)?
+                    .into_iter()
+                    .map(|n| match n {
+                        Node::Song(id, mut b) => {
+                            let file = b.1.path.rsplit('/').next().unwrap_or("").to_string();
+                            b.1.title = file
+                                .rsplit_once('.')
+                                .map_or(file.clone(), |(s, _)| s.to_string());
+                            Node::Song(id, b)
+                        }
+                        dir => dir,
+                    })
+                    .collect(),
+            }
+        }
+        (DlnaFlavor::Search | DlnaFlavor::Tree, "0") => vec![dir("music", "Music")],
+        (DlnaFlavor::Search, "music") => vec![dir("albums", "Albums")],
+        (DlnaFlavor::Tree, "music") => vec![
+            dir("artists", "Artists"),
+            dir("albums", "Albums"),
+            dir("all", "All Tracks"),
+        ],
+        (_, "albums") => lib
+            .albums
+            .iter()
+            .map(|a| dir(&format!("album:{}", a.id), &a.name))
+            .collect(),
+        (_, a) if a.starts_with("album:") => album_songs("alb:", &a[6..])?,
+        (DlnaFlavor::Tree, "artists") => artists()
+            .iter()
+            .enumerate()
+            .map(|(i, a)| dir(&format!("artist:{i}"), a))
+            .collect(),
+        (DlnaFlavor::Tree, a) if a.starts_with("artist:") => {
+            let artist = artists().get(a[7..].parse::<usize>().ok()?)?.clone();
+            lib.albums
+                .iter()
+                .filter(|x| x.artist == artist)
+                .map(|x| dir(&format!("album:{}", x.id), &x.name))
+                .collect()
+        }
+        (DlnaFlavor::Tree, "all") => all_songs("all:"),
+        _ => return None,
+    })
+}
+
+fn dlna(
+    flavor: DlnaFlavor,
+    st: &Mutex<DlnaState>,
+    udn: &str,
+    name: &str,
+    base: &str,
+    r: &Request,
+) -> Response {
+    let path = r.path.as_str();
+    if path == "/desc.xml" {
+        let service = "<serviceList><service>\
+             <serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>\
+             <serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId>\
+             <controlURL>ctl/cd</controlURL><SCPDURL>/cd.xml</SCPDURL></service></serviceList>";
+        let device = format!(
+            "<device><deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>\
+             <friendlyName>{}</friendlyName><manufacturer>Patina</manufacturer>\
+             <modelName>Mock Media Server</modelName><modelNumber>1.0</modelNumber>\
+             <UDN>{udn}</UDN>{service}</device>",
+            esc(name)
+        );
+        // The search flavor nests the media server in another device and
+        // sets URLBase, as some NAS boxes do.
+        let body = if flavor == DlnaFlavor::Search {
+            format!(
+                "<?xml version=\"1.0\"?><root xmlns=\"urn:schemas-upnp-org:device-1-0\">\
+                 <specVersion><major>1</major><minor>0</minor></specVersion><URLBase>{base}/</URLBase>\
+                 <device><deviceType>urn:schemas-upnp-org:device:Basic:1</deviceType>\
+                 <friendlyName>NAS box</friendlyName><UDN>uuid:outer</UDN>\
+                 <deviceList>{device}</deviceList></device></root>"
+            )
+        } else {
+            format!(
+                "<?xml version=\"1.0\"?><root xmlns=\"urn:schemas-upnp-org:device-1-0\">\
+                 <specVersion><major>1</major><minor>0</minor></specVersion>{device}</root>"
+            )
+        };
+        return Response::bytes("text/xml", body.into_bytes());
+    }
+    if let Some(n) = path.strip_prefix("/media/") {
+        st.lock().unwrap().calls.push(format!("GET {n}"));
+        return Response::bytes("audio/x-flac", (*audio()).clone());
+    }
+    if path.starts_with("/transcode/") {
+        return Response::not_found();
+    }
+    if path.starts_with("/art/") {
+        return Response::bytes("image/png", png());
+    }
+    // The control URL is relative to the description.
+    if path != "/ctl/cd" || r.method != "POST" {
+        return Response::not_found();
+    }
+    let action = r
+        .headers
+        .get("soapaction")
+        .and_then(|a| {
+            a.trim_matches('"')
+                .rsplit_once('#')
+                .map(|(_, a)| a.to_string())
+        })
+        .unwrap_or_default();
+    let body = String::from_utf8_lossy(&r.body).to_string();
+    let Ok(doc) = roxmltree::Document::parse(&body) else {
+        return soap_fault(401, "Invalid Action");
+    };
+    let arg = |n: &str| {
+        doc.descendants()
+            .find(|x| x.tag_name().name() == n)
+            .and_then(|x| x.text())
+            .unwrap_or("")
+            .to_string()
+    };
+    let mut s = st.lock().unwrap();
+    match action.as_str() {
+        "GetSystemUpdateID" => soap_ok(&action, &format!("<Id>{}</Id>", s.update_id)),
+        "GetSearchCapabilities" => soap_ok(
+            &action,
+            match flavor {
+                DlnaFlavor::Tree => "<SearchCaps></SearchCaps>",
+                _ => "<SearchCaps>dc:title,upnp:class,upnp:artist</SearchCaps>",
+            },
+        ),
+        "Browse" | "Search" => {
+            let nodes = if action == "Browse" {
+                let id = arg("ObjectID");
+                s.calls.push(format!("Browse {id}"));
+                match children(flavor, &s.lib, &id) {
+                    Some(n) => n,
+                    None => return soap_fault(701, "No such object"),
+                }
+            } else {
+                s.calls.push("Search".into());
+                if flavor == DlnaFlavor::Tree {
+                    return soap_fault(708, "Unsupported or invalid search criteria");
+                }
+                assert!(arg("SearchCriteria").contains("object.item.audioItem"));
+                children(flavor, &s.lib, "albums")
+                    .unwrap()
+                    .into_iter()
+                    .flat_map(|n| match n {
+                        Node::Dir(id, _) => children(flavor, &s.lib, &id).unwrap(),
+                        song => vec![song],
+                    })
+                    .collect()
+            };
+            let start: usize = arg("StartingIndex").parse().unwrap_or(0);
+            let want: usize = arg("RequestedCount").parse().unwrap_or(0);
+            // Two at a time at most, as servers may, so paging gets used.
+            let want = if want == 0 { 2 } else { want.min(2) };
+            let page: Vec<&Node> = nodes.iter().skip(start).take(want).collect();
+            let mut didl = String::from(
+                "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" \
+                 xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+                 xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" \
+                 xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">",
+            );
+            for n in &page {
+                match n {
+                    Node::Dir(id, t) => didl.push_str(&format!(
+                        "<container id=\"{}\" parentID=\"p\" restricted=\"1\"><dc:title>{}</dc:title>\
+                         <upnp:class>object.container.storageFolder</upnp:class></container>",
+                        esc(id),
+                        esc(t)
+                    )),
+                    Node::Song(id, b) => didl.push_str(&didl_item(flavor, base, id, &b.0, &b.1)),
+                }
+            }
+            didl.push_str("</DIDL-Lite>");
+            soap_ok(
+                &action,
+                &format!(
+                    "<Result>{}</Result><NumberReturned>{}</NumberReturned>\
+                     <TotalMatches>{}</TotalMatches><UpdateID>{}</UpdateID>",
+                    esc(&didl),
+                    page.len(),
+                    nodes.len(),
+                    s.update_id
+                ),
+            )
+        }
+        _ => soap_fault(401, "Invalid Action"),
+    }
 }

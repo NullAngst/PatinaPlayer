@@ -19,48 +19,92 @@ import "fonts/ZenMaruGothic-Black.ttf";
 
 // ----- Palette -----
 //
-// Three themes, picked in Settings: 0 Runout (dark verdigris and copper),
+// Six themes, picked in Settings: 0 Runout (dark verdigris and copper),
 // 1 Kawaii Light (Sakura Milk: cream and strawberry pink), 2 Kawaii Dark
-// (the same pink and butter on cocoa plum). The names are Runout's;
+// (the same pink and butter on cocoa plum), 3 Light and 4 Dark (plain
+// greys and one blue), 5 OLED (true black). The names are Runout's;
 // `verdigris` is the main accent and `copper` the warm one in every theme.
+struct Palette {
+    bg: color,
+    surface: color,
+    raised: color,
+    border: color,
+    text: color,
+    muted: color,
+    verdigris: color,
+    verdigris-dim: color,
+    copper: color,
+    copper-dim: color,
+    wave: color,
+    on-accent: color,
+    playing-bg: color,
+    accent-text: color,
+    hover: color,
+    sel-idle: color,
+    accent-hover: color,
+    chip-hover: color,
+    accent-edge: color,
+    scrim: color,
+    shadow: color,
+    mint: color,
+    butter: color,
+    dots: color,
+}
 
 export global P {
     in-out property <int> theme: 0;
-    out property <bool> kawaii: theme != 0;
-    out property <bool> light: theme == 1;
+    out property <bool> kawaii: theme == 1 || theme == 2;
+    // A light palette: dark text on a pale ground.
+    out property <bool> light: theme == 1 || theme == 3;
+    property <[Palette]> all: [
+        // Runout
+        { bg: #0e1917, surface: #132220, raised: #172a27, border: #2a3d39, text: #e6ece9, muted: #8fa39d, verdigris: #5fb8a5, verdigris-dim: #2f5f55, copper: #d4884a, copper-dim: #5a3a22, wave: #4a5f5a, on-accent: #0b1513, playing-bg: #5fb8a51f, accent-text: #5fb8a5, hover: #15262399, sel-idle: #15262380, accent-hover: #6fc8b5, chip-hover: #1d332f, accent-edge: transparent, scrim: #050b0acc, shadow: #00000090, mint: #8ed8c3, butter: #ffd27a, dots: #34252f },
+        // Kawaii Light
+        { bg: #fff8f5, surface: #fff0f2, raised: #ffe6ec, border: #f6cfd9, text: #5a3e47, muted: #a8818d, verdigris: #ff7fa8, verdigris-dim: #ffc2d5, copper: #e0864a, copper-dim: #f6d2b6, wave: #ecc9d3, on-accent: #ffffff, playing-bg: #ffe3ec, accent-text: #e0558a, hover: #ffeef3, sel-idle: #ffeaf0, accent-hover: #ff95b8, chip-hover: #ffeef3, accent-edge: #e4648d, scrim: #5a3e4766, shadow: #b06a8040, mint: #5cc4a8, butter: #ffc95e, dots: #f8d9e2 },
+        // Kawaii Dark
+        { bg: #241a22, surface: #2d2029, raised: #3b2a36, border: #553d4c, text: #fbe9ef, muted: #c49aab, verdigris: #ff8fb3, verdigris-dim: #7a3f5c, copper: #ffd27a, copper-dim: #6a5530, wave: #6e5262, on-accent: #3a1626, playing-bg: #ff8fb326, accent-text: #ff8fb3, hover: #3b2a3699, sel-idle: #3b2a3680, accent-hover: #ffa6c3, chip-hover: #4a3542, accent-edge: #c25a82, scrim: #120c11cc, shadow: #00000090, mint: #8ed8c3, butter: #ffd27a, dots: #34252f },
+        // Light
+        { bg: #ffffff, surface: #f5f6f8, raised: #eaedf1, border: #dcdfe5, text: #1d1f23, muted: #686d76, verdigris: #2f6fde, verdigris-dim: #c6d8f7, copper: #b85a17, copper-dim: #f1d6c2, wave: #c3c8d0, on-accent: #ffffff, playing-bg: #2f6fde14, accent-text: #2a62c9, hover: #eff1f4, sel-idle: #f2f4f7, accent-hover: #4580e6, chip-hover: #e8ebef, accent-edge: transparent, scrim: #1d1f2366, shadow: #0000002e, mint: #2f9e7c, butter: #c99a1e, dots: #e6e9ee },
+        // Dark
+        { bg: #1c1d21, surface: #24262b, raised: #2d3036, border: #3a3d44, text: #e8e9ec, muted: #9a9ea7, verdigris: #5b9cf5, verdigris-dim: #2b4670, copper: #e09a5b, copper-dim: #5a3e26, wave: #4a4e57, on-accent: #0e1420, playing-bg: #5b9cf51f, accent-text: #6aa6f7, hover: #2a2c3199, sel-idle: #2a2c3180, accent-hover: #74adf7, chip-hover: #33363c, accent-edge: transparent, scrim: #000000b3, shadow: #00000090, mint: #5cc4a8, butter: #e5c15a, dots: #2a2c31 },
+        // OLED
+        { bg: #000000, surface: #000000, raised: #121212, border: #1f1f1f, text: #f2f2f2, muted: #8a8a8a, verdigris: #6aa8ff, verdigris-dim: #1d3354, copper: #f0a868, copper-dim: #3d2a18, wave: #333333, on-accent: #000000, playing-bg: #6aa8ff1a, accent-text: #7ab2ff, hover: #0d0d0d, sel-idle: #0a0a0a, accent-hover: #85b8ff, chip-hover: #1a1a1a, accent-edge: transparent, scrim: #000000d9, shadow: #00000000, mint: #5cc4a8, butter: #e5c15a, dots: #0d0d0d },
+    ];
+    property <Palette> c: all[theme];
 
-    out property <color> bg: theme == 1 ? #fff8f5 : theme == 2 ? #241a22 : #0e1917;
-    out property <color> surface: theme == 1 ? #fff0f2 : theme == 2 ? #2d2029 : #132220;
-    out property <color> raised: theme == 1 ? #ffe6ec : theme == 2 ? #3b2a36 : #172a27;
-    out property <color> border: theme == 1 ? #f6cfd9 : theme == 2 ? #553d4c : #2a3d39;
-    out property <color> text: theme == 1 ? #5a3e47 : theme == 2 ? #fbe9ef : #e6ece9;
-    out property <color> muted: theme == 1 ? #a8818d : theme == 2 ? #c49aab : #8fa39d;
-    out property <color> verdigris: theme == 1 ? #ff7fa8 : theme == 2 ? #ff8fb3 : #5fb8a5;
-    out property <color> verdigris-dim: theme == 1 ? #ffc2d5 : theme == 2 ? #7a3f5c : #2f5f55;
-    out property <color> copper: theme == 1 ? #e0864a : theme == 2 ? #ffd27a : #d4884a;
-    out property <color> copper-dim: theme == 1 ? #f6d2b6 : theme == 2 ? #6a5530 : #5a3a22;
-    out property <color> wave: theme == 1 ? #ecc9d3 : theme == 2 ? #6e5262 : #4a5f5a;
-    out property <color> on-accent: theme == 1 ? #ffffff : theme == 2 ? #3a1626 : #0b1513;
-    out property <color> playing-bg: theme == 1 ? #ffe3ec : theme == 2 ? #ff8fb326 : #5fb8a51f;
-    // Text in the accent colour. Light pink on cream is too faint to read,
-    // so the light theme takes a deeper pink for it.
-    out property <color> accent-text: theme == 1 ? #e0558a : verdigris;
+    out property <color> bg: c.bg;
+    out property <color> surface: c.surface;
+    out property <color> raised: c.raised;
+    out property <color> border: c.border;
+    out property <color> text: c.text;
+    out property <color> muted: c.muted;
+    out property <color> verdigris: c.verdigris;
+    out property <color> verdigris-dim: c.verdigris-dim;
+    out property <color> copper: c.copper;
+    out property <color> copper-dim: c.copper-dim;
+    out property <color> wave: c.wave;
+    out property <color> on-accent: c.on-accent;
+    out property <color> playing-bg: c.playing-bg;
+    // Text in the accent colour, deeper where the accent is too faint to
+    // read on a light ground.
+    out property <color> accent-text: c.accent-text;
     // Hover, and a selection while the list doesn't have focus.
-    out property <color> hover: theme == 1 ? #ffeef3 : theme == 2 ? #3b2a3699 : #15262399;
-    out property <color> sel-idle: theme == 1 ? #ffeaf0 : theme == 2 ? #3b2a3680 : #15262380;
-    out property <color> accent-hover: theme == 1 ? #ff95b8 : theme == 2 ? #ffa6c3 : #6fc8b5;
-    out property <color> chip-hover: theme == 1 ? #ffeef3 : theme == 2 ? #4a3542 : #1d332f;
+    out property <color> hover: c.hover;
+    out property <color> sel-idle: c.sel-idle;
+    out property <color> accent-hover: c.accent-hover;
+    out property <color> chip-hover: c.chip-hover;
     // The pressed-in edge under kawaii buttons.
-    out property <color> accent-edge: theme == 1 ? #e4648d : theme == 2 ? #c25a82 : transparent;
-    out property <color> scrim: theme == 1 ? #5a3e4766 : theme == 2 ? #120c11cc : #050b0acc;
-    out property <color> shadow: theme == 1 ? #b06a8040 : #00000090;
+    out property <color> accent-edge: c.accent-edge;
+    out property <color> scrim: c.scrim;
+    out property <color> shadow: c.shadow;
     // Kawaii extras: mint and butter, and the dot pattern behind the views.
-    out property <color> mint: theme == 1 ? #5cc4a8 : #8ed8c3;
-    out property <color> butter: theme == 1 ? #ffc95e : #ffd27a;
-    out property <color> dots: theme == 1 ? #f8d9e2 : #34252f;
+    out property <color> mint: c.mint;
+    out property <color> butter: c.butter;
+    out property <color> dots: c.dots;
 
     out property <string> sans: kawaii ? "Rounded Mplus 1c" : "Inter";
-    out property <string> serif: kawaii ? "Zen Maru Gothic" : "Noto Serif";
+    // Runout's headings are serif; the plain themes keep to Inter.
+    out property <string> serif: kawaii ? "Zen Maru Gothic" : theme == 0 ? "Noto Serif" : "Inter";
     out property <string> mono: kawaii ? "Rounded Mplus 1c" : "JetBrains Mono";
     // Corners: kawaii rounds everything off.
     out property <float> round: kawaii ? 2.3 : 1;
@@ -766,6 +810,13 @@ component ListRow inherits Rectangle {
                 text: "Add server…";
                 primary: true;
                 clicked => { root.act("add-server"); }
+            }
+            if item.ctl == 10: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Find servers…";
+                primary: true;
+                clicked => { root.act("find-dlna"); }
             }
             if item.ctl == 7: Text {
                 max-width: 520px;

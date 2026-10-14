@@ -362,6 +362,19 @@ fn forget(ctx: &Ctx, name: &str) {
 }
 
 fn add(mut cfg: ServerConfig, secret: String, replaces: Option<String>, ctx: &Ctx) {
+    if cfg.kind == ServerKind::Dlna {
+        let res = super::dlna::Dlna::connect(cfg.url.trim(), &cfg.udn);
+        let _ = ctx.events.send(match res {
+            Ok(c) => RemoteEvent::Added {
+                info: c.info().clone(),
+                cfg,
+                stored: Stored::NotNeeded,
+                replaces,
+            },
+            Err(e) => RemoteEvent::AddFailed(format!("{}: {e}", cfg.name)),
+        });
+        return;
+    }
     let res = super::detect(&cfg.url, &cfg.user, &secret).and_then(|(kind, info)| {
         cfg.kind = kind;
         cfg.url = super::normalize_url(&cfg.url);
@@ -457,7 +470,12 @@ impl Worker {
     fn connect(&mut self) {
         self.ctx
             .set_state(&self.cfg.name, |s| s.state = ServerState::Connecting);
-        let secret = match self.ctx.secrets.get(&self.cfg.secret_key(), &self.cfg.user) {
+        let saved = if self.cfg.kind.logs_in() {
+            self.ctx.secrets.get(&self.cfg.secret_key(), &self.cfg.user)
+        } else {
+            Ok(Some(String::new()))
+        };
+        let secret = match saved {
             Ok(Some(s)) => s,
             Ok(None) => {
                 self.ctx

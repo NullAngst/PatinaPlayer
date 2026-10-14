@@ -83,6 +83,9 @@ pub struct Browser {
     /// while a big sync runs.
     servers_changed: Option<Instant>,
     queue_sync: servers::QueueSync,
+    /// Where "Find DLNA servers" asks. The local network when unset.
+    pub dlna_probe: Option<std::net::SocketAddr>,
+    dlna: servers::DlnaSearch,
     pub section: Section,
     /// Drill-down stack per section, so switching away and back returns
     /// you to where you were.
@@ -151,6 +154,8 @@ impl Browser {
             servers: Vec::new(),
             servers_changed: None,
             queue_sync: servers::QueueSync::default(),
+            dlna_probe: None,
+            dlna: servers::DlnaSearch::default(),
             section: Section::Folders,
             stacks: HashMap::new(),
             forward: HashMap::new(),

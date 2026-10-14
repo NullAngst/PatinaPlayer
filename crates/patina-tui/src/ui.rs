@@ -69,6 +69,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::FeedUrl => "Podcast feed URL",
                 InputPurpose::AddFolder => "Add a music folder",
                 InputPurpose::SetValue { label, .. } => label.as_str(),
+                InputPurpose::RenameServer(_) => "DLNA server: new name",
                 InputPurpose::ServerName(f) if f.old.is_some() => "Server: name",
                 InputPurpose::ServerName(_) => "New server: a name for it",
                 InputPurpose::ServerUrl(_) => "Server address (https://music.example.com)",
@@ -101,7 +102,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     None => format!("{}  ({})", r.name, r.items),
                 }))
                 .collect();
-            draw_pick(f, app, area, title, &names, *selected);
+            draw_pick(f, app, area, title, &names, *selected, true);
+        }
+        Modal::PickDlna { found, selected } => {
+            let names: Vec<String> = found.iter().map(|f| f.label()).collect();
+            let title = if found.len() == 1 {
+                "Found a DLNA server. Enter adds it"
+            } else {
+                "Found DLNA servers. Enter adds one"
+            };
+            draw_pick(f, app, area, title, &names, *selected, false);
         }
         Modal::Confirm { msg, .. } => draw_confirm(f, app, area, msg),
         _ => {}
@@ -1355,7 +1365,16 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect, title: &str, buf: &str) 
     f.render_widget(Paragraph::new(line).block(frame_block(app, title)), r);
 }
 
-fn draw_pick(f: &mut Frame, app: &App, area: Rect, title: &str, names: &[String], selected: usize) {
+/// A list to pick from. `first_dim` greys the first row, for "New…".
+fn draw_pick(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    title: &str,
+    names: &[String],
+    selected: usize,
+    first_dim: bool,
+) {
     let t = &app.theme;
     let h = (names.len() as u16 + 2).min(16);
     let r = popup(area, 50, h);
@@ -1370,7 +1389,7 @@ fn draw_pick(f: &mut Frame, app: &App, area: Rect, title: &str, names: &[String]
         .map(|(i, n)| {
             let style = if i == selected {
                 Style::default().fg(t.verdigris).bg(t.raised)
-            } else if i == 0 {
+            } else if i == 0 && first_dim {
                 Style::default().fg(t.muted)
             } else {
                 Style::default().fg(t.text)

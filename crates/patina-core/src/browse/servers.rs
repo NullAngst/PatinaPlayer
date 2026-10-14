@@ -9,7 +9,8 @@ pub(super) use crate::remote::service::Job;
 use super::{Browser, Section};
 use crate::config;
 use crate::library::PlaylistRow;
-use crate::remote::{self, RemoteEvent, ServerConfig, ServerState, StreamFormat};
+use crate::remote::dlna::Found;
+use crate::remote::{self, RemoteEvent, ServerConfig, ServerKind, ServerState, StreamFormat};
 use crate::secrets::Stored;
 use crate::{Command, PlayState, TrackInfo};
 
@@ -25,6 +26,16 @@ pub(super) struct QueueSync {
     sent_at: Option<Instant>,
     was_playing: bool,
     bookmark_at: Option<Instant>,
+}
+
+/// How long "Find DLNA servers" listens for answers.
+const DLNA_LISTEN: Duration = Duration::from_secs(3);
+
+/// A "Find DLNA servers" in progress, and what it found.
+#[derive(Default)]
+pub(super) struct DlnaSearch {
+    rx: Option<crossbeam_channel::Receiver<Vec<Found>>>,
+    found: Option<Vec<Found>>,
 }
 
 /// The queue as one server can keep it: (server, song ids, current id).
@@ -70,6 +81,7 @@ impl Browser {
             self.refresh_section(Section::Settings);
             self.rebuild_sidebar();
         }
+        self.dlna_tick();
         self.queue_tick();
         // A big sync reports after every few albums. Redraw at most twice
         // a second, so the views don't rebuild hundreds of times.
@@ -80,6 +92,120 @@ impl Browser {
             }
             _ => false,
         }
+    }
+
+    // ----- DLNA -----
+
+    /// Look for DLNA servers on the network, in the background. What
+    /// answers comes back through [`take_dlna_found`](Self::take_dlna_found).
+    pub fn find_dlna(&mut self) {
+        if self.dlna.rx.is_some() {
+            return;
+        }
+        if self.remote.is_none() {
+            return self.error("Servers need the library");
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let probe = self.dlna_probe;
+        std::thread::spawn(move || {
+            let found = match probe {
+                Some(addr) => remote::dlna::discover_at(addr, DLNA_LISTEN),
+                None => remote::dlna::discover(DLNA_LISTEN),
+            };
+            let _ = tx.send(found);
+        });
+        self.dlna.rx = Some(rx);
+        self.note("Looking for DLNA servers on your network…");
+    }
+
+    /// Whether a search is still listening.
+    pub fn finding_dlna(&self) -> bool {
+        self.dlna.rx.is_some()
+    }
+
+    fn dlna_tick(&mut self) {
+        let Some(rx) = &self.dlna.rx else { return };
+        let Ok(found) = rx.try_recv() else { return };
+        self.dlna.rx = None;
+        let known: Vec<&str> = self
+            .config
+            .servers
+            .iter()
+            .filter(|s| s.kind == ServerKind::Dlna)
+            .map(|s| s.udn.as_str())
+            .collect();
+        let total = found.len();
+        let new: Vec<Found> = found
+            .into_iter()
+            .filter(|f| !known.contains(&f.udn.as_str()))
+            .collect();
+        if new.is_empty() {
+            self.note(if total == 0 {
+                "No DLNA servers answered. Check the server is on and on the same network."
+                    .to_string()
+            } else {
+                format!(
+                    "Found {total} DLNA server{}, already added",
+                    if total == 1 { "" } else { "s" }
+                )
+            });
+        } else {
+            self.dlna.found = Some(new);
+        }
+        self.touch();
+    }
+
+    /// The servers the last search found that aren't added yet, once. The
+    /// apps show these as a list to pick from.
+    pub fn take_dlna_found(&mut self) -> Option<Vec<Found>> {
+        self.dlna.found.take()
+    }
+
+    /// Add a DLNA server that a search found, named after itself.
+    pub fn add_dlna_server(&mut self, f: &Found) {
+        if !f.udn.is_empty()
+            && self
+                .config
+                .servers
+                .iter()
+                .any(|s| s.kind == ServerKind::Dlna && s.udn == f.udn)
+        {
+            return self.note(format!("{} is already added", f.name));
+        }
+        let Some(remote) = &self.remote else {
+            return self.error("Servers need the library");
+        };
+        let base: String = f
+            .name
+            .chars()
+            .map(|c| if c == '/' || c == '#' { '-' } else { c })
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let base = if base.is_empty() {
+            "DLNA".to_string()
+        } else {
+            base
+        };
+        let mut name = base.clone();
+        let mut n = 2;
+        while self.config.servers.iter().any(|s| s.name == name) {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        remote.add(
+            ServerConfig {
+                name,
+                url: f.location.clone(),
+                kind: ServerKind::Dlna,
+                bitrate: 192,
+                udn: f.udn.clone(),
+                ..Default::default()
+            },
+            String::new(),
+            None,
+        );
+        self.note(format!("Connecting to {}…", f.name));
     }
 
     // ----- Adding, editing and removing servers -----
@@ -125,6 +251,7 @@ impl Browser {
                 kind: Default::default(),
                 stream: StreamFormat::Raw,
                 bitrate: 192,
+                udn: String::new(),
             },
             secret.to_string(),
             None,
@@ -150,6 +277,19 @@ impl Browser {
             return;
         };
         let Some(remote) = &self.remote else { return };
+        if !cur.kind.logs_in() {
+            // Nothing to change but the name; the address comes from the
+            // network.
+            remote.add(
+                ServerConfig {
+                    name: name.into(),
+                    ..cur.clone()
+                },
+                String::new(),
+                Some(old.to_string()),
+            );
+            return self.note(format!("Renaming {old}…"));
+        }
         let secret = match secret.filter(|s| !s.is_empty()) {
             Some(s) => s.to_string(),
             None => match remote.secrets().get(&cur.secret_key(), &cur.user) {
@@ -186,7 +326,8 @@ impl Browser {
                 let prev = list[i].clone();
                 list[i] = cfg.clone();
                 // A password for an address and user nothing uses any more.
-                if (prev.secret_key(), &prev.user) != (cfg.secret_key(), &cfg.user)
+                if prev.kind.logs_in()
+                    && (prev.secret_key(), &prev.user) != (cfg.secret_key(), &cfg.user)
                     && let Some(r) = &self.remote
                 {
                     let _ = r.secrets().delete(&prev.secret_key(), &prev.user);
@@ -243,7 +384,10 @@ impl Browser {
                 .servers
                 .iter()
                 .any(|s| s.secret_key() == cur.secret_key() && s.user == cur.user);
-            if !shared && let Err(e) = r.secrets().delete(&cur.secret_key(), &cur.user) {
+            if cur.kind.logs_in()
+                && !shared
+                && let Err(e) = r.secrets().delete(&cur.secret_key(), &cur.user)
+            {
                 self.error(format!("couldn't remove the saved password: {e}"));
             }
         }
