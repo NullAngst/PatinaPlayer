@@ -162,11 +162,21 @@ impl Session {
             player.send(Command::ToggleShuffle);
         }
 
+        // Music servers: passwords from the keyring, syncing in the
+        // background into the same index.
+        let remote = (!opts.no_library).then(|| {
+            crate::remote::RemoteService::start(
+                &db_path,
+                cfg.servers.clone(),
+                Arc::new(crate::secrets::Secrets::open()),
+            )
+        });
         let browser = Browser::new(Startup {
             player,
             lib,
             service,
             pod,
+            remote,
             config: cfg.clone(),
             settings_info: SettingsInfo {
                 config_path: config_path.clone(),
@@ -187,7 +197,10 @@ impl Session {
 
 /// Stop the player, giving it time to fade out instead of cutting the
 /// sound. Both frontends call this on the way out.
-pub fn shutdown(player: &Player, fade_ms: u32) {
+pub fn shutdown(browser: &mut Browser, fade_ms: u32) {
+    // The play queue goes to its server first, if it's a server's.
+    browser.before_quit();
+    let player = &browser.player;
     player.send(Command::Quit);
     std::thread::sleep(Duration::from_millis(u64::from(fade_ms.min(300)) + 50));
 }

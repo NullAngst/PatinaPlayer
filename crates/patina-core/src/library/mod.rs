@@ -65,6 +65,11 @@ pub fn file_uri(path: &Path) -> Vec<u8> {
     v
 }
 
+/// URI a playlist stores for a server song.
+pub fn song_uri(server: &str, id: &str) -> Vec<u8> {
+    crate::remote::episode_uri(server, id).into_bytes()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackRow {
     pub id: i64,
@@ -87,12 +92,14 @@ pub struct TrackRow {
     pub lossless: bool,
     pub added_at: i64,
     pub play_count: i64,
+    /// The server's id for a server song.
+    pub remote_id: Option<String>,
 }
 
 impl TrackRow {
     const COLS: &'static str = "id, path, title, filename, artist, album_artist, album, album_key, \
         track_no, disc_no, year, genre, duration_ms, codec, sample_rate, bits, channels, kbps, \
-        lossless, added_at, play_count";
+        lossless, added_at, play_count, remote_id";
 
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
         let title: Option<String> = r.get(2)?;
@@ -125,13 +132,32 @@ impl TrackRow {
             lossless: r.get::<_, i64>(18)? != 0,
             added_at: r.get(19)?,
             play_count: r.get(20)?,
+            remote_id: r.get(21)?,
         })
+    }
+
+    /// Which server and song this is, for a server song.
+    pub fn remote(&self) -> Option<crate::remote::RemoteRef> {
+        Some(crate::remote::RemoteRef {
+            server: crate::remote::server_of(&self.path)?.to_string(),
+            id: self.remote_id.clone()?,
+            episode: false,
+        })
+    }
+
+    /// What a playlist stores for this track.
+    pub fn uri(&self) -> Vec<u8> {
+        match self.remote() {
+            Some(r) => song_uri(&r.server, &r.id),
+            None => file_uri(&self.path),
+        }
     }
 
     /// What the player needs to queue this track without probing it.
     pub fn to_info(&self) -> TrackInfo {
         TrackInfo {
             path: self.path.clone(),
+            remote: self.remote(),
             title: Some(self.title.clone()),
             artist: self.artist.clone(),
             album: self.album.clone(),
@@ -166,6 +192,19 @@ pub struct AlbumRow {
 }
 
 impl AlbumRow {
+    /// The server it's on, for a server album.
+    pub fn server(&self) -> Option<&str> {
+        crate::remote::server_of(&self.dir)
+    }
+
+    /// "Nirvana", or "Nirvana · Home" for an album on a server, so it can
+    /// be told from a local copy.
+    pub fn artist_line(&self) -> String {
+        match self.server() {
+            Some(s) => format!("{} · {s}", self.artist),
+            None => self.artist.clone(),
+        }
+    }
     const COLS: &'static str = "key, name, artist, year, genre, track_count, duration_ms, added_at, \
         play_count, dir, lossless, \
         (SELECT path FROM tracks t WHERE t.album_key = albums.key ORDER BY disc_no, track_no LIMIT 1)";
@@ -223,6 +262,11 @@ pub struct PlaylistRow {
     pub name: String,
     pub items: i64,
     pub updated_at: i64,
+    /// The server it lives on, for a server playlist.
+    pub server: Option<String>,
+    pub remote_id: Option<String>,
+    /// Someone else's playlist on the server, or a smart list.
+    pub readonly: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -463,6 +507,92 @@ impl Library {
             .tracks_where("WHERE path = ?1", [path_bytes(path)])?
             .into_iter()
             .next())
+    }
+
+    /// The track a playlist URI points at, if it's in the index.
+    pub fn track_by_uri(&self, uri: &[u8]) -> Result<Option<TrackRow>> {
+        if let Some(p) = uri.strip_prefix(b"file:") {
+            return self.track_by_path(&bytes_path(p.to_vec()));
+        }
+        let Some(r) = std::str::from_utf8(uri)
+            .ok()
+            .and_then(crate::remote::parse_episode_uri)
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .tracks_by_remote(&r.server, std::slice::from_ref(&r.id))?
+            .pop()
+            .flatten())
+    }
+
+    /// What a playlist should store for the track at `path`.
+    pub fn uri_for_path(&self, path: &Path) -> Result<Vec<u8>> {
+        if crate::remote::is_remote(path)
+            && let Some(t) = self.track_by_path(path)?
+        {
+            return Ok(t.uri());
+        }
+        Ok(file_uri(path))
+    }
+
+    /// Server songs by id, in the order asked, None for any the index
+    /// doesn't have.
+    pub fn tracks_by_remote(&self, server: &str, ids: &[String]) -> Result<Vec<Option<TrackRow>>> {
+        let root = crate::remote::root(server);
+        let Some(src) = self.source_id(&root)? else {
+            return Ok(vec![None; ids.len()]);
+        };
+        let sql = format!(
+            "SELECT {} FROM tracks WHERE source_id = ?1 AND remote_id = ?2",
+            TrackRow::COLS
+        );
+        let mut st = self.conn.prepare_cached(&sql)?;
+        ids.iter()
+            .map(|id| {
+                Ok(st
+                    .query_row(params![src, id], TrackRow::from_row)
+                    .optional()?)
+            })
+            .collect()
+    }
+
+    /// The source row for a root, local or server.
+    pub fn source_id(&self, root: &Path) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM sources WHERE root = ?1",
+                [path_bytes(root)],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The server's cover id for a server song, or for the first song
+    /// under a server folder.
+    pub fn remote_cover_for(&self, path: &Path) -> Result<Option<String>> {
+        let direct: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT cover_id FROM tracks WHERE path = ?1",
+                [path_bytes(path)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(c) = direct {
+            return Ok(c);
+        }
+        let (lo, hi) = subtree_range(path);
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT cover_id FROM tracks WHERE (dir = ?1 OR (dir >= ?2 AND dir < ?3)) \
+                 AND cover_id IS NOT NULL ORDER BY dir, disc_no, track_no LIMIT 1",
+                params![path_bytes(path), lo, hi],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     // ----- Folders -----
@@ -795,14 +925,21 @@ impl Library {
     pub fn playlists(&self) -> Result<Vec<PlaylistRow>> {
         let mut st = self.conn.prepare_cached(
             "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), \
-             p.updated_at FROM playlists p ORDER BY p.name COLLATE NOCASE",
+             p.updated_at, s.root, p.remote_id, p.readonly \
+             FROM playlists p LEFT JOIN sources s ON s.id = p.source_id \
+             ORDER BY p.name COLLATE NOCASE, s.root",
         )?;
         let rows = st.query_map([], |r| {
+            let root: Option<Vec<u8>> = r.get(4)?;
             Ok(PlaylistRow {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 items: r.get(2)?,
                 updated_at: r.get(3)?,
+                server: root
+                    .and_then(|b| crate::remote::server_of(&bytes_path(b)).map(str::to_string)),
+                remote_id: r.get(5)?,
+                readonly: r.get::<_, i64>(6)? != 0,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -843,10 +980,7 @@ impl Library {
             .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::with_capacity(uris.len());
         for uri in uris {
-            let track = match uri.strip_prefix(b"file:") {
-                Some(p) => self.track_by_path(&bytes_path(p.to_vec()))?,
-                None => None,
-            };
+            let track = self.track_by_uri(&uri)?;
             out.push((uri, track));
         }
         Ok(out)
@@ -855,6 +989,15 @@ impl Library {
     /// Add files to the end of a playlist, leaving out any already in it
     /// (or listed twice). Returns how many went in.
     pub fn append_to_playlist(&mut self, id: i64, paths: &[PathBuf]) -> Result<usize> {
+        let uris: Vec<Vec<u8>> = paths
+            .iter()
+            .map(|p| self.uri_for_path(p))
+            .collect::<Result<_>>()?;
+        self.append_uris(id, &uris)
+    }
+
+    /// [`Self::append_to_playlist`] for URIs already worked out.
+    pub fn append_uris(&mut self, id: i64, uris: &[Vec<u8>]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut have: std::collections::HashSet<Vec<u8>> = {
             let mut st = tx.prepare("SELECT uri FROM playlist_items WHERE playlist_id = ?1")?;
@@ -867,8 +1010,7 @@ impl Library {
             |r| r.get(0),
         )?;
         let mut added = 0;
-        for p in paths {
-            let uri = file_uri(p);
+        for uri in uris {
             if !have.insert(uri.clone()) {
                 continue;
             }

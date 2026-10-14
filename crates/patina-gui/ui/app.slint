@@ -390,6 +390,8 @@ component Field inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
     in property <bool> autofocus: false;
+    // Passwords: dots on screen.
+    in property <bool> secret: false;
     callback accepted;
     callback edited(string);
     public function focus-field() { ti.focus(); }
@@ -420,6 +422,7 @@ component Field inherits Rectangle {
                 vertical-alignment: center;
                 font-size: 13px;
                 single-line: true;
+                input-type: root.secret ? InputType.password : InputType.text;
                 accepted => { root.accepted(); }
                 edited => { root.edited(self.text); }
             }
@@ -737,6 +740,33 @@ component ListRow inherits Rectangle {
                 text: "Type a path…";
                 clicked => { root.act("edit"); }
             }
+            // A music server: sync it, edit it, remove it.
+            if item.ctl == 8: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Sync now";
+                clicked => { root.act("sync"); }
+            }
+            if item.ctl == 8: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Edit";
+                clicked => { root.act("srv-edit"); }
+            }
+            if item.ctl == 8: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Remove";
+                danger: true;
+                clicked => { root.act("srv-remove"); }
+            }
+            if item.ctl == 9: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Add server…";
+                primary: true;
+                clicked => { root.act("add-server"); }
+            }
             if item.ctl == 7: Text {
                 max-width: 520px;
                 text: item.sub;
@@ -874,6 +904,9 @@ export component AppWindow inherits Window {
     callback queue-act(int, string);
     callback queue-save;
     callback queue-clear;
+    // Servers that keep a play queue: "Queue from <name>" loads theirs.
+    in property <[string]> queue-servers;
+    callback queue-load(string);
 
     // Now playing
     in property <string> np-title;
@@ -928,6 +961,12 @@ export component AppWindow inherits Window {
     in-out property <string> dlg-text1;
     in-out property <string> dlg-text2;
     in property <bool> dlg-two-fields;
+    // The server form: two more fields, the last one a password.
+    in property <bool> dlg-four-fields;
+    in property <string> dlg-label3;
+    in property <string> dlg-label4;
+    in-out property <string> dlg-text3;
+    in-out property <string> dlg-text4;
     in property <string> dlg-ok;
     in property <string> dlg-message;
     in property <[string]> dlg-items;
@@ -1539,6 +1578,11 @@ export component AppWindow inherits Window {
                                     Text { text: root.queue-summary; font-size: 12.5px; color: P.muted; }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
+                                for srv in root.queue-servers: Chip {
+                                    y: parent.height - self.height;
+                                    text: "Queue from " + srv;
+                                    clicked => { root.queue-load(srv); keys.focus(); }
+                                }
                                 Chip { y: parent.height - self.height; text: "Add to playlist"; clicked => { root.queue-save(); } }
                                 Chip { y: parent.height - self.height; text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
                             }
@@ -1954,6 +1998,23 @@ export component AppWindow inherits Window {
                             height: root.dlg-two-fields ? 58px : 0px;
                             label: root.dlg-label2;
                             text <=> root.dlg-text2;
+                            accepted => {
+                                if root.dlg-four-fields { f3.focus-field(); } else { root.dlg-accept(); }
+                            }
+                        }
+                        f3 := Field {
+                            visible: root.dlg-four-fields;
+                            height: root.dlg-four-fields ? 58px : 0px;
+                            label: root.dlg-label3;
+                            text <=> root.dlg-text3;
+                            accepted => { f4.focus-field(); }
+                        }
+                        f4 := Field {
+                            visible: root.dlg-four-fields;
+                            height: root.dlg-four-fields ? 58px : 0px;
+                            secret: true;
+                            label: root.dlg-label4;
+                            text <=> root.dlg-text4;
                             accepted => { root.dlg-accept(); }
                         }
                     }

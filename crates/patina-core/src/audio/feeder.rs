@@ -360,8 +360,20 @@ impl Feeder {
             .url
             .clone()
             .unwrap_or_else(|| info.path.display().to_string());
+        // Whether this is the file as it sits on disk (or as the server
+        // has it, untouched), which is what bit-perfect needs.
+        let mut original = info.kind == MediaKind::File;
         let opened = if info.is_live() {
             self.open_station(&info)
+        } else if let Some(r) = &info.remote {
+            // A server song: the URL carries a login, so it's made now.
+            crate::remote::registry()
+                .stream(r)
+                .map_err(|e| e.to_string())
+                .and_then(|(url, raw)| {
+                    original &= raw;
+                    Source::open_with(&url, self.open_options(&info)).map_err(|e| e.to_string())
+                })
         } else {
             match info.location() {
                 Some(loc) => {
@@ -396,7 +408,7 @@ impl Feeder {
         // what the queue knows (station name, episode title) and take the
         // technical fields from the stream.
         let merged = match info.kind {
-            MediaKind::File => {
+            MediaKind::File if info.remote.is_none() => {
                 let mut i = src.info().clone();
                 i.kind = MediaKind::File;
                 i
@@ -422,9 +434,8 @@ impl Feeder {
         // Bit-perfect is for local files played as they are: never radio,
         // never a sped-up or trimmed podcast.
         let mode = BitPerfect::from_u8(self.shared.bit_perfect.load(Ordering::Relaxed));
-        let exclusive =
-            (mode.wanted(false) && info.kind == MediaKind::File && src.source_position().is_none())
-                .then(|| src.depth());
+        let exclusive = (mode.wanted(false) && original && src.source_position().is_none())
+            .then(|| src.depth());
         if self.format != Some(fmt) || self.exclusive != exclusive {
             if !self.drain_ring() {
                 // A command arrived while draining; it's stashed and wins.

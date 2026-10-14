@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use crate::audio::output::exclusive::HwDevice;
 use crate::audio::output::{Backend, BitPerfect};
 use crate::config::{Config, Theme};
+use crate::remote::{ServerStatus, StreamFormat};
 
 /// Which option a row is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -27,6 +28,11 @@ pub enum Key {
     BitPerfectDevice,
     PodcastSpeed,
     PodcastTrim,
+    /// A music server, by name: sync, edit, remove.
+    Server(String),
+    /// What a server streams: the original file, or a transcode.
+    ServerStream(String),
+    AddServer,
     /// Read-only facts: where files are.
     Info(&'static str),
 }
@@ -59,6 +65,8 @@ pub enum Control {
     Folder,
     /// A button.
     Action(&'static str),
+    /// A music server: its status line. Sync, Edit and Remove go with it.
+    Server(String),
     Info(String),
 }
 
@@ -89,6 +97,7 @@ impl Control {
             }
             Control::Folder => String::new(),
             Control::Action(a) => (*a).to_string(),
+            Control::Server(s) => s.clone(),
             Control::Info(s) => s.clone(),
         }
     }
@@ -130,6 +139,23 @@ pub struct SettingsInfo {
 pub const BIT_PERFECT_WARNING: &str = "Bit-perfect takes exclusive control of this device. \
 Other apps won't be able to play sound through it until PatinaPlayer stops or you turn this off.";
 
+/// Stream choices for a server: (value, label). The value is
+/// "format" or "format:kbps".
+pub const STREAM_CHOICES: [(&str, &str); 6] = [
+    ("raw", "Original file"),
+    ("opus:96", "Opus 96 kbps"),
+    ("opus:128", "Opus 128 kbps"),
+    ("opus:192", "Opus 192 kbps"),
+    ("mp3:192", "MP3 192 kbps"),
+    ("mp3:320", "MP3 320 kbps"),
+];
+
+/// Read a stream choice back.
+pub fn parse_stream(v: &str) -> (StreamFormat, Option<u32>) {
+    let (f, k) = v.split_once(':').unwrap_or((v, ""));
+    (f.parse().unwrap_or_default(), k.parse().ok())
+}
+
 /// Rows, grouped under headers, for the Settings view.
 pub fn rows(
     cfg: &Config,
@@ -137,6 +163,7 @@ pub fn rows(
     podcast_tempo: f64,
     podcast_trim: bool,
     devices: &[HwDevice],
+    servers: &[ServerStatus],
 ) -> Vec<(Option<&'static str>, Setting)> {
     let mut v: Vec<(Option<&'static str>, Setting)> = Vec::new();
     let mut push = |group: &'static str, s: Setting| v.push((Some(group), s));
@@ -170,6 +197,64 @@ pub fn rows(
                 label: "Watch for changes".into(),
                 help: "Pick up added, changed and removed files while the player runs.",
                 control: Control::Toggle(cfg.library.watch),
+            },
+        );
+    }
+
+    // Servers
+    if !info.no_library {
+        for sc in &cfg.servers {
+            let status = servers
+                .iter()
+                .find(|s| s.name == sc.name)
+                .map(ServerStatus::summary)
+                .unwrap_or_else(|| "starting".into());
+            let who = if sc.user.is_empty() {
+                "API key".to_string()
+            } else {
+                sc.user.clone()
+            };
+            push(
+                "Servers",
+                Setting {
+                    key: Key::Server(sc.name.clone()),
+                    label: sc.name.clone(),
+                    help: "Sync reads the server's library again now. Edit changes the address, user or password.",
+                    control: Control::Server(format!("{} · {who} · {status}", sc.url)),
+                },
+            );
+            let current = match sc.stream {
+                StreamFormat::Raw => "raw".to_string(),
+                f => format!("{}:{}", f.as_str(), sc.bitrate),
+            };
+            let mut options: Vec<(String, String)> = STREAM_CHOICES
+                .iter()
+                .map(|(v, l)| (v.to_string(), l.to_string()))
+                .collect();
+            if !options.iter().any(|o| o.0 == current) {
+                options.push((
+                    current.clone(),
+                    format!("{} {} kbps", sc.stream.as_str(), sc.bitrate),
+                ));
+            }
+            let index = options.iter().position(|o| o.0 == current).unwrap_or(0);
+            push(
+                "Servers",
+                Setting {
+                    key: Key::ServerStream(sc.name.clone()),
+                    label: format!("{}: streaming", sc.name),
+                    help: "The original file keeps the sound untouched (and lets bit-perfect work). A transcode saves data on a slow line.",
+                    control: Control::Choice { options, index },
+                },
+            );
+        }
+        push(
+            "Servers",
+            Setting {
+                key: Key::AddServer,
+                label: "Add a music server".into(),
+                help: "Navidrome, Gonic, Airsonic and other Subsonic servers, or Ampache. The password goes in your keyring.",
+                control: Control::Action("Add server"),
             },
         );
     }

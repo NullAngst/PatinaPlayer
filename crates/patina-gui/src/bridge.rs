@@ -15,6 +15,7 @@ use patina_core::browse::{
 };
 use patina_core::config::Theme;
 use patina_core::library::PlaylistRow;
+use patina_core::remote::ServerState;
 use patina_core::track::MediaKind;
 use patina_core::{Command, Event, PlayState, Repeat, Snapshot, TrackInfo};
 use slint::platform::Key;
@@ -34,7 +35,12 @@ enum Dlg {
     RenamePlaylist(i64),
     Station(Option<usize>),
     Feed,
-    Pick(Vec<PathBuf>, Vec<PlaylistRow>),
+    /// Adding a server, or editing the one with this name.
+    Server(Option<String>),
+    /// The paths, the servers offering "New playlist on…", the playlists.
+    Pick(Vec<PathBuf>, Vec<String>, Vec<PlaylistRow>),
+    /// Naming a new playlist on a server.
+    ServerPlaylist(String, Vec<PathBuf>),
     Confirm(Confirm),
     Help,
 }
@@ -47,6 +53,7 @@ enum Confirm {
     ClearQueue,
     DeleteStation(usize),
     Unsubscribe(String),
+    RemoveServer(String),
 }
 
 pub struct State {
@@ -61,6 +68,7 @@ pub struct State {
     actions: Rc<VecModel<SharedString>>,
     action_labels: Rc<VecModel<SharedString>>,
     dlg_items: Rc<VecModel<SharedString>>,
+    queue_servers: Rc<VecModel<SharedString>>,
     last_gen: u64,
     last_queue_ver: u64,
     /// Identity of the open level, to scroll back to the top on change.
@@ -189,6 +197,7 @@ impl State {
             actions: Rc::new(VecModel::default()),
             action_labels: Rc::new(VecModel::default()),
             dlg_items: Rc::new(VecModel::default()),
+            queue_servers: Rc::new(VecModel::default()),
             last_gen: u64::MAX,
             last_queue_ver: u64::MAX,
             level_key: String::new(),
@@ -263,7 +272,7 @@ impl State {
             Item::Album(a) => {
                 r.kind = 1;
                 r.title = ss(&a.name);
-                r.sub = ss(&a.artist);
+                r.sub = ss(a.artist_line());
                 r.meta = ss(a.year.map(|y| y.to_string()).unwrap_or_default());
                 r.right = ss(if ctx == RowCtx::Ranked {
                     plays(a.play_count)
@@ -287,7 +296,13 @@ impl State {
             }
             Item::Root { path, tracks } => {
                 r.kind = 3;
-                r.title = ss(path.display().to_string());
+                r.title = ss(match patina_core::remote::server_of(path) {
+                    Some(name) => name.to_string(),
+                    None => path.display().to_string(),
+                });
+                if patina_core::remote::is_remote(path) {
+                    r.sub = ss("server");
+                }
                 r.right = ss(format!("{tracks} track{}", s_(*tracks)));
             }
             Item::Genre(g) => {
@@ -299,6 +314,11 @@ impl State {
             Item::Playlist(p) => {
                 r.kind = 5;
                 r.title = ss(&p.name);
+                r.sub = ss(match (&p.server, p.readonly) {
+                    (Some(s), true) => format!("on {s}, read-only"),
+                    (Some(s), false) => format!("on {s}"),
+                    _ => String::new(),
+                });
                 r.right = ss(format!("{} track{}", p.items, s_(p.items)));
             }
             Item::Station { station, check, .. } => {
@@ -385,11 +405,17 @@ impl State {
                     Control::Number { .. } => (3, false),
                     Control::Text { value, .. } => (4, !value.is_empty()),
                     Control::Folder => (5, false),
+                    Control::Action(_) if st.key == SettingKey::AddServer => (9, false),
                     Control::Action(_) => (6, false),
                     Control::Info(_) => (7, false),
+                    Control::Server(_) => (8, false),
                 };
                 if matches!(st.control, Control::Folder) {
                     r.meta = SharedString::new();
+                }
+                // A server's row: its status line under its name.
+                if matches!(st.control, Control::Server(_)) {
+                    r.meta = r.sub.clone();
                 }
             }
         }
@@ -672,7 +698,7 @@ impl State {
                             "ALBUM"
                         }),
                         title: ss(&a.name),
-                        sub: ss(&a.artist),
+                        sub: ss(a.artist_line()),
                         meta: ss(meta.join(" · ")),
                         has_art: art.is_some(),
                         art: art.unwrap_or_default(),
@@ -731,7 +757,33 @@ impl State {
                 SideEntry::Source {
                     path,
                     tracks,
+                    server: Some(state),
+                    ..
+                } => SideItem {
+                    kind: 1,
+                    sub: SharedString::new(),
+                    label: ss(patina_core::remote::server_of(path).unwrap_or("server")),
+                    count: ss(match state {
+                        ServerState::Syncing { done, total } if *total > 0 => {
+                            format!("{done}/{total}")
+                        }
+                        ServerState::Offline(_) => "offline".into(),
+                        ServerState::NoPassword | ServerState::BadLogin => "login".into(),
+                        _ => tracks.to_string(),
+                    }),
+                    icon: SharedString::new(),
+                    active: open_folder.as_ref() == Some(path),
+                    dot: match state {
+                        ServerState::Ready => 0,
+                        ServerState::Syncing { .. } | ServerState::Connecting => 1,
+                        _ => 2,
+                    },
+                },
+                SideEntry::Source {
+                    path,
+                    tracks,
                     present,
+                    server: None,
                 } => {
                     let scanning = status
                         .as_ref()
@@ -1016,6 +1068,17 @@ impl State {
             self.last_queue_ver = qv;
             self.sync_queue(ui);
         }
+        if gen_changed {
+            let servers = self.b.queue_servers();
+            if self
+                .queue_servers
+                .iter()
+                .map(|x| x.to_string())
+                .ne(servers.iter().cloned())
+            {
+                set_strings(&self.queue_servers, servers.iter().map(ss));
+            }
+        }
         // Scrolling, or covers finishing loading: touch only the rows that
         // come into view or leave it.
         self.update_row_art(ui, art_arrived);
@@ -1201,12 +1264,21 @@ impl State {
         if paths.is_empty() {
             return self.b.note("Only library songs can go in a playlist");
         }
-        let rows = self.b.playlists();
+        let rows: Vec<PlaylistRow> = self
+            .b
+            .playlists()
+            .into_iter()
+            .filter(|p| !p.readonly)
+            .collect();
+        let servers = self.b.connected_servers();
         let mut items = vec![ss("New playlist…")];
-        items.extend(
-            rows.iter()
-                .map(|r| ss(format!("{}  ({})", r.name, r.items))),
-        );
+        items.extend(servers.iter().map(|s| ss(format!("New playlist on {s}…"))));
+        items.extend(rows.iter().map(|r| {
+            ss(match &r.server {
+                Some(s) => format!("{}  ({}, on {s})", r.name, r.items),
+                None => format!("{}  ({})", r.name, r.items),
+            })
+        }));
         set_strings(&self.dlg_items, items.into_iter());
         let n = patina_core::browse::count(paths.len());
         ui.set_dlg_title(ss(if what.is_empty() {
@@ -1216,7 +1288,35 @@ impl State {
         }));
         ui.set_dlg_new_first(true);
         ui.set_dialog(2);
-        self.dlg = Dlg::Pick(paths, rows);
+        self.dlg = Dlg::Pick(paths, servers, rows);
+    }
+
+    /// The add or edit form for a server.
+    fn open_server(&mut self, ui: &AppWindow, edit: Option<String>) {
+        let cur = edit.as_ref().and_then(|n| self.b.server(n).cloned());
+        let (name, url, user) = cur.map(|c| (c.name, c.url, c.user)).unwrap_or_default();
+        open_text(
+            ui,
+            if edit.is_some() {
+                "Edit server"
+            } else {
+                "Add a music server"
+            },
+            "Name, as the sidebar shows it",
+            &name,
+            Some(("Address, like https://music.example.com", &url)),
+            if edit.is_some() { "Save" } else { "Connect" },
+        );
+        ui.set_dlg_label3(ss("User name (leave it empty for an API key)"));
+        ui.set_dlg_text3(ss(&user));
+        ui.set_dlg_label4(ss(if edit.is_some() {
+            "Password or API key (empty keeps the saved one)"
+        } else {
+            "Password or API key"
+        }));
+        ui.set_dlg_text4(SharedString::new());
+        ui.set_dlg_four_fields(true);
+        self.dlg = Dlg::Server(edit);
     }
 
     fn open_station(&mut self, ui: &AppWindow, edit: Option<usize>) {
@@ -1259,7 +1359,9 @@ impl State {
             Control::Toggle(_) => "toggle",
             Control::Choice { .. } => "choose",
             Control::Number { .. } | Control::Text { .. } => "edit",
+            Control::Action(_) if st.key == SettingKey::AddServer => "add-server",
             Control::Action(_) => "browse",
+            Control::Server(_) => "sync",
             Control::Folder | Control::Info(_) => return,
         };
         self.setting_act(ui, a);
@@ -1292,6 +1394,27 @@ impl State {
                     ui.set_dlg_new_first(false);
                     ui.set_dialog(2);
                     self.dlg = Dlg::Choose(key);
+                }
+            }
+            "add-server" => self.open_server(ui, None),
+            "sync" => {
+                if let SettingKey::Server(n) = &key {
+                    self.b.sync_server(Some(n));
+                }
+            }
+            "srv-edit" => {
+                if let SettingKey::Server(n) = &key {
+                    self.open_server(ui, Some(n.clone()));
+                }
+            }
+            "srv-remove" => {
+                if let SettingKey::Server(n) = key {
+                    self.confirm(
+                        ui,
+                        format!("Remove {n}? Its songs and playlists leave the library here, and its password leaves the keyring. Nothing changes on the server."),
+                        "Remove",
+                        Confirm::RemoveServer(n),
+                    );
                 }
             }
             "edit" if key == SettingKey::AddFolder => {
@@ -1384,6 +1507,19 @@ impl State {
             return self.setting_act(ui, a);
         }
         let item = self.b.selected_item();
+        if matches!(a, "st-edit" | "st-up" | "st-down" | "st-delete")
+            && matches!(
+                item,
+                Some(Item::Station {
+                    server: Some(_),
+                    ..
+                })
+            )
+        {
+            return self
+                .b
+                .note("Stations from a server are changed on the server");
+        }
         match a {
             "play" => self.play_selected(),
             "next" => self.b.add_selected_to_queue(true),
@@ -1506,6 +1642,26 @@ impl State {
                 self.b.save_station(edit, &t1, &t2);
             }
             Dlg::Feed => self.b.subscribe(&t1),
+            Dlg::Server(old) => {
+                let t3 = ui.get_dlg_text3().trim().to_string();
+                // The password exactly as typed.
+                let t4 = ui.get_dlg_text4().to_string();
+                if t1.is_empty() || t2.is_empty() {
+                    self.b.error("A server needs a name and an address");
+                    self.dlg = Dlg::Server(old);
+                    return;
+                }
+                match &old {
+                    Some(o) => {
+                        let secret = (!t4.is_empty()).then_some(t4.as_str());
+                        self.b.edit_server(o, &t1, &t2, &t3, secret);
+                    }
+                    None => self.b.add_server(&t1, &t2, &t3, &t4),
+                }
+            }
+            Dlg::ServerPlaylist(server, paths) => {
+                self.b.create_server_playlist(&server, &t1, &paths)
+            }
             Dlg::Confirm(c) => match c {
                 Confirm::Setting(key, change) => self.b.change_setting(&key, change),
                 Confirm::RemoveFolder(p) => self.b.remove_folder(&p),
@@ -1513,6 +1669,7 @@ impl State {
                 Confirm::ClearQueue => self.b.clear_queue(),
                 Confirm::DeleteStation(i) => self.b.delete_station(i),
                 Confirm::Unsubscribe(url) => self.b.unsubscribe(&url),
+                Confirm::RemoveServer(n) => self.b.remove_server(&n),
             },
             Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Help | Dlg::None => {}
         }
@@ -1530,13 +1687,19 @@ impl State {
             self.change_setting(ui, key, Change::Choose(i));
             return;
         }
-        if let Dlg::Pick(paths, rows) = std::mem::replace(&mut self.dlg, Dlg::None) {
+        if let Dlg::Pick(paths, servers, rows) = std::mem::replace(&mut self.dlg, Dlg::None) {
             if i == 0 {
                 self.dlg = Dlg::NewPlaylist(paths);
                 open_text(ui, "New playlist", "Name", "", None, "Create");
                 return;
             }
-            if let Some(p) = rows.get(i - 1) {
+            if let Some(server) = servers.get(i - 1) {
+                let title = format!("New playlist on {server}");
+                self.dlg = Dlg::ServerPlaylist(server.clone(), paths);
+                open_text(ui, &title, "Name", "", None, "Create");
+                return;
+            }
+            if let Some(p) = rows.get(i - 1 - servers.len()) {
                 self.b.add_to_playlist(p.id, &p.name, &paths);
             }
         }
@@ -1724,6 +1887,7 @@ fn open_text(
     ui.set_dlg_label1(ss(label1));
     ui.set_dlg_text1(ss(text1));
     ui.set_dlg_two_fields(second.is_some());
+    ui.set_dlg_four_fields(false);
     let (l2, t2) = second.unwrap_or(("", ""));
     ui.set_dlg_label2(ss(l2));
     ui.set_dlg_text2(ss(t2));
@@ -1735,6 +1899,14 @@ fn open_text(
 pub struct Bridge {
     _timer: Timer,
     _state: Rc<RefCell<State>>,
+}
+
+impl Bridge {
+    /// Save the queue to its server if it's a server's, then stop the
+    /// player with a fade.
+    pub fn shutdown(&self, fade_ms: u32) {
+        patina_core::session::shutdown(&mut self._state.borrow_mut().b, fade_ms);
+    }
 }
 
 pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
@@ -1754,6 +1926,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
         ui.set_actions(ModelRc::from(s.actions.clone()));
         ui.set_action_labels(ModelRc::from(s.action_labels.clone()));
         ui.set_dlg_items(ModelRc::from(s.dlg_items.clone()));
+        ui.set_queue_servers(ModelRc::from(s.queue_servers.clone()));
     }
 
     // Wire a callback to a closure that gets the state and the window.
@@ -1838,6 +2011,10 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
         }
         let paths = s.b.queue_playlist_paths();
         s.open_pick(&u, "the queue", paths);
+    });
+    on!(on_queue_load, |s, u, name| {
+        let _ = &u;
+        s.b.load_server_queue(name.as_str());
     });
     on!(on_queue_clear, |s, u| {
         if !s.b.player.queue().is_empty() {

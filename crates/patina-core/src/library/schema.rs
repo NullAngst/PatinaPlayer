@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 2;
+pub const VERSION: i64 = 3;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -137,6 +137,32 @@ CREATE TABLE episodes (
 CREATE INDEX episodes_podcast ON episodes(podcast_id, published);
 "#;
 
+/// Music servers. Their songs sit in `tracks` like local ones, under
+/// `server://<name>/...` paths, with the server's own ids beside them.
+const V3: &str = r#"
+ALTER TABLE tracks ADD COLUMN remote_id TEXT;
+ALTER TABLE tracks ADD COLUMN remote_album TEXT;
+ALTER TABLE tracks ADD COLUMN cover_id TEXT;
+CREATE INDEX tracks_remote ON tracks(source_id, remote_id);
+CREATE INDEX tracks_remote_album ON tracks(source_id, remote_album);
+
+-- What each server album looked like at the last sync, so the next one
+-- only fetches albums that changed.
+CREATE TABLE remote_albums (
+    source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    album_id    TEXT NOT NULL,
+    sig         TEXT NOT NULL,
+    PRIMARY KEY (source_id, album_id)
+);
+
+-- Server playlists are copied here so they browse offline. Local ones
+-- have no source. Their items are "server://<name>#<song id>".
+ALTER TABLE playlists ADD COLUMN source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE;
+ALTER TABLE playlists ADD COLUMN remote_id TEXT;
+ALTER TABLE playlists ADD COLUMN remote_sig TEXT;
+ALTER TABLE playlists ADD COLUMN readonly INTEGER NOT NULL DEFAULT 0;
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -156,6 +182,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 2 {
         tx.execute_batch(V2)?;
+    }
+    if current < 3 {
+        tx.execute_batch(V3)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

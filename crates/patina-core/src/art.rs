@@ -1,5 +1,6 @@
-//! Cover art for local files: the picture embedded in the file if there
-//! is one, otherwise a cover image in its folder. Scaled copies are cached
+//! Cover art: for local files the picture embedded in the file if there
+//! is one, otherwise a cover image in its folder; for server songs, the
+//! server's cover. Scaled copies are cached
 //! on disk at the sizes the frontends draw, so a big library doesn't
 //! decode a 3000-pixel JPEG every time a row scrolls into view.
 
@@ -147,9 +148,49 @@ fn square(img: DynamicImage, size: u32) -> RgbaImage {
 }
 
 /// Art for a track at `size` pixels square, from the cache when possible.
+/// Server songs get their cover from the server.
 pub fn load(track: &Path, size: u32) -> Option<RgbaImage> {
+    if crate::remote::is_remote(track) {
+        return load_remote(track, size);
+    }
     let origin = find(track)?;
     load_origin(&origin, size)
+}
+
+/// Art for a folder: a cover image in it, or for a server folder, the
+/// cover of the first song in it.
+pub fn load_dir(dir: &Path, size: u32) -> Option<RgbaImage> {
+    if crate::remote::is_remote(dir) {
+        return load_remote(dir, size);
+    }
+    load_origin(&Origin::File(folder_image(dir)?), size)
+}
+
+/// A server cover, from the disk cache if it's been fetched before at
+/// this size, else from the server.
+fn load_remote(path: &Path, size: u32) -> Option<RgbaImage> {
+    let (server, cover) = crate::remote::registry().cover_id(path)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    server.hash(&mut h);
+    cover.hash(&mut h);
+    let cached = cache_dir().join(format!("srv-{:016x}-{size}.png", h.finish()));
+    if let Ok(img) = image::open(&cached) {
+        return Some(img.to_rgba8());
+    }
+    let bytes = crate::remote::registry()
+        .client(&server)
+        .ok()?
+        .cover(&cover, size)
+        .ok()?;
+    let img = square(image::load_from_memory(&bytes).ok()?, size);
+    if let Some(dir) = cached.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut buf = Cursor::new(Vec::new());
+    if img.write_to(&mut buf, ImageFormat::Png).is_ok() {
+        let _ = std::fs::write(&cached, buf.into_inner());
+    }
+    Some(img)
 }
 
 pub fn load_origin(origin: &Origin, size: u32) -> Option<RgbaImage> {

@@ -27,9 +27,29 @@ pub enum Focus {
     Content,
 }
 
+/// Adding or editing a server takes four answers, one box at a time.
+#[derive(Debug, Clone, Default)]
+pub struct ServerForm {
+    /// The server being edited, by its old name.
+    pub old: Option<String>,
+    pub name: String,
+    pub url: String,
+    pub user: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum InputPurpose {
     Search,
+    ServerName(ServerForm),
+    ServerUrl(ServerForm),
+    ServerUser(ServerForm),
+    /// The password or API key. Drawn as dots, and not trimmed.
+    ServerSecret(ServerForm),
+    /// A new playlist on a server.
+    ServerPlaylist {
+        server: String,
+        add: Vec<PathBuf>,
+    },
     NewPlaylist {
         add: Vec<PathBuf>,
     },
@@ -61,6 +81,7 @@ pub enum ConfirmAction {
     RemoveFeed(String),
     Setting(SettingKey, Change),
     RemoveFolder(PathBuf),
+    RemoveServer(String),
 }
 
 pub enum Modal {
@@ -70,9 +91,12 @@ pub enum Modal {
         purpose: InputPurpose,
         buf: String,
     },
+    /// "New playlist…", then "New playlist on <server>" for each
+    /// connected server, then the playlists you can add to.
     PickPlaylist {
         title: String,
         add: Vec<PathBuf>,
+        servers: Vec<String>,
         rows: Vec<PlaylistRow>,
         selected: usize,
     },
@@ -131,7 +155,7 @@ impl App {
         }
     }
 
-    pub fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             // A terminal that never answers the art capability query leaves
             // the query thread waiting, and it turns raw mode off when it
@@ -158,7 +182,7 @@ impl App {
             {
                 self.toast = None;
             }
-            terminal.draw(|f| crate::ui::draw(f, &mut self))?;
+            terminal.draw(|f| crate::ui::draw(f, self))?;
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     TermEvent::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
@@ -238,7 +262,13 @@ impl App {
         self.modal = Modal::PickPlaylist {
             title: format!("{title} ({})", patina_core::browse::count(add.len())),
             add,
-            rows: self.b.playlists(),
+            servers: self.b.connected_servers(),
+            rows: self
+                .b
+                .playlists()
+                .into_iter()
+                .filter(|p| !p.readonly)
+                .collect(),
             selected: 0,
         };
     }
@@ -258,9 +288,10 @@ impl App {
             Modal::PickPlaylist {
                 title,
                 add,
+                servers,
                 rows,
                 selected,
-            } => return self.pick_key(k, title, add, rows, selected),
+            } => return self.pick_key(k, title, add, servers, rows, selected),
             Modal::Confirm { msg, action } => {
                 match k.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm(action),
@@ -361,6 +392,18 @@ impl App {
                         purpose: InputPurpose::StationName { edit: None },
                         buf: String::new(),
                     }
+                }
+                KeyCode::Char('E' | 'D' | 'J' | 'K')
+                    if matches!(
+                        item,
+                        Some(Item::Station {
+                            server: Some(_),
+                            ..
+                        })
+                    ) =>
+                {
+                    self.b
+                        .note("Stations from a server are changed on the server");
                 }
                 KeyCode::Char('E') => {
                     if let Some(Item::Station { index, station, .. }) = item {
@@ -476,6 +519,13 @@ impl App {
                     action: ConfirmAction::ClearQueue,
                 }
             }
+            KeyCode::Char('L') if queue => match self.b.queue_servers().first() {
+                Some(s) => {
+                    let s = s.clone();
+                    self.b.load_server_queue(&s);
+                }
+                None => self.b.note("No connected server keeps a play queue"),
+            },
             KeyCode::Char('S') if queue => {
                 let add = self.b.queue_playlist_paths();
                 self.open_pick("Add the queue to a playlist", add);
@@ -548,18 +598,46 @@ impl App {
                         buf: value.clone(),
                     };
                 }
+                Control::Action(_) if st.key == SettingKey::AddServer => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::ServerName(ServerForm::default()),
+                        buf: String::new(),
+                    };
+                }
                 Control::Action(_) => {
                     self.modal = Modal::Input {
                         purpose: InputPurpose::AddFolder,
                         buf: "~/".into(),
                     };
                 }
+                Control::Server(_) => {
+                    if let SettingKey::Server(name) = &st.key {
+                        self.b.sync_server(Some(name));
+                    }
+                }
                 Control::Folder | Control::Info(_) => {}
             },
+            (KeyCode::Char('E'), Some(st)) => {
+                let SettingKey::Server(name) = &st.key else {
+                    return false;
+                };
+                let Some(sc) = self.b.server(name).cloned() else {
+                    return false;
+                };
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::ServerName(ServerForm {
+                        old: Some(sc.name.clone()),
+                        name: sc.name.clone(),
+                        url: sc.url,
+                        user: sc.user,
+                    }),
+                    buf: sc.name,
+                };
+            }
             (KeyCode::Char('h'), Some(st)) => self.change_setting(st.key, Change::Step(-1)),
             (KeyCode::Char('l'), Some(st)) => self.change_setting(st.key, Change::Step(1)),
-            (KeyCode::Char('d') | KeyCode::Delete, Some(st)) => {
-                if let SettingKey::Folder(p) = st.key {
+            (KeyCode::Char('d') | KeyCode::Delete, Some(st)) => match st.key {
+                SettingKey::Folder(p) => {
                     self.modal = Modal::Confirm {
                         msg: format!(
                             "Take {} out of the library? The files stay where they are.",
@@ -568,7 +646,14 @@ impl App {
                         action: ConfirmAction::RemoveFolder(p),
                     };
                 }
-            }
+                SettingKey::Server(name) => {
+                    self.modal = Modal::Confirm {
+                        msg: format!("Remove {name}? Its songs leave the library here."),
+                        action: ConfirmAction::RemoveServer(name),
+                    };
+                }
+                _ => {}
+            },
             _ => return false,
         }
         true
@@ -598,7 +683,13 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
-                self.submit_input(purpose, buf.trim().to_string());
+                // A password is taken exactly as typed.
+                let text = if matches!(purpose, InputPurpose::ServerSecret(_)) {
+                    buf
+                } else {
+                    buf.trim().to_string()
+                };
+                self.submit_input(purpose, text);
                 return;
             }
             // Arrow keys move through live search results while typing.
@@ -661,6 +752,45 @@ impl App {
             // Enter keeps the results on screen for browsing.
             InputPurpose::Search => {}
             InputPurpose::NewPlaylist { add } => self.b.create_playlist(&text, &add),
+            InputPurpose::ServerPlaylist { server, add } => {
+                self.b.create_server_playlist(&server, &text, &add)
+            }
+            InputPurpose::ServerName(mut f) => {
+                if text.is_empty() {
+                    return;
+                }
+                f.name = text;
+                let buf = f.url.clone();
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::ServerUrl(f),
+                    buf,
+                };
+            }
+            InputPurpose::ServerUrl(mut f) => {
+                if text.is_empty() {
+                    return;
+                }
+                f.url = text;
+                let buf = f.user.clone();
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::ServerUser(f),
+                    buf,
+                };
+            }
+            InputPurpose::ServerUser(mut f) => {
+                f.user = text;
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::ServerSecret(f),
+                    buf: String::new(),
+                };
+            }
+            InputPurpose::ServerSecret(f) => match &f.old {
+                Some(old) => {
+                    let secret = (!text.is_empty()).then_some(text.as_str());
+                    self.b.edit_server(old, &f.name, &f.url, &f.user, secret);
+                }
+                None => self.b.add_server(&f.name, &f.url, &f.user, &text),
+            },
             InputPurpose::RenamePlaylist { id } => self.b.rename_playlist(id, &text),
         }
     }
@@ -670,11 +800,11 @@ impl App {
         k: KeyEvent,
         title: String,
         add: Vec<PathBuf>,
+        servers: Vec<String>,
         rows: Vec<PlaylistRow>,
         mut selected: usize,
     ) {
-        // Row 0 is "New playlist", then the playlists.
-        let n = rows.len() + 1;
+        let n = rows.len() + servers.len() + 1;
         match k.code {
             KeyCode::Esc => return,
             KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
@@ -685,8 +815,16 @@ impl App {
                         purpose: InputPurpose::NewPlaylist { add },
                         buf: String::new(),
                     };
+                } else if selected <= servers.len() {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::ServerPlaylist {
+                            server: servers[selected - 1].clone(),
+                            add,
+                        },
+                        buf: String::new(),
+                    };
                 } else {
-                    let p = &rows[selected - 1];
+                    let p = &rows[selected - 1 - servers.len()];
                     self.b.add_to_playlist(p.id, &p.name, &add);
                 }
                 return;
@@ -696,6 +834,7 @@ impl App {
         self.modal = Modal::PickPlaylist {
             title,
             add,
+            servers,
             rows,
             selected,
         };
@@ -709,6 +848,7 @@ impl App {
             ConfirmAction::DeletePlaylist(id) => self.b.delete_playlist(id),
             ConfirmAction::Setting(key, change) => self.b.change_setting(&key, change),
             ConfirmAction::RemoveFolder(p) => self.b.remove_folder(&p),
+            ConfirmAction::RemoveServer(n) => self.b.remove_server(&n),
         }
     }
 

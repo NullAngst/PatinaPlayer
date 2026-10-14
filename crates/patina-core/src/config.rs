@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::audio::output::{Backend, BitPerfect, OutputConfig};
+use crate::remote::{ServerConfig, ServerKind, StreamFormat};
 
 pub const APP_DIR: &str = "patinaplayer";
 
@@ -83,6 +84,8 @@ pub struct Config {
     pub stations: Vec<Station>,
     pub podcasts: PodcastConfig,
     pub appearance: AppearanceConfig,
+    /// Music servers, in the order they show. Passwords are in the keyring.
+    pub servers: Vec<ServerConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -185,6 +188,7 @@ impl Default for Config {
                 trim_silence: false,
             },
             appearance: AppearanceConfig::default(),
+            servers: Vec::new(),
         }
     }
 }
@@ -200,6 +204,19 @@ struct RawConfig {
     radio: Option<RawRadio>,
     podcasts: Option<RawPodcasts>,
     appearance: Option<RawAppearance>,
+    server: Option<Vec<RawServer>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServer {
+    name: String,
+    url: String,
+    #[serde(default)]
+    user: String,
+    kind: Option<String>,
+    stream: Option<String>,
+    bitrate: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -278,6 +295,41 @@ impl Config {
         let radio = raw.radio.unwrap_or_default();
         let pods = raw.podcasts.unwrap_or_default();
         let look = raw.appearance.unwrap_or_default();
+        let parse_err = |msg: String| ConfigError::Parse {
+            path: path.to_path_buf(),
+            msg,
+        };
+        let mut servers: Vec<ServerConfig> = Vec::new();
+        for s in raw.server.unwrap_or_default() {
+            let name = s.name.trim().to_string();
+            if name.is_empty() || name.contains('/') || name.contains('#') {
+                return Err(parse_err(format!(
+                    "server name \"{}\": needs to be set, without / or #",
+                    s.name
+                )));
+            }
+            if servers.iter().any(|x| x.name == name) {
+                return Err(parse_err(format!("two servers are called \"{name}\"")));
+            }
+            servers.push(ServerConfig {
+                name,
+                url: crate::remote::normalize_url(&s.url),
+                user: s.user.trim().to_string(),
+                kind: match s.kind {
+                    Some(k) => k
+                        .parse::<ServerKind>()
+                        .map_err(|m| parse_err(format!("server.kind: {m}")))?,
+                    None => ServerKind::Subsonic,
+                },
+                stream: match s.stream {
+                    Some(f) => f
+                        .parse::<StreamFormat>()
+                        .map_err(|m| parse_err(format!("server.stream: {m}")))?,
+                    None => StreamFormat::Raw,
+                },
+                bitrate: s.bitrate.unwrap_or(192).clamp(32, 512),
+            });
+        }
         let theme = match look.theme {
             Some(t) => t.parse::<Theme>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -342,6 +394,7 @@ impl Config {
                 trim_silence: pods.trim_silence.unwrap_or(false),
             },
             appearance: AppearanceConfig { theme },
+            servers,
         })
     }
 
@@ -424,6 +477,18 @@ speed = 1.0
 # Cut long silences down. Applies to podcasts only.
 trim_silence = false
 
+# Music servers: Subsonic (Navidrome, Gonic and the like) or Ampache. Add
+# them in Settings, which checks the login and keeps the password in your
+# keyring, never in this file.
+#
+# [[server]]
+# name = "Home"                      # shown in the sidebar
+# url = "https://music.example.com"
+# user = "me"
+# kind = "subsonic"                  # subsonic or ampache; Settings finds out
+# stream = "raw"                     # raw (the original file), opus or mp3
+# bitrate = 192                      # kbps, for opus and mp3
+
 # Your own radio stations, in the order they show in the Radio view.
 # The Radio view can add and edit these too.
 #
@@ -497,6 +562,29 @@ pub fn set_stations(path: &Path, stations: &[Station]) -> Result<bool, ConfigErr
             radio.remove("station");
         } else {
             radio.insert("station", toml_edit::Item::ArrayOfTables(arr));
+        }
+        Ok(true)
+    })
+}
+
+/// Replace the server list with `servers`, in order.
+pub fn set_servers(path: &Path, servers: &[ServerConfig]) -> Result<bool, ConfigError> {
+    edit(path, |doc| {
+        let mut arr = toml_edit::ArrayOfTables::new();
+        for s in servers {
+            let mut t = toml_edit::Table::new();
+            t.insert("name", toml_edit::value(s.name.clone()));
+            t.insert("url", toml_edit::value(s.url.clone()));
+            t.insert("user", toml_edit::value(s.user.clone()));
+            t.insert("kind", toml_edit::value(s.kind.as_str()));
+            t.insert("stream", toml_edit::value(s.stream.as_str()));
+            t.insert("bitrate", toml_edit::value(i64::from(s.bitrate)));
+            arr.push(t);
+        }
+        if arr.is_empty() {
+            doc.remove("server");
+        } else {
+            doc.insert("server", toml_edit::Item::ArrayOfTables(arr));
         }
         Ok(true)
     })
@@ -613,6 +701,32 @@ mod tests {
         assert_eq!(c.playback.volume, 80);
         assert!(c.library.watch);
         assert_eq!(c.appearance.theme, Theme::Runout);
+    }
+
+    #[test]
+    fn servers_round_trip() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("c.toml");
+        std::fs::write(&p, "# mine\n[playback]\nvolume = 50\n").unwrap();
+        let s = ServerConfig {
+            name: "Home".into(),
+            url: "https://music.example.com".into(),
+            user: "zack".into(),
+            kind: ServerKind::Ampache,
+            stream: StreamFormat::Opus,
+            bitrate: 128,
+        };
+        set_servers(&p, std::slice::from_ref(&s)).unwrap();
+        let c = Config::load_from(&p).unwrap();
+        assert_eq!(c.servers, vec![s]);
+        assert_eq!(c.playback.volume, 50);
+        assert!(std::fs::read_to_string(&p).unwrap().contains("# mine"));
+        set_servers(&p, &[]).unwrap();
+        assert!(Config::load_from(&p).unwrap().servers.is_empty());
+        assert!(
+            Config::parse("[[server]]\nname = \"a/b\"\nurl = \"x\"\n", &p).is_err(),
+            "no slash in a name"
+        );
     }
 
     #[test]

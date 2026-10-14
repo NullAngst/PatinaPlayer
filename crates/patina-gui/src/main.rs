@@ -106,16 +106,10 @@ fn main() -> Result<()> {
     })?;
     let fade_ms = session.fade_ms;
     let playing_files = session.playing_files;
-    let player = session.browser.player.clone();
 
     let ui = AppWindow::new().context("can't open the window")?;
-    let _bridge = bridge::install(&ui, session.browser, playing_files);
+    let bridge = bridge::install(&ui, session.browser, playing_files);
     ui.run().context("the window closed with an error")?;
-
-    player.send(patina_core::Command::Quit);
-    // Give the core a moment to fade out instead of cutting the sound.
-    std::thread::sleep(std::time::Duration::from_millis(
-        fade_ms.min(300) as u64 + 50,
-    ));
+    bridge.shutdown(fade_ms);
     Ok(())
 }

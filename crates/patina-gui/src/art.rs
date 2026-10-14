@@ -51,12 +51,7 @@ impl ArtCache {
                     for key in jobs {
                         let img = match &key.0 {
                             Req::Track(p) => patina_core::art::load(p, key.1),
-                            Req::Dir(d) => patina_core::art::folder_image(d).and_then(|f| {
-                                patina_core::art::load_origin(
-                                    &patina_core::art::Origin::File(f),
-                                    key.1,
-                                )
-                            }),
+                            Req::Dir(d) => patina_core::art::load_dir(d, key.1),
                         };
                         let buf = img.map(|i| {
                             SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(

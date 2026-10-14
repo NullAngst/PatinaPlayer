@@ -27,6 +27,9 @@ pub struct TrackInfo {
     pub kind: MediaKind,
     /// Network location for radio stations and streamed podcast episodes.
     pub url: Option<String>,
+    /// A song or episode on a music server. Its stream URL carries a
+    /// login, so it's asked for when the track opens, not stored.
+    pub remote: Option<crate::remote::RemoteRef>,
     /// Podcast episode row, so playback position can be saved against it.
     pub episode: Option<i64>,
     pub title: Option<String>,
@@ -148,8 +151,11 @@ impl TrackInfo {
     }
 
     /// What to hand FFmpeg: the local file if there is one, else the URL.
+    /// Server songs have none here: theirs is asked for at open time.
     pub fn location(&self) -> Option<String> {
-        if !self.path.as_os_str().is_empty() {
+        if self.remote.is_some() {
+            None
+        } else if !self.path.as_os_str().is_empty() {
             Some(self.path.to_string_lossy().into_owned())
         } else {
             self.url.clone()

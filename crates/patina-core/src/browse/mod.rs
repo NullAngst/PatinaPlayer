@@ -4,6 +4,7 @@
 //! library, the queue or the config. That's how the two stay identical.
 
 pub mod model;
+mod servers;
 pub mod settings;
 
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ use crate::config::{self, Config, Station};
 use crate::library::podcasts::EpisodeRow;
 use crate::library::{ArtistMode, LibEvent, Library, LibraryService, PlaylistRow, TrackRow};
 use crate::podcast::{PodEvent, PodcastService};
+use crate::remote::{RemoteService, ServerState, ServerStatus};
 use crate::{Command, Event, Player, TrackInfo};
 
 pub use model::*;
@@ -41,6 +43,8 @@ pub enum SideEntry {
         path: PathBuf,
         tracks: i64,
         present: bool,
+        /// A music server's state; None for a local folder.
+        server: Option<ServerState>,
     },
     Label(&'static str),
     Gap,
@@ -60,6 +64,8 @@ pub struct Startup {
     pub lib: Option<Library>,
     pub service: Option<LibraryService>,
     pub pod: Option<PodcastService>,
+    /// Music servers. None without the library.
+    pub remote: Option<RemoteService>,
     /// The config as loaded. Settings edits it, and the file, together.
     pub config: Config,
     pub settings_info: SettingsInfo,
@@ -70,6 +76,13 @@ pub struct Browser {
     pub lib: Option<Library>,
     pub service: Option<LibraryService>,
     pub pod: Option<PodcastService>,
+    pub remote: Option<RemoteService>,
+    /// The servers' status as of the last poll.
+    pub servers: Vec<ServerStatus>,
+    /// Server changes waiting to be redrawn, at most a couple a second
+    /// while a big sync runs.
+    servers_changed: Option<Instant>,
+    queue_sync: servers::QueueSync,
     pub section: Section,
     /// Drill-down stack per section, so switching away and back returns
     /// you to where you were.
@@ -134,6 +147,10 @@ impl Browser {
             lib: s.lib,
             service: s.service,
             pod: s.pod,
+            remote: s.remote,
+            servers: Vec::new(),
+            servers_changed: None,
+            queue_sync: servers::QueueSync::default(),
             section: Section::Folders,
             stacks: HashMap::new(),
             forward: HashMap::new(),
@@ -240,7 +257,13 @@ impl Browser {
             self.roots_checked = Instant::now();
             let mut flipped = false;
             for e in &mut self.sidebar {
-                if let SideEntry::Source { path, present, .. } = e {
+                if let SideEntry::Source {
+                    path,
+                    present,
+                    server: None,
+                    ..
+                } = e
+                {
                     let now = path.is_dir();
                     flipped |= now != *present;
                     *present = now;
@@ -250,6 +273,7 @@ impl Browser {
                 self.touch();
             }
         }
+        changed |= self.poll_servers();
         if changed {
             self.refresh_all();
             self.rebuild_sidebar();
@@ -272,19 +296,47 @@ impl Browser {
             s.push(SideEntry::Label("Listening"));
             s.extend(Section::STATS.iter().map(|&x| SideEntry::Section(x)));
         }
-        if let Some(lib) = &self.lib
-            && let Ok(sources) = lib.sources()
-            && !sources.is_empty()
-        {
-            s.push(SideEntry::Gap);
-            s.push(SideEntry::Label("Sources"));
-            for src in sources {
-                s.push(SideEntry::Source {
-                    present: src.root.is_dir(),
-                    path: src.root,
-                    tracks: src.tracks,
+        let sources = self
+            .lib
+            .as_ref()
+            .and_then(|l| l.sources().ok())
+            .unwrap_or_default();
+        let mut entries: Vec<SideEntry> = sources
+            .iter()
+            .filter(|src| !crate::remote::is_remote(&src.root))
+            .map(|src| SideEntry::Source {
+                present: src.root.is_dir(),
+                path: src.root.clone(),
+                tracks: src.tracks,
+                server: None,
+            })
+            .collect();
+        // Servers as configured, synced yet or not.
+        if self.lib.is_some() {
+            for sc in &self.config.servers {
+                let root = crate::remote::root(&sc.name);
+                entries.push(SideEntry::Source {
+                    tracks: sources
+                        .iter()
+                        .find(|x| x.root == root)
+                        .map(|x| x.tracks)
+                        .unwrap_or(0),
+                    path: root,
+                    present: true,
+                    server: Some(
+                        self.servers
+                            .iter()
+                            .find(|x| x.name == sc.name)
+                            .map(|x| x.state.clone())
+                            .unwrap_or(ServerState::Connecting),
+                    ),
                 });
             }
+        }
+        if !entries.is_empty() {
+            s.push(SideEntry::Gap);
+            s.push(SideEntry::Label("Sources"));
+            s.extend(entries);
         }
         s.push(SideEntry::Gap);
         s.push(SideEntry::Section(Section::Settings));
@@ -370,6 +422,7 @@ impl Browser {
             },
             stations: &self.stations,
             checks: &self.checks,
+            servers: &self.servers,
         }
     }
 
@@ -766,6 +819,11 @@ impl Browser {
     /// Add files to an existing playlist. Files already in it are left
     /// out, and the note says so.
     pub fn add_to_playlist(&mut self, id: i64, name: &str, paths: &[PathBuf]) {
+        if let Some(p) = self.playlist_row(id)
+            && p.server.is_some()
+        {
+            return self.add_to_server_playlist(&p, paths);
+        }
         let Some(lib) = self.lib.as_mut() else { return };
         match lib.append_to_playlist(id, paths) {
             Ok(added) => {
@@ -805,6 +863,12 @@ impl Browser {
         if name.is_empty() {
             return;
         }
+        if !self.server_playlist_job(id, |rid| servers::Job::RenamePlaylist {
+            id: rid,
+            name: name.to_string(),
+        }) {
+            return;
+        }
         if let Some(lib) = &self.lib
             && let Err(e) = lib.rename_playlist(id, name)
         {
@@ -814,6 +878,9 @@ impl Browser {
     }
 
     pub fn delete_playlist(&mut self, id: i64) {
+        if !self.server_playlist_job(id, |rid| servers::Job::DeletePlaylist { id: rid }) {
+            return;
+        }
         if let Some(lib) = &self.lib
             && let Err(e) = lib.delete_playlist(id)
         {
@@ -837,12 +904,17 @@ impl Browser {
     /// playlist.
     pub fn edit_playlist(&mut self, remove: bool, delta: isize) {
         let Some(id) = self.in_playlist() else { return };
+        if self.playlist_row(id).is_some_and(|p| p.readonly) {
+            return self.note(
+                "That playlist is someone else's on the server; it can't be changed from here",
+            );
+        }
         let Some(level) = self.level() else { return };
         let mut uris: Vec<Vec<u8>> = level
             .items
             .iter()
             .filter_map(|i| match i {
-                Item::Track(t) => Some(crate::library::file_uri(&t.path)),
+                Item::Track(t) => Some(t.uri()),
                 Item::Missing { uri } => Some(uri.clone()),
                 _ => None,
             })
@@ -868,6 +940,7 @@ impl Browser {
         {
             return self.error(e.to_string());
         }
+        self.push_server_playlist(id, &uris);
         self.refresh_current();
         if let Some(l) = self.level_mut() {
             l.selected = new_sel;
@@ -1073,6 +1146,7 @@ impl Browser {
             self.podcast_tempo,
             self.podcast_trim,
             &self.devices,
+            &self.servers,
         )
         .into_iter()
         .map(|(_, s)| s)
@@ -1101,6 +1175,21 @@ impl Browser {
                     let v = &options[*index].0;
                     w(config::set_value(&path, "appearance", "theme", v.as_str()))?;
                     self.config.appearance.theme = v.parse().unwrap_or_default();
+                }
+                (Key::ServerStream(name), Control::Choice { options, index }) => {
+                    let (stream, kbps) = settings::parse_stream(&options[*index].0);
+                    let mut list = self.config.servers.clone();
+                    if let Some(sc) = list.iter_mut().find(|s| &s.name == name) {
+                        sc.stream = stream;
+                        if let Some(k) = kbps {
+                            sc.bitrate = k;
+                        }
+                    }
+                    w(config::set_servers(&path, &list))?;
+                    self.config.servers = list;
+                    if let Some(r) = &self.remote {
+                        r.set_servers(self.config.servers.clone());
+                    }
                 }
                 (Key::StartVolume, Control::Number { value, .. }) => {
                     w(config::set_value(&path, "playback", "volume", *value))?;
@@ -1337,6 +1426,9 @@ impl Browser {
     }
 
     pub fn unsubscribe(&mut self, url: &str) {
+        if url.starts_with(crate::remote::SCHEME) {
+            return self.note("That podcast comes from your server; unsubscribe from it there");
+        }
         match config::edit_podcast_feed(&self.config_path, url, false) {
             Ok(_) => {
                 self.feeds.retain(|f| f != url);

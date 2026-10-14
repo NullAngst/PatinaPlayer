@@ -511,7 +511,23 @@ impl Worker {
                 });
             }
         };
-        let res = download(&ep.audio_url, &dest, &flag, &progress);
+        // A server episode's address carries a login; ask for it now.
+        let url = match crate::remote::parse_episode_uri(&ep.audio_url) {
+            Some(r) => match crate::remote::registry().stream(&r) {
+                Ok((u, _)) => u,
+                Err(e) => {
+                    *self.cancel.lock().unwrap() = None;
+                    self.status.lock().unwrap().downloading = None;
+                    let _ = self.events.send(PodEvent::Error(format!(
+                        "download of \"{}\" failed: {e}",
+                        ep.title
+                    )));
+                    return;
+                }
+            },
+            None => ep.audio_url.clone(),
+        };
+        let res = download(&url, &dest, &flag, &progress);
         *self.cancel.lock().unwrap() = None;
         self.status.lock().unwrap().downloading = None;
         match res {

@@ -134,7 +134,6 @@ fn main() -> Result<()> {
     let Session {
         browser, fade_ms, ..
     } = session;
-    let player = browser.player.clone();
     let mut app = app::App::new(browser, art);
     app.b.switch(start);
     let result = app.run(&mut terminal);
@@ -143,6 +142,6 @@ fn main() -> Result<()> {
         ratatui::crossterm::event::DisableMouseCapture
     );
     ratatui::restore();
-    patina_core::session::shutdown(&player, fade_ms);
+    patina_core::session::shutdown(&mut app.b, fade_ms);
     result
 }

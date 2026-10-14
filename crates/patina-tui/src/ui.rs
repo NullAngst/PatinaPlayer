@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, 
 use crate::app::{App, Focus, InputPurpose, Modal};
 use patina_core::browse::SideEntry;
 use patina_core::browse::{Control, Item, Section, Source, fmt_duration, fmt_length};
+use patina_core::remote::ServerState;
 
 const SIDEBAR_W: u16 = 24;
 const QUEUE_W: u16 = 42;
@@ -68,17 +69,37 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::FeedUrl => "Podcast feed URL",
                 InputPurpose::AddFolder => "Add a music folder",
                 InputPurpose::SetValue { label, .. } => label.as_str(),
+                InputPurpose::ServerName(f) if f.old.is_some() => "Server: name",
+                InputPurpose::ServerName(_) => "New server: a name for it",
+                InputPurpose::ServerUrl(_) => "Server address (https://music.example.com)",
+                InputPurpose::ServerUser(_) => "User name (empty if you'll give an API key)",
+                InputPurpose::ServerSecret(f) if f.old.is_some() => {
+                    "Password or API key (empty keeps the saved one)"
+                }
+                InputPurpose::ServerSecret(_) => "Password or API key",
+                InputPurpose::ServerPlaylist { .. } => "New playlist on the server",
             };
-            draw_input_box(f, app, area, title, buf);
+            // Passwords show as dots.
+            let shown = if matches!(purpose, InputPurpose::ServerSecret(_)) {
+                "•".repeat(buf.chars().count())
+            } else {
+                buf.clone()
+            };
+            draw_input_box(f, app, area, title, &shown);
         }
         Modal::PickPlaylist {
             title,
+            servers,
             rows,
             selected,
             ..
         } => {
             let names: Vec<String> = std::iter::once("New playlist…".to_string())
-                .chain(rows.iter().map(|r| format!("{}  ({})", r.name, r.items)))
+                .chain(servers.iter().map(|s| format!("New playlist on {s}…")))
+                .chain(rows.iter().map(|r| match &r.server {
+                    Some(s) => format!("{}  ({}, on {s})", r.name, r.items),
+                    None => format!("{}  ({})", r.name, r.items),
+                }))
                 .collect();
             draw_pick(f, app, area, title, &names, *selected);
         }
@@ -141,7 +162,34 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             SideEntry::Source {
                 path,
                 tracks,
+                server: Some(state),
+                ..
+            } => {
+                let name = patina_core::remote::server_of(path).unwrap_or("server");
+                let (dot, dot_color) = match state {
+                    ServerState::Ready => ("●", t.verdigris),
+                    ServerState::Syncing { .. } | ServerState::Connecting => ("◌", t.verdigris),
+                    _ => ("●", t.copper),
+                };
+                let right = match state {
+                    ServerState::Syncing { done, total } if *total > 0 => format!("{done}/{total}"),
+                    ServerState::NoPassword | ServerState::BadLogin => "login".into(),
+                    ServerState::Offline(_) => "offline".into(),
+                    _ => tracks.to_string(),
+                };
+                let w = area.width as usize;
+                let name_w = w.saturating_sub(right.len() + 5);
+                Line::from(vec![
+                    Span::styled(format!(" {dot} "), base.fg(dot_color)),
+                    Span::styled(pad(&truncate(name, name_w), name_w), base.fg(t.text)),
+                    Span::styled(format!(" {right} "), base.fg(t.muted)),
+                ])
+            }
+            SideEntry::Source {
+                path,
+                tracks,
                 present,
+                server: None,
             } => {
                 let name = path
                     .file_name()
@@ -263,7 +311,9 @@ fn hints(app: &App) -> &'static str {
         }
         (Section::Podcasts, _) => "Enter open · N subscribe · D unsubscribe · F5 refresh",
         (Section::Downloads, _) => "Enter play · x delete file · P played",
-        (Section::Settings, _) => "Enter change · h/l step · N add folder · d remove folder",
+        (Section::Settings, _) => {
+            "Enter change (or sync a server) · h/l step · N add folder · E edit server · d remove"
+        }
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
             "Enter open · v play all · V shuffle · e queue all · P playlist all"
         }
@@ -580,7 +630,7 @@ fn item_row<'a>(
             Cell::from(" "),
             Cell::from(""),
             Cell::from(Span::styled(a.name.clone(), text)),
-            Cell::from(Span::styled(a.artist.clone(), muted)),
+            Cell::from(Span::styled(a.artist_line(), muted)),
             Cell::from(Span::styled(
                 a.year.map(|y| y.to_string()).unwrap_or_default(),
                 muted,
@@ -623,7 +673,13 @@ fn item_row<'a>(
         Item::Root { path, tracks } => vec![
             Cell::from(Span::styled("▸", dim)),
             Cell::from(""),
-            Cell::from(Span::styled(path.display().to_string(), text)),
+            Cell::from(Span::styled(
+                match patina_core::remote::server_of(path) {
+                    Some(name) => format!("{name} (server)"),
+                    None => path.display().to_string(),
+                },
+                text,
+            )),
             Cell::from(""),
             Cell::from(""),
             Cell::from(Span::styled(format!("{tracks} track{}", s(*tracks)), muted)),
@@ -646,7 +702,14 @@ fn item_row<'a>(
             Cell::from(" "),
             Cell::from(""),
             Cell::from(Span::styled(p.name.clone(), text)),
-            Cell::from(""),
+            Cell::from(Span::styled(
+                match (&p.server, p.readonly) {
+                    (Some(s), true) => format!("on {s}, read-only"),
+                    (Some(s), false) => format!("on {s}"),
+                    _ => String::new(),
+                },
+                muted,
+            )),
             Cell::from(""),
             Cell::from(Span::styled(
                 format!("{} track{}", p.items, s(p.items)),
@@ -806,7 +869,14 @@ fn item_row<'a>(
                 ),
                 Control::Action(a) => (
                     Span::styled(st.label.clone(), text),
-                    Span::styled(format!("Enter or N: {}", a.to_lowercase()), accent),
+                    Span::styled(
+                        if st.key == patina_core::browse::Key::AddFolder {
+                            format!("Enter or N: {}", a.to_lowercase())
+                        } else {
+                            format!("Enter: {}", a.to_lowercase())
+                        },
+                        accent,
+                    ),
                 ),
                 Control::Text { value, .. } => (
                     Span::styled(st.label.clone(), text),
@@ -818,6 +888,10 @@ fn item_row<'a>(
                 Control::Info(v) => (
                     Span::styled(st.label.clone(), muted),
                     Span::styled(v.clone(), muted),
+                ),
+                Control::Server(v) => (
+                    Span::styled(st.label.clone(), accent),
+                    Span::styled(v.clone(), text),
                 ),
             };
             vec![
@@ -1354,13 +1428,13 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (".", "Go to the playing track in Queue"),
         (
             "Queue",
-            "d remove, J/K move, S add the queue to a playlist, C clear",
+            "d remove, J/K move, S add the queue to a playlist, L load the queue saved on your server, C clear",
         ),
         ("Playlists", "N new, R rename, D delete; inside: d, J/K"),
         ("Radio", "N new, E edit, T test, D delete, J/K move"),
         (
             "Settings",
-            "Enter change, h/l step, N add folder, d remove folder",
+            "Enter change, h/l step, N add folder, d remove folder or server; on a server Enter syncs, E edits",
         ),
         (
             "Podcasts",

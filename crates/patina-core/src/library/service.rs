@@ -243,7 +243,11 @@ impl Worker {
             Err(e) => return self.error(e.to_string()),
         };
         let mut total = ScanStats::default();
-        for s in sources {
+        // Servers sync on their own threads; this is for folders.
+        for s in sources
+            .into_iter()
+            .filter(|s| !crate::remote::is_remote(&s.root))
+        {
             if self.cancel.load(Ordering::Relaxed) {
                 return;
             }

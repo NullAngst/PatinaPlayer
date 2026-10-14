@@ -28,10 +28,15 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 lofty = "0.25"
 notify = "8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Subsonic token auth (salted MD5) and Ampache handshakes (SHA-256).
+md-5 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
 toml = "1"
 toml_edit = "0.25"
 dirs = "7"
-reqwest = { version = "0.13", features = ["blocking", "gzip"] }
+reqwest = { version = "0.13", features = ["blocking", "gzip", "query", "form"] }
 rss = "2"
 url = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }

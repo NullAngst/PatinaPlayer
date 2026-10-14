@@ -2,9 +2,22 @@
 
 PatinaPlayer is a Linux music player for Subsonic servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 5.5 of the build plan: everything from milestones 1 to 5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output and an editable Settings view), plus whole views and the queue added to playlists, Add to queue next to Play and Shuffle, and two kawaii themes beside the default look. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Subsonic client comes next, then the cache and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 6 of the build plan: everything from milestones 1 to 5.5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view and the kawaii themes), plus music servers: Subsonic (Navidrome, Gonic, Airsonic and the rest) and Ampache, with their playlists, stations, podcasts and play queue, and passwords kept in your keyring. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The cache and offline copies come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
+
+**Music servers**
+- Subsonic servers (Navidrome, Gonic, Airsonic, LMS and anything else that speaks the Subsonic API) and Ampache, as many as you like, each one a source in the sidebar next to your folders.
+- Add one in Settings, under Servers: a name, its address, your user name and password. The app logs in to find out what kind of server it is, so there's nothing to pick. Ampache gets its own API, since Ampache speaks Subsonic too but its own API carries more.
+- The server's whole library is copied into the local index, so its songs turn up in Artists, Albums, Songs, Genres, search, the listening stats and Folders, mixed in with your local music, and browsing never waits on the network. Server albums say which server they're on, so they can be told from a local copy.
+- The first sync reads everything. Later ones (every half hour, and at startup) only fetch albums that changed. Sync now in Settings reads it all again.
+- Songs stream as the original file by default, so the sound chain gets the real thing and bit-perfect works for them as it does for local files. Settings can switch a server to Opus or MP3 at 96 to 320 kbps for a slow line.
+- Cover art comes from the server and is cached on disk at the sizes the app draws.
+- Server playlists show in Playlists with the server's name. Add to them, take songs out, reorder, rename or delete, and the change goes to the server. Someone else's playlist (or an Ampache smart list) is read-only. Add to playlist offers New playlist on <server> too.
+- The play queue is saved on the server a few seconds after it changes and every half minute while playing, so another client can pick up where you left off. Queue from <server> in the Queue view (`L` in the TUI) loads the one saved there. Only Subsonic servers keep a queue; Ampache's API has none.
+- The server's radio stations show under your own in Radio, and its podcasts (the episodes the server has downloaded) show in Podcasts, with your place in them saved here and sent to the server as a bookmark.
+- Passwords and API keys go in the desktop keyring through the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in config.toml. With no keyring running (a TTY, the TUI over SSH), they go in `~/.config/patinaplayer/secrets.toml`, readable only by you, and the app says so when it does it.
+- Logins use a salted token, or an API key where the server offers OpenSubsonic API keys (leave the user name empty and put the key in the password box). The plain password is never put in a URL.
 
 **Desktop app**
 - A Slint window in the dark verdigris look from the mockup (or one of the kawaii themes, below): sidebar of sections and sources, a header with back, forward and search, the open view, an optional queue panel, and the bottom bar with art, transport, seek, format badge, output and volume.
@@ -182,6 +195,15 @@ Everything below works the same with `patinaplayer` or `patinaplayer-tui`. They 
 
 The command line does the same, if you'd rather: `patinaplayer --add-folder /mnt/storage/music` adds one and exits, and `--remove-folder` takes one out.
 
+To add a music server:
+
+1. Open Settings and find Servers.
+2. Click Add server… (in the TUI: select Add a music server and press Enter).
+3. Give it a name for the sidebar, its address (like `https://music.example.com`, or whichever address you open its web page at), your user name and your password.
+4. Connect. If the login works, it's saved, and the sync starts. Progress shows next to its name in the sidebar.
+
+Now the server's albums fill in under Albums alongside your folders, and its playlists, stations and podcasts show up in their views.
+
 You can still play files directly without touching the library: `patinaplayer song.flac ~/Downloads/SomeAlbum`. They go straight into the queue.
 
 ## Config
@@ -215,9 +237,17 @@ trim_silence = false
 [[radio.station]]
 name = "Some Station"
 url = "https://example.com/listen.pls"
+
+[[server]]
+name = "Home"                       # shown in the sidebar
+url = "https://music.example.com"
+user = "me"
+kind = "subsonic"                   # subsonic or ampache; Settings finds out
+stream = "raw"                      # raw (the original file), opus or mp3
+bitrate = 192                       # kbps, for opus and mp3
 ```
 
-Settings, Radio and Podcasts edit this file for you, and keep the rest of it as you wrote it.
+Settings, Radio and Podcasts edit this file for you, and keep the rest of it as you wrote it. Server passwords are never in it; they're in your keyring.
 
 A typo in a key name is an error, not a silent default, so you find out right away. Command line flags (`--backend`, `--device`, `--buffer-ms`, `--volume`, `--fade-ms`) override the file for one run.
 
@@ -228,7 +258,8 @@ Where everything else goes:
 | Settings | `~/.config/patinaplayer/config.toml` |
 | Library index, playlists, play counts, podcast positions | `~/.local/share/patinaplayer/library.db` |
 | Downloaded podcast episodes | `~/.local/share/patinaplayer/offline/podcasts/` |
-| Resized cover art | `~/.cache/patinaplayer/art/` |
+| Resized cover art, local and from servers | `~/.cache/patinaplayer/art/` |
+| Server passwords | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
 
 The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists to that. The art cache is safe to wipe. It refills from your files.
 
@@ -265,7 +296,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
 
-In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes one. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
@@ -285,11 +316,14 @@ crates/
     src/art.rs          finding, cropping and caching cover art
     src/radio.rs        station URL resolving: pls, m3u, HLS detection, mirror checks
     src/podcast.rs      feed fetching, episode downloads with resume
+    src/remote/         music servers: the Subsonic and Ampache clients, syncing into the index, the server threads
+    src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
     src/config.rs       config file and XDG paths
     src/player.rs       core thread: commands in, snapshots and events out
     src/queue.rs        queue on stable entry ids, shuffle, repeat
     examples/scan.rs    time an index of your own folders
-    tests/              gapless, seek, library, watcher, player, filter, network and browser tests
+    examples/mock_server.rs  a stand-in Navidrome on localhost, to try the apps without a server
+    tests/              gapless, seek, library, watcher, player, filter, network, server, keyring and browser tests
   patina-tui/           the terminal frontend (ratatui, ratatui-image)
   patina-gui/           the desktop app (Slint)
     ui/app.slint        the whole window
@@ -297,7 +331,7 @@ crates/
     src/bridge.rs       turns the shared browser into Slint models and back
 assets/                 app icon and desktop file
 packaging/              AppImage: FFmpeg build, AppDir, entry point
-.github/workflows/      CI on every push, AppImage on every tag
+.github/workflows/      CI on every push, real servers in containers, AppImage on every tag
 ```
 
 The core owns all the state. The views and what each action does live in `patina-core/src/browse`, so the TUI and the desktop app are only drawing and input. A fix to how a view behaves lands in both at once.
@@ -309,6 +343,12 @@ The queue refers to entries by id, never by position. That's what lets you reord
 To see how fast indexing is on your own collection: `cargo run --release -p patina-core --example scan -- ~/Music`. It uses a throwaway database, so your real index isn't touched.
 
 The bit-perfect test plays a 16/44.1 and a 24/96 FLAC of white noise to ALSA's `file` plugin, which writes everything it's sent to a file, then compares that file byte for byte with FFmpeg's own decode. Any resampling, volume, dither or padding anywhere in the chain fails it. No sound card needed.
+
+Server songs live in the same index as local files, under made-up paths like `server://Home/Nirvana/Bleach/01 Blew.flac` that follow the server's own folder layout. That's what makes every view, search and the folder tree work the same for both. The server's song id sits next to the path, and that's what playing, playlists and covers use. A song's stream address carries a login token, so it's asked for when the song starts rather than stored.
+
+The server tests run stand-in servers inside the test itself: one that answers like Navidrome (OpenSubsonic fields, made-up paths), one like Gonic (prefixed ids, real paths, missing fields, one-item lists sent as a lone object) and an Ampache one whose sessions run out every few calls. `.github/workflows/servers.yml` then runs the same clients against real Navidrome, Gonic and Ampache containers. The keyring test runs its own small Secret Service on a private D-Bus, locked keyring and unlock prompt included.
+
+To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
 
 The network tests run a small HTTP server inside the test itself: an ICY stream that hangs up on purpose to check reconnects, a `.pls` with a dead first mirror, real HLS segments, an RSS feed, and a download that breaks halfway to check resume. No internet needed.
 
@@ -328,7 +368,14 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - Built from source the normal way, both binaries link your system's FFmpeg, PipeWire and ALSA. The AppImage links its own FFmpeg in.
 - 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
 - Radio has no loudness leveling yet. The live normalizer for radio comes with leveling in milestone 9.
-- Stations and podcasts from a Subsonic server come with the Subsonic client in milestone 6. For now it's only the ones you add.
+- The server clients were tested here against stand-in servers built to the Subsonic, OpenSubsonic and Ampache API documents, with the quirks Navidrome and Gonic are known for. They haven't met a real server from this box, which can't reach the internet or run containers. The servers workflow runs them against real Navidrome and Gonic on GitHub; it hasn't run yet, so its first run is the real test. Its Ampache job sets Ampache up through Ampache's command-line installer, which I couldn't try here, so that job reports failures without failing the run.
+- Server songs only play while the server can be reached. Offline copies and a cache come with milestone 7.
+- Play counts from server songs count here, and the server's own counts are taken in at sync, but plays aren't reported back to the server yet. That comes with Last.fm in milestone 11, along with the choice of who scrobbles (the app, the server, or both) so a play isn't counted twice.
+- Starring and ratings aren't synced yet, and neither are lyrics.
+- Folders for a server follow the paths the server reports. Navidrome makes those up from the tags (Artist/Album/01 - Title.flac) unless its `Subsonic.DefaultReportRealPath` option is on, so a Navidrome folder tree looks like that. Gonic reports the real paths. Ampache's are made relative to its catalog folder.
+- A tag edit on the server that leaves an album's song count, length and dates the same isn't seen by the half-hourly sync. Sync now in Settings reads every album and catches it.
+- Navidrome doesn't do podcasts, so its Podcasts view stays your own feeds. Gonic, Airsonic and Ampache share theirs. Only episodes the server has already downloaded are listed.
+- Ampache's API has no saved play queue, so Queue from only shows Subsonic servers.
 - Scrobbling radio titles comes with Last.fm in milestone 11, off by default since station metadata is often junk.
 - Podcast position at a sped-up or trimmed speed is tracked from markers the decoder sends a few times a second, so the saved spot can be off by a fraction of a second. Resume backs up five seconds anyway.
 - The radio and podcast code was tested against local servers, including a real HLS stream made by FFmpeg. It hasn't been run against live stations from here, since this build box has no general internet access. HTTPS streams go through FFmpeg's own TLS, so a source build needs an FFmpeg built with it (distro packages are). The AppImage's FFmpeg has GnuTLS.
@@ -340,4 +387,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono, M PLUS Rounded 1c, Zen Maru Gothic) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/`.
 
-Now PatinaPlayer turns any view or the queue into a playlist, queues whole views in one click, and wears pink when you ask it to.
+Now PatinaPlayer plays from your Navidrome, Gonic or Ampache server alongside your folders, with the server's library, playlists, stations and podcasts in the same views and the password kept in your keyring.

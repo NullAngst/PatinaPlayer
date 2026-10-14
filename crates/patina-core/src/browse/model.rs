@@ -120,11 +120,13 @@ pub enum Item {
     },
     Genre(GenreRow),
     Playlist(PlaylistRow),
-    /// One of your stations, by its place in the config list.
+    /// One of your stations, by its place in the config list. A server's
+    /// station has `server` set instead, and isn't yours to edit.
     Station {
         index: usize,
         station: Station,
         check: Option<String>,
+        server: Option<String>,
     },
     Podcast(PodcastRow),
     Episode(EpisodeRow),
@@ -229,6 +231,8 @@ pub struct Ctx<'a> {
     pub stations: &'a [Station],
     /// Last test result per station URL.
     pub checks: &'a HashMap<String, String>,
+    /// Music servers as they stand: their stations, their status.
+    pub servers: &'a [crate::remote::ServerStatus],
 }
 
 /// Queue entry for one of your stations.
@@ -272,18 +276,43 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
     let none = || Err(NO_FOLDERS.to_string());
     let err = |e: crate::library::LibError| e.to_string();
     match source {
-        Source::Section(Section::Radio) => Ok((
-            "Radio".into(),
-            ctx.stations
+        Source::Section(Section::Radio) => {
+            let mut items: Vec<Item> = ctx
+                .stations
                 .iter()
                 .enumerate()
                 .map(|(index, s)| Item::Station {
                     index,
                     station: s.clone(),
                     check: ctx.checks.get(&s.url).cloned(),
+                    server: None,
                 })
-                .collect(),
-        )),
+                .collect();
+            let theirs: Vec<Item> = ctx
+                .servers
+                .iter()
+                .flat_map(|srv| {
+                    srv.stations.iter().map(|st| Item::Station {
+                        index: usize::MAX,
+                        station: Station {
+                            name: st.name.clone(),
+                            url: st.url.clone(),
+                        },
+                        check: ctx
+                            .checks
+                            .get(&st.url)
+                            .cloned()
+                            .or_else(|| Some(format!("on {}", srv.name))),
+                        server: Some(srv.name.clone()),
+                    })
+                })
+                .collect();
+            if !theirs.is_empty() {
+                items.push(Item::Header("On your servers"));
+                items.extend(theirs);
+            }
+            Ok(("Radio".into(), items))
+        }
         Source::Section(Section::Podcasts) => {
             let Some(lib) = lib else {
                 return Err("Podcasts need the library database (--no-library is set).".into());
@@ -307,6 +336,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 st.podcast_tempo,
                 st.podcast_trim,
                 st.devices,
+                ctx.servers,
             );
             let mut items = Vec::new();
             let mut last = None;

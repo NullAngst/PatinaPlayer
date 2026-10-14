@@ -72,10 +72,15 @@ impl EpisodeRow {
     /// Queue entry for this episode: the local copy if there is one,
     /// otherwise streamed from the feed's URL.
     pub fn to_info(&self) -> TrackInfo {
+        // An episode on a music server streams from there, unless it's
+        // been downloaded.
+        let remote =
+            crate::remote::parse_episode_uri(&self.audio_url).filter(|_| self.download.is_none());
         TrackInfo {
             path: self.download.clone().unwrap_or_default(),
             kind: MediaKind::Podcast,
-            url: Some(self.audio_url.clone()),
+            url: remote.is_none().then(|| self.audio_url.clone()),
+            remote,
             episode: Some(self.id),
             title: Some(self.title.clone()),
             artist: self
@@ -133,7 +138,8 @@ impl Library {
                 .collect::<rusqlite::Result<_>>()?
         };
         for (id, url) in existing {
-            if !feeds.contains(&url) {
+            // Server podcasts come and go with their server, not the config.
+            if !feeds.contains(&url) && !url.starts_with(crate::remote::SCHEME) {
                 self.conn
                     .execute("DELETE FROM podcasts WHERE id = ?1", [id])?;
             }
