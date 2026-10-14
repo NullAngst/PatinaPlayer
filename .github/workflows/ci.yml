@@ -23,7 +23,8 @@ jobs:
             libavfilter-dev libavdevice-dev \
             libpipewire-0.3-dev libspa-0.2-dev libasound2-dev \
             libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype-dev \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+            dbus alsa-utils
 
       - name: Install Rust (latest stable)
         run: |
@@ -48,6 +49,18 @@ jobs:
 
       - name: Tests (includes the gapless and seek checks)
         run: cargo test --workspace
+
+      # Bit-perfect through a real ALSA kernel driver. The ALSA file-plugin
+      # test above already checks every bit on every run; this one needs the
+      # snd-aloop module, which hosted runners may or may not be able to
+      # load, so it never fails the build.
+      - name: Bit-perfect loopback on snd-aloop
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe snd-aloop
+          sudo chmod a+rw /dev/snd/*
+          cargo test -p patina-core --test bitperfect -- --ignored
 
       - name: Build TUI and GUI
         run: cargo build --release -p patina-tui -p patina-gui
