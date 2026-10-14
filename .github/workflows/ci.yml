@@ -21,7 +21,9 @@ jobs:
             pkg-config clang ffmpeg libmp3lame0 \
             libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
             libavfilter-dev libavdevice-dev \
-            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
+            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
 
       - name: Install Rust (latest stable)
         run: |
@@ -39,18 +41,20 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Clippy without PipeWire
         run: cargo clippy -p patina-core --no-default-features -- -D warnings
 
       - name: Tests (includes the gapless and seek checks)
-        run: cargo test --all
+        run: cargo test --workspace
 
-      - name: Build TUI
-        run: cargo build --release -p patina-tui
+      - name: Build TUI and GUI
+        run: cargo build --release -p patina-tui -p patina-gui
 
       - uses: actions/upload-artifact@v4
         with:
-          name: patinaplayer-tui-x86_64
-          path: target/release/patinaplayer-tui
+          name: patinaplayer-x86_64
+          path: |
+            target/release/patinaplayer-tui
+            target/release/patinaplayer
