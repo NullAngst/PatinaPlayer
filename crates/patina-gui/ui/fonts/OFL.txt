@@ -3,6 +3,13 @@ The bundled fonts are under the SIL Open Font License 1.1:
 Inter          Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)
 Noto Serif     Copyright 2012 Google Inc. All Rights Reserved.
 JetBrains Mono Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+M PLUS Rounded 1c  Copyright 2021 The M+ FONTS Project Authors (https://github.com/coz-m/MPLUS_FONTS)
+Zen Maru Gothic    Copyright 2021 The Zen Maru Gothic Project Authors (https://github.com/googlefonts/zen-marugothic)
+
+M PLUS Rounded 1c and Zen Maru Gothic are bundled as subsets: Latin, kana,
+punctuation and symbols, without the kanji, to keep the binary small. The
+full fonts' own license files are OFL-MPLUSRounded1c.txt and
+OFL-ZenMaruGothic.txt.
 
 SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
 

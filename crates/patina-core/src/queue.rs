@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::track::TrackInfo;
+use crate::track::{MediaKind, TrackInfo};
 
 pub type EntryId = u64;
 
@@ -353,6 +353,17 @@ impl Queue {
     /// Every entry's path, in play order. For "save queue as playlist".
     pub fn paths_in_order(&self) -> Vec<PathBuf> {
         self.order.iter().filter_map(|&id| self.path(id)).collect()
+    }
+
+    /// Local music files in play order, for adding the queue to a
+    /// playlist. Stations and podcast episodes are left out.
+    pub fn music_paths_in_order(&self) -> Vec<PathBuf> {
+        self.order
+            .iter()
+            .filter_map(|&id| self.get(id))
+            .filter(|e| e.info.kind == MediaKind::File && !e.info.path.as_os_str().is_empty())
+            .map(|e| e.info.path.clone())
+            .collect()
     }
 
     fn rand(&mut self) -> u64 {

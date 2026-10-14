@@ -107,6 +107,21 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+/// "Added 12 songs to \"Mix\"", with any left out because they were
+/// already there.
+pub fn added_note(added: usize, asked: usize, name: &str) -> String {
+    let skipped = asked.saturating_sub(added);
+    match (added, skipped) {
+        (0, 1) => format!("That track is already in \"{name}\""),
+        (0, _) => format!("All {} are already in \"{name}\"", count(asked)),
+        (_, 0) => format!("Added {} to \"{name}\"", count(added)),
+        _ => format!(
+            "Added {} to \"{name}\", left out {skipped} already in it",
+            count(added)
+        ),
+    }
+}
+
 pub fn count(n: usize) -> String {
     format!("{n} track{}", plural(n))
 }
@@ -679,7 +694,7 @@ impl Browser {
     pub fn queue_view(&mut self) {
         let tracks: Vec<TrackInfo> = self.view_tracks().iter().map(TrackRow::to_info).collect();
         if tracks.is_empty() {
-            return;
+            return self.note("Nothing here to add");
         }
         let n = tracks.len();
         self.player.send(Command::AppendTracks(tracks));
@@ -748,16 +763,22 @@ impl Browser {
             .unwrap_or_default()
     }
 
+    /// Add files to an existing playlist. Files already in it are left
+    /// out, and the note says so.
     pub fn add_to_playlist(&mut self, id: i64, name: &str, paths: &[PathBuf]) {
         let Some(lib) = self.lib.as_mut() else { return };
         match lib.append_to_playlist(id, paths) {
-            Ok(()) => self.note(format!("Added {} to \"{name}\"", count(paths.len()))),
+            Ok(added) => {
+                let msg = added_note(added, paths.len(), name);
+                self.note(msg);
+            }
             Err(e) => self.error(e.to_string()),
         }
         self.refresh_section(Section::Playlists);
     }
 
     pub fn create_playlist(&mut self, name: &str, paths: &[PathBuf]) {
+        let name = name.trim();
         if name.is_empty() {
             return;
         }
@@ -768,11 +789,16 @@ impl Browser {
             .create_playlist(name)
             .and_then(|id| lib.append_to_playlist(id, paths));
         match res {
-            Ok(()) if paths.is_empty() => self.note(format!("Created \"{name}\"")),
-            Ok(()) => self.note(format!("Added {} to \"{name}\"", count(paths.len()))),
+            Ok(_) if paths.is_empty() => {
+                self.note(format!("Created \"{name}\""));
+                self.refresh_section(Section::Playlists);
+            }
+            Ok(n) => {
+                self.note(format!("Made \"{name}\" with {}", count(n)));
+                self.refresh_section(Section::Playlists);
+            }
             Err(e) => self.error(e.to_string()),
         }
-        self.refresh_section(Section::Playlists);
     }
 
     pub fn rename_playlist(&mut self, id: i64, name: &str) {
@@ -888,10 +914,15 @@ impl Browser {
         self.player.send(Command::ClearQueue);
     }
 
-    pub fn save_queue(&mut self, name: &str) {
-        let paths = self.player.queue().paths_in_order();
-        self.create_playlist(name, &paths);
-        self.note(format!("Saved the queue as \"{name}\""));
+    /// The queue's songs in play order, for adding to a playlist. Stations
+    /// and podcast episodes can't go in one, so they're left out.
+    pub fn queue_playlist_paths(&self) -> Vec<PathBuf> {
+        self.player.queue().music_paths_in_order()
+    }
+
+    /// Everything the open view stands for, for adding to a playlist.
+    pub fn view_playlist_paths(&self) -> Vec<PathBuf> {
+        self.view_tracks().into_iter().map(|t| t.path).collect()
     }
 
     /// The queue entry at `pos` as a playlist addition.
@@ -1065,6 +1096,11 @@ impl Browser {
                     w(config::set_value(&path, "library", "watch", *on))?;
                     self.config.library.watch = *on;
                     self.apply_folders();
+                }
+                (Key::Theme, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(&path, "appearance", "theme", v.as_str()))?;
+                    self.config.appearance.theme = v.parse().unwrap_or_default();
                 }
                 (Key::StartVolume, Control::Number { value, .. }) => {
                     w(config::set_value(&path, "playback", "volume", *value))?;

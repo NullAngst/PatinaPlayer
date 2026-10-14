@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::audio::output::exclusive::HwDevice;
 use crate::audio::output::{Backend, BitPerfect};
-use crate::config::Config;
+use crate::config::{Config, Theme};
 
 /// Which option a row is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -17,6 +17,7 @@ pub enum Key {
     Folder(PathBuf),
     AddFolder,
     Watch,
+    Theme,
     StartVolume,
     FadeMs,
     Backend,
@@ -172,6 +173,26 @@ pub fn rows(
             },
         );
     }
+
+    // Appearance
+    push(
+        "Appearance",
+        Setting {
+            key: Key::Theme,
+            label: "Theme".into(),
+            help: "How the app looks. Runout is dark verdigris and copper; the kawaii themes are pastel and rounded.",
+            control: Control::Choice {
+                options: Theme::ALL
+                    .iter()
+                    .map(|t| (t.as_str().to_string(), t.label().to_string()))
+                    .collect(),
+                index: Theme::ALL
+                    .iter()
+                    .position(|t| *t == cfg.appearance.theme)
+                    .unwrap_or(0),
+            },
+        },
+    );
 
     // Playback
     push(

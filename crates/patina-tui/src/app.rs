@@ -36,7 +36,6 @@ pub enum InputPurpose {
     RenamePlaylist {
         id: i64,
     },
-    SaveQueue,
     /// Station name, then its URL. `edit` is the station being changed.
     StationName {
         edit: Option<usize>,
@@ -72,6 +71,7 @@ pub enum Modal {
         buf: String,
     },
     PickPlaylist {
+        title: String,
         add: Vec<PathBuf>,
         rows: Vec<PlaylistRow>,
         selected: usize,
@@ -111,8 +111,8 @@ const NOTE_TIME: Duration = Duration::from_secs(3);
 impl App {
     pub fn new(b: Browser, art: ArtView) -> Self {
         Self {
+            theme: Theme::new(b.config.appearance.theme),
             b,
-            theme: Theme::detect(),
             snap: Snapshot::default(),
             focus: Focus::Content,
             modal: Modal::None,
@@ -149,6 +149,9 @@ impl App {
             }
             self.take_notes();
             self.snap = self.b.player.snapshot();
+            if self.theme.kind != self.b.config.appearance.theme {
+                self.theme = Theme::new(self.b.config.appearance.theme);
+            }
             self.art.update(self.snap.track.as_ref());
             if let Some((_, t, err)) = &self.toast
                 && t.elapsed() > if *err { ERROR_TIME } else { NOTE_TIME }
@@ -213,19 +216,27 @@ impl App {
         self.follow = true;
     }
 
+    /// Add the selection (the selected queue entry, in the queue) to a
+    /// playlist.
     fn pick_playlist(&mut self) {
-        if self.b.lib.is_none() {
-            return self.b.error("Playlists need the library");
-        }
         let add = if self.b.section == Section::Queue {
             self.b.queue_paths_at(self.queue_sel)
         } else {
             self.b.playlist_paths_for_selection()
         };
+        self.open_pick("Add to playlist", add);
+    }
+
+    /// Choose a playlist, or a new one, for `add`.
+    fn open_pick(&mut self, title: &str, add: Vec<PathBuf>) {
+        if self.b.lib.is_none() {
+            return self.b.error("Playlists need the library");
+        }
         if add.is_empty() {
-            return;
+            return self.b.note("Only library songs can go in a playlist");
         }
         self.modal = Modal::PickPlaylist {
+            title: format!("{title} ({})", patina_core::browse::count(add.len())),
             add,
             rows: self.b.playlists(),
             selected: 0,
@@ -245,10 +256,11 @@ impl App {
             Modal::Help => return,
             Modal::Input { purpose, buf } => return self.input_key(k, purpose, buf),
             Modal::PickPlaylist {
+                title,
                 add,
                 rows,
                 selected,
-            } => return self.pick_key(k, add, rows, selected),
+            } => return self.pick_key(k, title, add, rows, selected),
             Modal::Confirm { msg, action } => {
                 match k.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm(action),
@@ -434,6 +446,11 @@ impl App {
             }
             KeyCode::Char('v') if !queue => self.play_view(false),
             KeyCode::Char('V') if !queue => self.play_view(true),
+            KeyCode::Char('e') if !queue => self.b.queue_view(),
+            KeyCode::Char('P') if !queue => {
+                let add = self.b.view_playlist_paths();
+                self.open_pick("Add this view to a playlist", add);
+            }
             KeyCode::Char('a') if !queue => self.b.add_selected_to_queue(false),
             KeyCode::Char('A') if !queue => self.b.add_selected_to_queue(true),
             KeyCode::Char('p') => self.pick_playlist(),
@@ -460,10 +477,8 @@ impl App {
                 }
             }
             KeyCode::Char('S') if queue => {
-                self.modal = Modal::Input {
-                    purpose: InputPurpose::SaveQueue,
-                    buf: String::new(),
-                }
+                let add = self.b.queue_playlist_paths();
+                self.open_pick("Add the queue to a playlist", add);
             }
 
             // Playlist editing.
@@ -647,17 +662,13 @@ impl App {
             InputPurpose::Search => {}
             InputPurpose::NewPlaylist { add } => self.b.create_playlist(&text, &add),
             InputPurpose::RenamePlaylist { id } => self.b.rename_playlist(id, &text),
-            InputPurpose::SaveQueue => {
-                if !text.is_empty() {
-                    self.b.save_queue(&text);
-                }
-            }
         }
     }
 
     fn pick_key(
         &mut self,
         k: KeyEvent,
+        title: String,
         add: Vec<PathBuf>,
         rows: Vec<PlaylistRow>,
         mut selected: usize,
@@ -683,6 +694,7 @@ impl App {
             _ => {}
         }
         self.modal = Modal::PickPlaylist {
+            title,
             add,
             rows,
             selected,

@@ -82,6 +82,59 @@ pub struct Config {
     /// Your own radio stations, in the order you listed them.
     pub stations: Vec<Station>,
     pub podcasts: PodcastConfig,
+    pub appearance: AppearanceConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppearanceConfig {
+    pub theme: Theme,
+}
+
+/// How both apps look. The TUI follows it as well as the GUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Theme {
+    /// Dark verdigris and copper, Runout's palette.
+    #[default]
+    Runout,
+    /// Pastel pink and cream, rounded, with Japanese labels.
+    KawaiiLight,
+    /// The same, on dreamy lavender.
+    KawaiiDark,
+}
+
+impl Theme {
+    pub const ALL: [Theme; 3] = [Theme::Runout, Theme::KawaiiLight, Theme::KawaiiDark];
+
+    /// As written in config.toml.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::Runout => "runout",
+            Theme::KawaiiLight => "kawaii-light",
+            Theme::KawaiiDark => "kawaii-dark",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Runout => "Runout",
+            Theme::KawaiiLight => "Kawaii Light",
+            Theme::KawaiiDark => "Kawaii Dark",
+        }
+    }
+
+    pub fn is_kawaii(self) -> bool {
+        self != Theme::Runout
+    }
+}
+
+impl std::str::FromStr for Theme {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Theme::ALL
+            .into_iter()
+            .find(|t| t.as_str().eq_ignore_ascii_case(s.trim()))
+            .ok_or_else(|| format!("unknown theme \"{s}\" (runout, kawaii-light, kawaii-dark)"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +184,7 @@ impl Default for Config {
                 speed: 1.0,
                 trim_silence: false,
             },
+            appearance: AppearanceConfig::default(),
         }
     }
 }
@@ -145,6 +199,13 @@ struct RawConfig {
     playback: Option<RawPlayback>,
     radio: Option<RawRadio>,
     podcasts: Option<RawPodcasts>,
+    appearance: Option<RawAppearance>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawAppearance {
+    theme: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -216,6 +277,14 @@ impl Config {
         let pb = raw.playback.unwrap_or_default();
         let radio = raw.radio.unwrap_or_default();
         let pods = raw.podcasts.unwrap_or_default();
+        let look = raw.appearance.unwrap_or_default();
+        let theme = match look.theme {
+            Some(t) => t.parse::<Theme>().map_err(|msg| ConfigError::Parse {
+                path: path.to_path_buf(),
+                msg: format!("appearance.theme: {msg}"),
+            })?,
+            None => Theme::default(),
+        };
         let backend = match out.backend {
             Some(b) => b.parse::<Backend>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -272,6 +341,7 @@ impl Config {
                 speed: pods.speed.unwrap_or(1.0).clamp(0.5, 3.0),
                 trim_silence: pods.trim_silence.unwrap_or(false),
             },
+            appearance: AppearanceConfig { theme },
         })
     }
 
@@ -333,6 +403,12 @@ bit_perfect = "off"
 # Card for bit-perfect playback, like "hw:CARD=DAC,DEV=0". Empty is the
 # first sound card. Settings lists the ones you have.
 bit_perfect_device = ""
+
+[appearance]
+# How the app looks: runout (dark verdigris and copper), kawaii-light
+# (pastel pink and cream) or kawaii-dark (pastel on lavender). The TUI
+# follows it too.
+theme = "runout"
 
 [playback]
 # Starting volume, 0 to 100.
@@ -536,6 +612,17 @@ mod tests {
         let c = Config::parse(&default_text(), Path::new("x")).unwrap();
         assert_eq!(c.playback.volume, 80);
         assert!(c.library.watch);
+        assert_eq!(c.appearance.theme, Theme::Runout);
+    }
+
+    #[test]
+    fn themes_parse() {
+        let c = Config::parse("[appearance]\ntheme = \"kawaii-dark\"\n", Path::new("x")).unwrap();
+        assert_eq!(c.appearance.theme, Theme::KawaiiDark);
+        assert!(Config::parse("[appearance]\ntheme = \"neon\"\n", Path::new("x")).is_err());
+        for t in Theme::ALL {
+            assert_eq!(t.as_str().parse::<Theme>(), Ok(t));
+        }
     }
 
     #[test]

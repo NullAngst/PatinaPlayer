@@ -13,6 +13,7 @@ use patina_core::browse::{
     Activated, Browser, Change, Control, Item, Key as SettingKey, Note, Section, SideEntry, Source,
     fmt_duration, fmt_length,
 };
+use patina_core::config::Theme;
 use patina_core::library::PlaylistRow;
 use patina_core::track::MediaKind;
 use patina_core::{Command, Event, PlayState, Repeat, Snapshot, TrackInfo};
@@ -20,7 +21,7 @@ use slint::platform::Key;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::art::{ArtCache, LARGE, Req, THUMB};
-use crate::{AppWindow, Hero, Icons, QueueRow, Row, SideItem};
+use crate::{AppWindow, Hero, Icons, P, QueueRow, Row, SideItem};
 
 enum Dlg {
     None,
@@ -31,7 +32,6 @@ enum Dlg {
     AddFolder,
     NewPlaylist(Vec<PathBuf>),
     RenamePlaylist(i64),
-    SaveQueue,
     Station(Option<usize>),
     Feed,
     Pick(Vec<PathBuf>, Vec<PlaylistRow>),
@@ -80,6 +80,8 @@ pub struct State {
     /// A native folder picker running on its own thread, and when it was
     /// opened.
     folder_pick: Option<(crossbeam_channel::Receiver<Option<PathBuf>>, Instant)>,
+    /// The theme on screen, so a change in Settings redraws.
+    theme: Option<Theme>,
 }
 
 const HELP: &str = "Space        play / pause
@@ -112,6 +114,35 @@ enum RowCtx {
     Album,
     /// A listening-stats list: plays on the right.
     Ranked,
+}
+
+/// The kawaii themes' Japanese names for the sidebar, in kana so they stay
+/// in the bundled rounded font.
+fn jp_section(s: Section) -> &'static str {
+    match s {
+        Section::Folders => "フォルダ",
+        Section::Artists => "アーティスト",
+        Section::Albums => "アルバム",
+        Section::Songs => "きょく",
+        Section::Genres => "ジャンル",
+        Section::Playlists => "プレイリスト",
+        Section::Radio => "ラジオ",
+        Section::Podcasts => "ポッドキャスト",
+        Section::Queue => "キュー",
+        Section::Downloads => "ダウンロード",
+        Section::Settings => "せってい",
+        Section::MostListened => "いちばん",
+        Section::TopAlbums => "ベスト",
+        Section::TopArtists => "スター",
+    }
+}
+
+fn jp_label(l: &str) -> &'static str {
+    match l {
+        "Listening" => "きいた",
+        "Sources" => "ソース",
+        _ => "",
+    }
 }
 
 fn plays(n: i64) -> String {
@@ -170,6 +201,7 @@ impl State {
             row_shown: Vec::new(),
             queue_shown: Vec::new(),
             folder_pick: None,
+            theme: None,
         }
     }
 
@@ -371,7 +403,12 @@ impl State {
         if self.b.can_play_view() && !acts.iter().any(|(a, _)| *a == "play") {
             acts.splice(
                 0..0,
-                [("play", "Play".into()), ("shuffle", "Shuffle".into())],
+                [
+                    ("play", "Play".into()),
+                    ("shuffle", "Shuffle".into()),
+                    ("queue", "Add to queue".into()),
+                    ("playlist", "Add to playlist".into()),
+                ],
             );
         }
         (layout, cols, acts)
@@ -518,7 +555,11 @@ impl State {
         set_strings(&self.crumbs, self.b.crumbs().iter().map(ss));
         ui.set_can_back(self.b.depth() > 1);
         ui.set_can_forward(self.b.can_go_forward());
-        ui.set_empty_text(ss(self.empty_text()));
+        let mut empty = self.empty_text();
+        if self.b.config.appearance.theme.is_kawaii() {
+            empty.push_str("  (´・ω・`)");
+        }
+        ui.set_empty_text(ss(empty));
         ui.set_album_tracks(self.b.in_playlist().is_none());
 
         let key = format!(
@@ -625,7 +666,11 @@ impl State {
                         .and_then(|p| self.art.get(Req::Track(p), LARGE));
                     Hero {
                         show: true,
-                        kicker: ss("ALBUM"),
+                        kicker: ss(if self.b.config.appearance.theme.is_kawaii() {
+                            "ALBUM · アルバム"
+                        } else {
+                            "ALBUM"
+                        }),
                         title: ss(&a.name),
                         sub: ss(&a.artist),
                         meta: ss(meta.join(" · ")),
@@ -643,6 +688,7 @@ impl State {
 
     fn sync_side(&mut self, ui: &AppWindow) {
         let icons = ui.global::<Icons>();
+        let kawaii = self.b.config.appearance.theme.is_kawaii();
         let status = self.b.service.as_ref().map(|s| s.status());
         let open_folder = match self.b.level().map(|l| &l.source) {
             Some(Source::Folder(p)) if self.b.section == Section::Folders => Some(p.clone()),
@@ -656,6 +702,7 @@ impl State {
                 SideEntry::Section(s) => SideItem {
                     kind: 0,
                     label: ss(s.label()),
+                    sub: ss(if kawaii { jp_section(*s) } else { "" }),
                     icon: match s {
                         Section::Folders => icons.get_folders(),
                         Section::Artists => icons.get_artists(),
@@ -692,6 +739,7 @@ impl State {
                         .filter(|sc| sc.root == *path && sc.total > 0);
                     SideItem {
                         kind: 1,
+                        sub: SharedString::new(),
                         label: ss(path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
@@ -717,6 +765,7 @@ impl State {
                 SideEntry::Label(l) => SideItem {
                     kind: 2,
                     label: ss(l.to_uppercase()),
+                    sub: ss(if kawaii { jp_label(l) } else { "" }),
                     ..Default::default()
                 },
                 SideEntry::Gap => SideItem {
@@ -944,6 +993,17 @@ impl State {
         }
         self.snap = self.b.player.snapshot();
         self.poll_folder_pick();
+        let theme = self.b.config.appearance.theme;
+        if self.theme != Some(theme) {
+            self.theme = Some(theme);
+            ui.global::<P>().set_theme(match theme {
+                Theme::Runout => 0,
+                Theme::KawaiiLight => 1,
+                Theme::KawaiiDark => 2,
+            });
+            // The sidebar's Japanese names and the album kicker change too.
+            self.last_gen = u64::MAX;
+        }
         let art_arrived = self.art.collect();
         let qv = self.b.player.queue().version;
         let gen_changed = self.b.generation() != self.last_gen;
@@ -1105,9 +1165,8 @@ impl State {
             "shuffle" => self.play_view(true),
             "queue" => self.b.queue_view(),
             "playlist" => {
-                let paths: Vec<PathBuf> =
-                    self.b.view_tracks().into_iter().map(|t| t.path).collect();
-                self.open_pick(ui, paths);
+                let paths = self.b.view_playlist_paths();
+                self.open_pick(ui, "", paths);
             }
             "sort" => self.b.cycle_sort(),
             "reverse" => self.b.reverse_songs(),
@@ -1133,12 +1192,14 @@ impl State {
         }
     }
 
-    fn open_pick(&mut self, ui: &AppWindow, paths: Vec<PathBuf>) {
+    /// Choose a playlist, or a new one, for `paths`. `what` names them in
+    /// the title ("the queue"); empty counts them instead.
+    fn open_pick(&mut self, ui: &AppWindow, what: &str, paths: Vec<PathBuf>) {
         if self.b.lib.is_none() {
             return self.b.error("Playlists need the library");
         }
         if paths.is_empty() {
-            return self.b.note("Only library files can go in a playlist");
+            return self.b.note("Only library songs can go in a playlist");
         }
         let rows = self.b.playlists();
         let mut items = vec![ss("New playlist…")];
@@ -1147,10 +1208,13 @@ impl State {
                 .map(|r| ss(format!("{}  ({})", r.name, r.items))),
         );
         set_strings(&self.dlg_items, items.into_iter());
-        ui.set_dlg_title(ss(format!(
-            "Add {} to a playlist",
-            patina_core::browse::count(paths.len())
-        )));
+        let n = patina_core::browse::count(paths.len());
+        ui.set_dlg_title(ss(if what.is_empty() {
+            format!("Add {n} to a playlist")
+        } else {
+            format!("Add {what} ({n}) to a playlist")
+        }));
+        ui.set_dlg_new_first(true);
         ui.set_dialog(2);
         self.dlg = Dlg::Pick(paths, rows);
     }
@@ -1225,6 +1289,7 @@ impl State {
                         .collect();
                     set_strings(&self.dlg_items, items.into_iter());
                     ui.set_dlg_title(ss(&st.label));
+                    ui.set_dlg_new_first(false);
                     ui.set_dialog(2);
                     self.dlg = Dlg::Choose(key);
                 }
@@ -1325,7 +1390,7 @@ impl State {
             "queue" => self.b.add_selected_to_queue(false),
             "playlist" => {
                 let paths = self.b.playlist_paths_for_selection();
-                self.open_pick(ui, paths);
+                self.open_pick(ui, "", paths);
             }
             "pl-remove" => self.b.edit_playlist(true, 0),
             "st-edit" => {
@@ -1412,7 +1477,7 @@ impl State {
             "remove" => self.b.remove_queue_position(i),
             "playlist" => {
                 let paths = self.b.queue_paths_at(i);
-                self.open_pick(ui, paths);
+                self.open_pick(ui, "", paths);
             }
             _ => {}
         }
@@ -1432,11 +1497,6 @@ impl State {
             Dlg::SetValue(key) => self.change_setting(ui, key, Change::Set(t1)),
             Dlg::NewPlaylist(paths) => self.b.create_playlist(&t1, &paths),
             Dlg::RenamePlaylist(id) => self.b.rename_playlist(id, &t1),
-            Dlg::SaveQueue => {
-                if !t1.is_empty() {
-                    self.b.save_queue(&t1);
-                }
-            }
             Dlg::Station(edit) => {
                 if t1.is_empty() || t2.is_empty() {
                     self.b.error("A station needs a name and a URL");
@@ -1586,7 +1646,7 @@ impl State {
                     } else {
                         self.b.playlist_paths_for_selection()
                     };
-                    self.open_pick(ui, paths);
+                    self.open_pick(ui, "", paths);
                 }
                 c if c.len() == 1 && c.as_bytes()[0].is_ascii_digit() => {
                     let d = c.as_bytes()[0] - b'0';
@@ -1776,8 +1836,8 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
         if s.b.player.queue().is_empty() {
             return;
         }
-        s.dlg = Dlg::SaveQueue;
-        open_text(&u, "Save the queue as a playlist", "Name", "", None, "Save");
+        let paths = s.b.queue_playlist_paths();
+        s.open_pick(&u, "the queue", paths);
     });
     on!(on_queue_clear, |s, u| {
         if !s.b.player.queue().is_empty() {

@@ -2,12 +2,12 @@
 
 PatinaPlayer is a Linux music player for Subsonic servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 5 of the build plan: everything from milestones 1 to 4.5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats and the AppImage), plus bit-perfect output, a Settings view that changes settings instead of only showing them, and a fix for stations that switch audio format mid-stream. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Subsonic client comes next, then the cache and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 5.5 of the build plan: everything from milestones 1 to 5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output and an editable Settings view), plus whole views and the queue added to playlists, Add to queue next to Play and Shuffle, and two kawaii themes beside the default look. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Subsonic client comes next, then the cache and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
 **Desktop app**
-- A Slint window in the dark verdigris look from the mockup: sidebar of sections and sources, a header with back, forward and search, the open view, an optional queue panel, and the bottom bar with art, transport, seek, format badge, output and volume.
+- A Slint window in the dark verdigris look from the mockup (or one of the kawaii themes, below): sidebar of sections and sources, a header with back, forward and search, the open view, an optional queue panel, and the bottom bar with art, transport, seek, format badge, output and volume.
 - Albums, and an artist's or a genre's albums, show as a cover grid. An album opens with a header showing its cover, year, track count and length, and buttons to play, shuffle, queue or add it to a playlist.
 - Right-click any row for everything you can do with it: play, play next, add to queue, add to a playlist, and per kind edit, test, move or delete stations, unsubscribe, download, mark played, rename or delete playlists.
 - Dialogs for new and edited stations, subscribing, new and renamed playlists, picking a playlist, and confirming deletes.
@@ -15,6 +15,14 @@ This is milestone 5 of the build plan: everything from milestones 1 to 4.5 (the 
 - The podcast speed chip in the bottom bar cycles 1.0x, 1.2x, 1.5x and 2.0x on click.
 - On a narrow window the queue panel folds away and the bottom bar drops the format badge and output chip, so nothing gets cut off.
 - Inter, Noto Serif and JetBrains Mono are bundled, so it looks the same on any system.
+
+**Themes**
+- Three looks, picked in Settings under Appearance. The switch is instant, no restart.
+- Runout: the default dark verdigris and copper.
+- Kawaii Light: cream and strawberry pink with mint and butter accents, rounded everything, a faint dot pattern behind the views, a pink pill for the open section, hearts for the seek and volume knobs, sparkles on the album header, and a kaomoji here and there.
+- Kawaii Dark: the same thing on cocoa plum, for night.
+- The kawaii themes switch the type to M PLUS Rounded 1c and Zen Maru Gothic (both bundled) and put the Japanese name next to each sidebar section (アルバム, ラジオ, プレイリスト).
+- The TUI follows the setting too, with the same colours in the terminal.
 
 **Bit-perfect**
 - Off by default. Turn it on in Settings, under Bit-perfect, and local files go straight to the DAC: an ALSA hardware device, opened exclusively, at the file's own sample rate and bit depth, with nothing in between. No resampling, no software volume, no dither, and no silence slipped in.
@@ -33,12 +41,19 @@ This is milestone 5 of the build plan: everything from milestones 1 to 4.5 (the 
 - Output, device and buffer changes reopen the output on the spot, and a playing song carries on from where it was. So does switching bit-perfect on or off.
 - In the TUI: Enter flips, cycles or edits; `h` and `l` step a value down or up; `N` adds a folder; `d` removes one.
 
-**Play or shuffle wherever you are**
-- Every library view has Play and Shuffle at the top (`v` and `V` from the keyboard, in both apps). They play the whole view: a folder plays everything under it, subfolders and all, an artist plays all their albums, Albums or Songs plays the library.
+**Play, shuffle, queue or keep wherever you are**
+- Every library view has Play, Shuffle, Add to queue and Add to playlist at the top (`v`, `V`, `e` and `P` from the keyboard, in both apps). They take the whole view: a folder means everything under it, subfolders and all, an artist means all their albums, Albums or Songs means the library.
+- Add to playlist offers New playlist… first, then every playlist you have, so a view can start a playlist or go on the end of one.
+- On a narrow window Add to queue and Add to playlist shrink to their icons, so the row still fits.
 - Go into a folder of a few hundred albums, hit Shuffle, and it plays through all of them in random order. Hit Play and it plays them in folder order.
 - Shuffle leaves the shuffle button on and Play turns it off, so the button flips between the two afterwards without losing your place.
 - In a grouped list (search results, Most listened) only the songs play, since the albums and artists there would repeat them.
 - Radio, Podcasts, Genres and Playlists don't get the buttons, since they're lists of lists. Open one and it does.
+
+**Playlists and the queue**
+- The queue goes into a playlist from the Add to playlist button under the queue (or `S` in the Queue view): a new one, or any playlist you already have.
+- Only songs from your library go in. Radio stations and podcast episodes in the queue are left out, since a playlist can't hold them.
+- Adding never doubles a song up. Anything already in the playlist, or in the queue twice, goes in once, and the note says how many were left out.
 
 **Listening stats**
 - Three views under Listening in the sidebar, built from your play counts.
@@ -65,8 +80,8 @@ This is milestone 5 of the build plan: everything from milestones 1 to 4.5 (the 
 - Albums: sorted by name, artist, year, recently added, most played or random.
 - Songs: one flat list, sortable on seven columns, either direction.
 - Genres: every genre with album and track counts, then its albums or its songs. "Blues Rock", "blues-rock" and "Blues_Rock" count as one genre.
-- Playlists: create, rename, delete, add to from anywhere, reorder and remove items.
-- Queue: what's playing and next, with reorder, remove, clear and save as playlist.
+- Playlists: create, rename, delete, add to from anywhere (a song, an album, a whole view, the queue), reorder and remove items.
+- Queue: what's playing and next, with reorder, remove, clear and add to a playlist.
 - Radio: your stations, with add, edit, test, reorder and delete.
 - Podcasts: your subscriptions, then each show's episodes with what's new, how far you got, and what's downloaded.
 - Downloads: downloaded podcast episodes. The track cache joins it in milestone 7.
@@ -185,6 +200,9 @@ buffer_ms = 200          # 50 to 1000
 bit_perfect = "off"      # off, on or auto
 bit_perfect_device = ""  # like "hw:CARD=DAC,DEV=0"; empty is the first card
 
+[appearance]
+theme = "runout"         # runout, kawaii-light or kawaii-dark
+
 [playback]
 volume = 80              # starting volume, 0 to 100
 fade_ms = 100            # 0 turns fades off
@@ -232,6 +250,8 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | z | Podcast silence trimming |
 | Enter | Open, or play from the selected track |
 | v / V | Play the whole view in order / shuffled |
+| e | Add the whole view to the queue |
+| P | Add the whole view to a playlist |
 | Esc / Backspace | Back up a level |
 | a / A | Add to the queue / play next |
 | p | Add to a playlist |
@@ -245,7 +265,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
 
-In the Queue: `d` remove, `J`/`K` move down or up, `S` save as a playlist, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes one. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes one. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
@@ -300,6 +320,8 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - The Browse folder picker goes through the desktop portal (xdg-desktop-portal), which Plasma, GNOME and most desktops run. Without it, Browse says so and Type a path still works.
 - Command line flags like `--backend` still override the file for one run, but Settings shows the file's values, not the override.
 - No tray icon and no MPRIS media keys yet. Those are milestone 14.
+- The kawaii fonts are bundled as subsets (Latin, kana and symbols), which saves about 3 MB per weight. Kanji in your own tags still show through your system's Japanese font, so a Japanese title can mix two typefaces. With no Japanese font installed at all, kanji show as boxes in every theme, the same as before.
+- The themes were checked under X11 (Xvfb) here, at full width and narrow, like the rest of the desktop app.
 - The AppImage build was run end to end on Ubuntu 24.04 here, the same system as the GitHub runner, but the workflow itself hasn't run on GitHub yet. The first tagged run is the real test.
 - The desktop app was checked under X11 (Xvfb) here, not on a real Plasma Wayland session. Slint supports Wayland natively, so it should be fine, but that's untested from this box.
 - When the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 12.
@@ -316,6 +338,6 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 
 GPL-3.0-or-later. See `LICENSE`.
 
-The bundled fonts (Inter, Noto Serif, JetBrains Mono) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/OFL.txt`.
+The bundled fonts (Inter, Noto Serif, JetBrains Mono, M PLUS Rounded 1c, Zen Maru Gothic) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/`.
 
-Now PatinaPlayer plays your files bit for bit when you ask it to, takes its settings from its own Settings view, and keeps the stations that change format on air.
+Now PatinaPlayer turns any view or the queue into a playlist, queues whole views in one click, and wears pink when you ask it to.

@@ -253,10 +253,17 @@ fn playlists_and_play_counts() {
     let a = fx.root.join("Nirvana/Bleach/01 Song.flac");
     let b = fx.root.join("Comp/02.mp3");
     let id = lib.create_playlist("Mix").unwrap();
-    lib.append_to_playlist(id, &[a.clone(), b.clone(), a.clone()])
-        .unwrap();
+    assert_eq!(
+        lib.append_to_playlist(id, &[a.clone(), b.clone()]).unwrap(),
+        2
+    );
+    // A song already in the playlist, or listed twice, goes in once.
+    assert_eq!(
+        lib.append_to_playlist(id, &[a.clone(), a.clone()]).unwrap(),
+        0
+    );
     let items = lib.playlist_items(id).unwrap();
-    assert_eq!(items.len(), 3);
+    assert_eq!(items.len(), 2);
     assert!(items.iter().all(|(_, t)| t.is_some()));
 
     // Reorder: move the last item to the front.
@@ -264,13 +271,13 @@ fn playlists_and_play_counts() {
     let last = uris.pop().unwrap();
     uris.insert(0, last);
     lib.set_playlist_items(id, &uris).unwrap();
-    assert_eq!(lib.playlist_items(id).unwrap().len(), 3);
+    assert_eq!(lib.playlist_items(id).unwrap().len(), 2);
 
     // A file that leaves the library shows as missing, not vanished.
     std::fs::remove_file(&b).unwrap();
     scan(&mut lib, &fx.root);
     let items = lib.playlist_items(id).unwrap();
-    assert_eq!(items.len(), 3);
+    assert_eq!(items.len(), 2);
     assert_eq!(items.iter().filter(|(_, t)| t.is_none()).count(), 1);
 
     lib.rename_playlist(id, "Renamed").unwrap();

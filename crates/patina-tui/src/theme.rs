@@ -1,23 +1,30 @@
-//! Runout's palette (ui/src/styles.css), dark only. Truecolor where the
-//! terminal says it supports it, nearest xterm-256 match everywhere else.
+//! The TUI's colours: Runout's palette (ui/src/styles.css) by default, or
+//! one of the kawaii palettes the GUI uses. Truecolor where the terminal
+//! says it supports it, nearest xterm-256 match everywhere else.
 
+use patina_core::config::Theme as Kind;
 use ratatui::style::Color;
 
 pub struct Theme {
+    pub kind: Kind,
     pub bg: Color,
     pub surface: Color,
     pub raised: Color,
     pub border: Color,
     pub text: Color,
     pub muted: Color,
+    /// The main accent: verdigris in Runout, pink in the kawaii themes.
     pub verdigris: Color,
     pub verdigris_dim: Color,
+    /// The warm accent, also used for warnings.
     pub copper: Color,
     pub copper_dim: Color,
     pub wave_raw: Color,
 }
 
-const PALETTE: [(u8, u8, u8); 11] = [
+type Palette = [(u8, u8, u8); 11];
+
+const RUNOUT: Palette = [
     (0x0e, 0x19, 0x17), // bg
     (0x13, 0x22, 0x20), // surface
     (0x17, 0x2a, 0x27), // raised
@@ -31,13 +38,49 @@ const PALETTE: [(u8, u8, u8); 11] = [
     (0x4a, 0x5f, 0x5a), // wave-raw
 ];
 
+/// Sakura Milk: cream and strawberry pink. The accents are a shade deeper
+/// than the GUI's so they still read as text on a light background.
+const KAWAII_LIGHT: Palette = [
+    (0xff, 0xf8, 0xf5), // bg
+    (0xff, 0xf0, 0xf2), // surface
+    (0xff, 0xe3, 0xea), // raised
+    (0xf3, 0xc6, 0xd3), // border
+    (0x5a, 0x3e, 0x47), // text
+    (0xa7, 0x7d, 0x8a), // muted
+    (0xe0, 0x55, 0x8a), // pink
+    (0xf7, 0xc1, 0xd3), // pink, soft
+    (0xd2, 0x7a, 0x2c), // apricot
+    (0xf6, 0xdc, 0xc0), // apricot, soft
+    (0xd3, 0xb3, 0xbe), // faint
+];
+
+/// Sakura Milk after dark: cocoa plum with the same pink and butter.
+const KAWAII_DARK: Palette = [
+    (0x24, 0x1a, 0x22), // bg
+    (0x2d, 0x20, 0x29), // surface
+    (0x3b, 0x2a, 0x36), // raised
+    (0x55, 0x3d, 0x4c), // border
+    (0xfb, 0xe9, 0xef), // text
+    (0xc4, 0x9a, 0xab), // muted
+    (0xff, 0x8f, 0xb3), // pink
+    (0x6b, 0x3a, 0x52), // pink, deep
+    (0xff, 0xd2, 0x7a), // butter
+    (0x5c, 0x4a, 0x2a), // butter, deep
+    (0x7a, 0x5a, 0x6a), // faint
+];
+
 impl Theme {
-    pub fn detect() -> Self {
+    pub fn new(kind: Kind) -> Self {
         let truecolor = std::env::var("COLORTERM")
             .map(|v| v.contains("truecolor") || v.contains("24bit"))
             .unwrap_or(false);
+        let pal = match kind {
+            Kind::Runout => &RUNOUT,
+            Kind::KawaiiLight => &KAWAII_LIGHT,
+            Kind::KawaiiDark => &KAWAII_DARK,
+        };
         let c = |i: usize| {
-            let (r, g, b) = PALETTE[i];
+            let (r, g, b) = pal[i];
             if truecolor {
                 Color::Rgb(r, g, b)
             } else {
@@ -45,6 +88,7 @@ impl Theme {
             }
         };
         Self {
+            kind,
             bg: c(0),
             surface: c(1),
             raised: c(2),

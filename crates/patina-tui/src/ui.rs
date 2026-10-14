@@ -61,7 +61,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let title = match purpose {
                 InputPurpose::NewPlaylist { .. } => "New playlist",
                 InputPurpose::RenamePlaylist { .. } => "Rename playlist",
-                InputPurpose::SaveQueue => "Save queue as playlist",
                 InputPurpose::Search => "",
                 InputPurpose::StationName { edit: None } => "New station: name",
                 InputPurpose::StationName { .. } => "Edit station: name",
@@ -72,11 +71,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             };
             draw_input_box(f, app, area, title, buf);
         }
-        Modal::PickPlaylist { rows, selected, .. } => {
+        Modal::PickPlaylist {
+            title,
+            rows,
+            selected,
+            ..
+        } => {
             let names: Vec<String> = std::iter::once("New playlist…".to_string())
                 .chain(rows.iter().map(|r| format!("{}  ({})", r.name, r.items)))
                 .collect();
-            draw_pick(f, app, area, "Add to playlist", &names, *selected);
+            draw_pick(f, app, area, title, &names, *selected);
         }
         Modal::Confirm { msg, .. } => draw_confirm(f, app, area, msg),
         _ => {}
@@ -241,11 +245,17 @@ fn hints(app: &App) -> &'static str {
     let src = app.b.level().map(|l| &l.source);
     match (app.b.section, src) {
         (_, Some(Source::Search(_))) => "Enter open · a add · A play next · Esc back",
-        (Section::Albums, Some(Source::Section(_))) => "o sort · v play all · V shuffle · a add",
-        (Section::Songs, _) => "o sort · O reverse · v play all · V shuffle · a add",
+        (Section::Albums, Some(Source::Section(_))) => {
+            "o sort · v play all · V shuffle · e queue all · P playlist all"
+        }
+        (Section::Songs, _) => {
+            "o sort · O reverse · v play all · V shuffle · e queue all · P playlist all"
+        }
         (Section::Artists, Some(Source::Section(_))) => "t album/track artist · a add",
         (_, Some(Source::Genre { .. })) => "t albums/songs · a add · Esc back",
-        (_, Some(Source::Playlist { .. })) => "d remove · J/K move · Esc back",
+        (_, Some(Source::Playlist { .. })) => {
+            "v play all · e queue all · d remove · J/K move · Esc back"
+        }
         (Section::Playlists, _) => "N new · R rename · D delete",
         (Section::Radio, _) => "Enter play · N new · E edit · T test · D delete · J/K move",
         (_, Some(Source::Podcast { .. })) => {
@@ -255,9 +265,9 @@ fn hints(app: &App) -> &'static str {
         (Section::Downloads, _) => "Enter play · x delete file · P played",
         (Section::Settings, _) => "Enter change · h/l step · N add folder · d remove folder",
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
-            "Enter open · v play all · V shuffle · a add"
+            "Enter open · v play all · V shuffle · e queue all · P playlist all"
         }
-        _ => "Enter open · v play all · V shuffle · a add · p playlist",
+        _ => "v play all · V shuffle · e queue all · P playlist all · a add · p playlist",
     }
 }
 
@@ -849,7 +859,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             fmt_length(total)
         )
     };
-    let hint = "Enter play · d remove · J/K move · S save · C clear";
+    let hint = "Enter play · d remove · J/K move · S add to playlist · C clear";
     let mut spans = vec![Span::styled(
         format!(" {title}"),
         Style::default().fg(t.text).add_modifier(Modifier::BOLD),
@@ -1329,6 +1339,8 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ("/", "Search the library"),
         ("Enter", "Open, or play from here"),
         ("v / V", "Play the whole view in order / shuffled"),
+        ("e", "Add the whole view to the queue"),
+        ("P", "Add the whole view to a playlist"),
         ("Esc / Backspace", "Back up a level"),
         ("a / A", "Add to queue / play next"),
         ("p", "Add to a playlist"),
@@ -1340,7 +1352,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ("[ ]   z", "Podcast speed, silence trimming"),
         ("q", "Queue panel"),
         (".", "Go to the playing track in Queue"),
-        ("Queue", "d remove, J/K move, S save as playlist, C clear"),
+        (
+            "Queue",
+            "d remove, J/K move, S add the queue to a playlist, C clear",
+        ),
         ("Playlists", "N new, R rename, D delete; inside: d, J/K"),
         ("Radio", "N new, E edit, T test, D delete, J/K move"),
         (

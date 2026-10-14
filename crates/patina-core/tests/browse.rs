@@ -235,6 +235,66 @@ fn playlists_from_a_selection() {
 }
 
 #[test]
+fn a_view_or_the_queue_goes_into_an_existing_playlist_without_duplicates() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+
+    // One song of Bleach in a playlist to start with.
+    b.switch(Section::Songs);
+    let i = index_of(
+        &b,
+        |it| matches!(it, Item::Track(t) if t.title == "Bleach Song 1"),
+    );
+    b.select(i);
+    let one = b.playlist_paths_for_selection();
+    b.create_playlist("Mix", &one);
+    let mix = b.playlists().into_iter().find(|p| p.name == "Mix").unwrap();
+    assert_eq!(mix.items, 1);
+
+    // The whole Folders root view: all three songs, one already there.
+    b.switch(Section::Folders);
+    b.select(0);
+    assert!(matches!(b.activate(), Activated::Opened));
+    let view = b.view_playlist_paths();
+    assert_eq!(view.len(), 3);
+    b.add_to_playlist(mix.id, &mix.name, &view);
+    let mix = b.playlists().into_iter().find(|p| p.name == "Mix").unwrap();
+    assert_eq!(mix.items, 3, "the song already in it is left out");
+    let notes: Vec<String> = b
+        .take_notes()
+        .into_iter()
+        .map(|n| format!("{n:?}"))
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("Added 2 tracks") && n.contains("left out 1")),
+        "{notes:?}"
+    );
+
+    // The queue: the view queued twice over, plus a radio station. Only
+    // the songs can go in, each once.
+    b.queue_view();
+    b.queue_view();
+    b.player.send(patina_core::Command::AppendTracks(vec![
+        patina_core::browse::station_info(&patina_core::config::Station {
+            name: "Live".into(),
+            url: "http://127.0.0.1:1/live".into(),
+        }),
+    ]));
+    wait_queue(&b, "six songs and a station", |q| q.len() == 7);
+    let queued = b.queue_playlist_paths();
+    assert_eq!(queued.len(), 6, "no station in the list");
+    b.create_playlist("From the queue", &queued);
+    let q = b
+        .playlists()
+        .into_iter()
+        .find(|p| p.name == "From the queue")
+        .unwrap();
+    assert_eq!(q.items, 3, "each song once");
+}
+
+#[test]
 fn stations_save_to_the_config_and_settings_follow() {
     let fx = fixture();
     let mut b = browser(&fx);
@@ -408,6 +468,7 @@ fn settings_are_saved_and_applied() {
     // Every group is there.
     for h in [
         "Library",
+        "Appearance",
         "Playback",
         "Output",
         "Bit-perfect",
@@ -440,7 +501,16 @@ fn settings_are_saved_and_applied() {
         "already on"
     );
 
+    // The theme switches live and is saved.
+    b.change_setting(&Key::Theme, Change::Choose(2));
+    assert_eq!(setting(&mut b, Key::Theme), "Kawaii Dark");
+    assert_eq!(
+        b.config.appearance.theme,
+        patina_core::config::Theme::KawaiiDark
+    );
+
     let cfg = Config::load_from(&fx.config).unwrap();
+    assert_eq!(cfg.appearance.theme, patina_core::config::Theme::KawaiiDark);
     assert_eq!(cfg.output.buffer_ms, 300);
     assert_eq!(cfg.playback.fade_ms, 0);
     assert_eq!(cfg.output.device.as_deref(), Some("hw:1,0"));

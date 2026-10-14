@@ -852,25 +852,39 @@ impl Library {
         Ok(out)
     }
 
-    pub fn append_to_playlist(&mut self, id: i64, paths: &[PathBuf]) -> Result<()> {
+    /// Add files to the end of a playlist, leaving out any already in it
+    /// (or listed twice). Returns how many went in.
+    pub fn append_to_playlist(&mut self, id: i64, paths: &[PathBuf]) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        let start: i64 = tx.query_row(
+        let mut have: std::collections::HashSet<Vec<u8>> = {
+            let mut st = tx.prepare("SELECT uri FROM playlist_items WHERE playlist_id = ?1")?;
+            st.query_map([id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let mut pos: i64 = tx.query_row(
             "SELECT COALESCE(MAX(pos) + 1, 0) FROM playlist_items WHERE playlist_id = ?1",
             [id],
             |r| r.get(0),
         )?;
-        for (i, p) in paths.iter().enumerate() {
+        let mut added = 0;
+        for p in paths {
+            let uri = file_uri(p);
+            if !have.insert(uri.clone()) {
+                continue;
+            }
             tx.execute(
                 "INSERT INTO playlist_items (playlist_id, pos, uri) VALUES (?1, ?2, ?3)",
-                params![id, start + i as i64, file_uri(p)],
+                params![id, pos, uri],
             )?;
+            pos += 1;
+            added += 1;
         }
         tx.execute(
             "UPDATE playlists SET updated_at = ?2 WHERE id = ?1",
             params![id, now_secs()],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(added)
     }
 
     /// Replace a playlist's items wholesale. Used for remove and reorder,

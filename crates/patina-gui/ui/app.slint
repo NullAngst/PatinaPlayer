@@ -11,25 +11,59 @@ import "fonts/Inter-SemiBold.otf";
 import "fonts/Inter-Bold.otf";
 import "fonts/NotoSerif-Bold.ttf";
 import "fonts/JetBrainsMono-Regular.ttf";
+import "fonts/MPLUSRounded1c-Regular.ttf";
+import "fonts/MPLUSRounded1c-Medium.ttf";
+import "fonts/MPLUSRounded1c-Bold.ttf";
+import "fonts/MPLUSRounded1c-ExtraBold.ttf";
+import "fonts/ZenMaruGothic-Black.ttf";
 
-// ----- Palette (Runout) -----
+// ----- Palette -----
+//
+// Three themes, picked in Settings: 0 Runout (dark verdigris and copper),
+// 1 Kawaii Light (Sakura Milk: cream and strawberry pink), 2 Kawaii Dark
+// (the same pink and butter on cocoa plum). The names are Runout's;
+// `verdigris` is the main accent and `copper` the warm one in every theme.
 
 export global P {
-    out property <color> bg: #0e1917;
-    out property <color> surface: #132220;
-    out property <color> raised: #172a27;
-    out property <color> border: #2a3d39;
-    out property <color> text: #e6ece9;
-    out property <color> muted: #8fa39d;
-    out property <color> verdigris: #5fb8a5;
-    out property <color> verdigris-dim: #2f5f55;
-    out property <color> copper: #d4884a;
-    out property <color> copper-dim: #5a3a22;
-    out property <color> wave: #4a5f5a;
-    out property <color> on-accent: #0b1513;
-    out property <color> playing-bg: #5fb8a51f;
-    out property <string> serif: "Noto Serif";
-    out property <string> mono: "JetBrains Mono";
+    in-out property <int> theme: 0;
+    out property <bool> kawaii: theme != 0;
+    out property <bool> light: theme == 1;
+
+    out property <color> bg: theme == 1 ? #fff8f5 : theme == 2 ? #241a22 : #0e1917;
+    out property <color> surface: theme == 1 ? #fff0f2 : theme == 2 ? #2d2029 : #132220;
+    out property <color> raised: theme == 1 ? #ffe6ec : theme == 2 ? #3b2a36 : #172a27;
+    out property <color> border: theme == 1 ? #f6cfd9 : theme == 2 ? #553d4c : #2a3d39;
+    out property <color> text: theme == 1 ? #5a3e47 : theme == 2 ? #fbe9ef : #e6ece9;
+    out property <color> muted: theme == 1 ? #a8818d : theme == 2 ? #c49aab : #8fa39d;
+    out property <color> verdigris: theme == 1 ? #ff7fa8 : theme == 2 ? #ff8fb3 : #5fb8a5;
+    out property <color> verdigris-dim: theme == 1 ? #ffc2d5 : theme == 2 ? #7a3f5c : #2f5f55;
+    out property <color> copper: theme == 1 ? #e0864a : theme == 2 ? #ffd27a : #d4884a;
+    out property <color> copper-dim: theme == 1 ? #f6d2b6 : theme == 2 ? #6a5530 : #5a3a22;
+    out property <color> wave: theme == 1 ? #ecc9d3 : theme == 2 ? #6e5262 : #4a5f5a;
+    out property <color> on-accent: theme == 1 ? #ffffff : theme == 2 ? #3a1626 : #0b1513;
+    out property <color> playing-bg: theme == 1 ? #ffe3ec : theme == 2 ? #ff8fb326 : #5fb8a51f;
+    // Text in the accent colour. Light pink on cream is too faint to read,
+    // so the light theme takes a deeper pink for it.
+    out property <color> accent-text: theme == 1 ? #e0558a : verdigris;
+    // Hover, and a selection while the list doesn't have focus.
+    out property <color> hover: theme == 1 ? #ffeef3 : theme == 2 ? #3b2a3699 : #15262399;
+    out property <color> sel-idle: theme == 1 ? #ffeaf0 : theme == 2 ? #3b2a3680 : #15262380;
+    out property <color> accent-hover: theme == 1 ? #ff95b8 : theme == 2 ? #ffa6c3 : #6fc8b5;
+    out property <color> chip-hover: theme == 1 ? #ffeef3 : theme == 2 ? #4a3542 : #1d332f;
+    // The pressed-in edge under kawaii buttons.
+    out property <color> accent-edge: theme == 1 ? #e4648d : theme == 2 ? #c25a82 : transparent;
+    out property <color> scrim: theme == 1 ? #5a3e4766 : theme == 2 ? #120c11cc : #050b0acc;
+    out property <color> shadow: theme == 1 ? #b06a8040 : #00000090;
+    // Kawaii extras: mint and butter, and the dot pattern behind the views.
+    out property <color> mint: theme == 1 ? #5cc4a8 : #8ed8c3;
+    out property <color> butter: theme == 1 ? #ffc95e : #ffd27a;
+    out property <color> dots: theme == 1 ? #f8d9e2 : #34252f;
+
+    out property <string> sans: kawaii ? "Rounded Mplus 1c" : "Inter";
+    out property <string> serif: kawaii ? "Zen Maru Gothic" : "Noto Serif";
+    out property <string> mono: kawaii ? "Rounded Mplus 1c" : "JetBrains Mono";
+    // Corners: kawaii rounds everything off.
+    out property <float> round: kawaii ? 2.3 : 1;
 }
 
 // ----- Data from Rust -----
@@ -38,6 +72,8 @@ export struct SideItem {
     // 0 section, 1 source, 2 label, 3 gap
     kind: int,
     label: string,
+    // A second line under the label: the kawaii themes' Japanese names.
+    sub: string,
     count: string,
     icon: string,
     active: bool,
@@ -145,6 +181,9 @@ export global Icons {
     out property <string> top-albums: "M8 4h8v5a4 4 0 0 1 -8 0zM8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1 -3 4M12 13v4M8 20h8M10 17h4";
     out property <string> top-artists: "M12 3l2.7 5.6 6.1 .9 -4.4 4.3 1 6.1 -5.4 -2.9 -5.4 2.9 1 -6.1 -4.4 -4.3 6.1 -.9z";
     out property <string> output: "M6 3h12v18H6zM9 14a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M12 7h0";
+    out property <string> heart: "M12 21C10 19 3 14 3 8.5A4.5 4.5 0 0 1 12 6a4.5 4.5 0 0 1 9 2.5C21 14 14 19 12 21z";
+    // A four-point sparkle.
+    out property <string> sparkle: "M12 2C12.8 8 16 11.2 22 12C16 12.8 12.8 16 12 22C11.2 16 8 12.8 2 12C8 11.2 11.2 8 12 2z";
 }
 
 component IconButton inherits Rectangle {
@@ -157,7 +196,7 @@ component IconButton inherits Rectangle {
     callback clicked;
     width: 36px;
     height: 36px;
-    border-radius: 6px;
+    border-radius: 6px * P.round;
     border-width: 1px;
     border-color: ta.has-hover && enabled ? P.border : transparent;
     accessible-role: button;
@@ -191,11 +230,16 @@ component Chip inherits Rectangle {
     in property <bool> primary: false;
     in property <length> h: 32px;
     callback clicked;
+    // Narrow windows: the icon alone, for chips that have one.
+    in property <bool> icon-only: false;
     height: h;
-    border-radius: 6px;
+    border-radius: 6px * P.round;
     border-width: 1px;
+    // Kawaii buttons sit on a pressed-in edge.
+    drop-shadow-offset-y: primary && P.kawaii ? 3px : 0px;
+    drop-shadow-color: primary && P.kawaii ? P.accent-edge : transparent;
     border-color: primary ? P.verdigris : (danger ? P.copper-dim : (active ? P.verdigris-dim : P.border));
-    background: primary ? (ta.has-hover ? #6fc8b5 : P.verdigris) : (ta.has-hover ? #1d332f : P.raised);
+    background: primary ? (ta.has-hover ? P.accent-hover : P.verdigris) : (ta.has-hover ? P.chip-hover : P.raised);
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => { clicked(); }
@@ -213,13 +257,13 @@ component Chip inherits Rectangle {
             stroke: primary ? P.on-accent : (danger ? P.copper : (active ? P.verdigris : P.text));
             }
         }
-        Text {
+        if !(root.icon-only && root.icon != ""): Text {
             text: root.text;
             vertical-alignment: center;
             overflow: elide;
             font-size: 12.5px;
-            font-weight: primary ? 600 : 400;
-            color: primary ? P.on-accent : (danger ? P.copper : (active ? P.verdigris : P.text));
+            font-weight: primary || P.kawaii ? 700 : 400;
+            color: primary ? P.on-accent : (danger ? P.copper : (active ? P.accent-text : P.text));
         }
     }
     ta := TouchArea {
@@ -250,7 +294,7 @@ component Cover inherits Rectangle {
     in property <image> art;
     in property <bool> has-art;
     in property <length> radius: 6px;
-    border-radius: radius;
+    border-radius: radius * P.round;
     background: P.raised;
     border-width: has-art ? 0px : 1px;
     border-color: P.border;
@@ -300,7 +344,15 @@ component Bar inherits Rectangle {
             background: root.enabled ? root.fill : transparent;
         }
     }
-    if enabled && (ta.has-hover || dragging): Rectangle {
+    // Kawaii: a heart that's always there.
+    if enabled && P.kawaii: FilledIcon {
+        x: parent.width * clamp(root.shown, 0, 1) - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        d: Icons.heart;
+        size: root.knob + 6px;
+        fill: (ta.has-hover || root.dragging) ? P.accent-text : P.verdigris;
+    }
+    if enabled && !P.kawaii && (ta.has-hover || dragging): Rectangle {
         x: parent.width * clamp(root.shown, 0, 1) - root.knob / 2;
         y: (parent.height - root.knob) / 2;
         width: root.knob;
@@ -355,7 +407,7 @@ component Field inherits Rectangle {
         Text { text: root.label; font-size: 12px; color: P.muted; }
         Rectangle {
             height: 36px;
-            border-radius: 6px;
+            border-radius: 6px * P.round;
             border-width: 1px;
             border-color: ti.has-focus ? P.verdigris-dim : P.border;
             background: P.bg;
@@ -421,15 +473,17 @@ component ListRow inherits Rectangle {
     callback activate;
     callback act(string);
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
-    background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : #15262380) : (ta.has-hover && item.selectable ? #15262399 : transparent));
-    border-radius: 6px;
+    background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent));
+    border-radius: 6px * P.round;
+    border-width: item.playing && P.kawaii ? 2px : 0px;
+    border-color: P.verdigris;
 
     // Header rows (search groups).
     if item.kind == 9: Text {
         x: 12px;
         y: parent.height - self.height - 4px;
         text: item.title;
-        color: P.verdigris;
+        color: P.accent-text;
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.9px;
@@ -445,12 +499,13 @@ component ListRow inherits Rectangle {
             Text {
                 width: parent.width;
                 height: parent.height;
-                text: item.playing ? "▶" : item.num;
+                text: item.playing ? (P.kawaii ? "♪" : "▶") : item.num;
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 font-family: P.mono;
                 font-size: 12px;
-                color: item.playing ? P.verdigris : P.wave;
+                font-weight: P.kawaii ? 700 : 400;
+                color: item.playing ? P.accent-text : (P.kawaii ? P.muted : P.wave);
             }
         }
         if item.kind == 1 || item.kind == 3: Rectangle {
@@ -473,8 +528,8 @@ component ListRow inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             font-size: 13px;
-            font-weight: item.playing ? 600 : 400;
-            color: item.warn ? P.copper : (item.playing ? P.verdigris : (item.dim ? P.muted : P.text));
+            font-weight: item.playing ? (P.kawaii ? 800 : 600) : 400;
+            color: item.warn ? P.copper : (item.playing ? P.accent-text : (item.dim ? P.muted : P.text));
         }
         if item.sub != "" || item.kind <= 2: Text {
             horizontal-stretch: item.kind == 10 ? 5 : 2.5;
@@ -484,7 +539,7 @@ component ListRow inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             font-size: 12.5px;
-            color: item.warn ? P.copper : (item.playing ? P.verdigris : P.muted);
+            color: item.warn ? P.copper : (item.playing ? P.accent-text : P.muted);
         }
         if item.meta != "" || item.kind <= 2: Text {
             horizontal-stretch: 2.5;
@@ -494,7 +549,7 @@ component ListRow inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             font-size: 12.5px;
-            color: item.playing ? P.verdigris : P.muted;
+            color: item.playing ? P.accent-text : P.muted;
         }
         Text {
             min-width: 64px;
@@ -589,7 +644,7 @@ component ListRow inherits Rectangle {
                 text: item.title;
                 font-size: 13px;
                 color: item.ctl == 5 ? P.text : P.text;
-                font-family: item.ctl == 5 ? P.mono : "Inter";
+                font-family: item.ctl == 5 ? P.mono : P.sans;
                 overflow: elide;
             }
             if item.meta != "": Text {
@@ -701,8 +756,8 @@ component AlbumTile inherits Rectangle {
     callback select;
     callback activate;
     callback act(string);
-    border-radius: 8px;
-    background: selected ? P.raised : (ta.has-hover ? #15262399 : transparent);
+    border-radius: 8px * P.round;
+    background: selected ? P.raised : (ta.has-hover ? P.hover : transparent);
     VerticalLayout {
         padding: 8px;
         spacing: 6px;
@@ -716,8 +771,8 @@ component AlbumTile inherits Rectangle {
             text: item.title;
             overflow: elide;
             font-size: 13px;
-            font-weight: 600;
-            color: item.playing ? P.verdigris : P.text;
+            font-weight: P.kawaii ? 700 : 600;
+            color: item.playing ? P.accent-text : P.text;
         }
         Text {
             text: item.sub;
@@ -758,7 +813,7 @@ export component AppWindow inherits Window {
     min-width: 960px;
     min-height: 600px;
     background: P.bg;
-    default-font-family: "Inter";
+    default-font-family: P.sans;
     default-font-size: 13px;
 
     // Sidebar
@@ -876,6 +931,8 @@ export component AppWindow inherits Window {
     in property <string> dlg-ok;
     in property <string> dlg-message;
     in property <[string]> dlg-items;
+    // The pick list starts with "New playlist…", drawn in the accent.
+    in property <bool> dlg-new-first;
     callback dlg-accept;
     callback dlg-pick(int);
     callback dlg-cancel;
@@ -904,6 +961,16 @@ export component AppWindow inherits Window {
     public function scroll-top() {
         list.content-y = 0;
         grid.content-y = 0;
+    }
+
+    // Kawaii: a faint dot pattern behind the views.
+    if P.kawaii: Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("dot.png");
+        horizontal-tiling: ImageTiling.repeat;
+        vertical-tiling: ImageTiling.repeat;
+        colorize: P.dots;
     }
 
     keys := FocusScope {
@@ -935,39 +1002,64 @@ export component AppWindow inherits Window {
                         padding: 12px;
                         padding-top: 16px;
                         spacing: 2px;
-                        HorizontalLayout {
+                        VerticalLayout {
                             padding-left: 10px;
-                            padding-bottom: 14px;
-                            Text {
-                                text: "Patina";
-                                font-family: P.serif;
-                                font-weight: 700;
-                                font-size: 20px;
-                                color: P.text;
+                            padding-bottom: P.kawaii ? 10px : 14px;
+                            spacing: 2px;
+                            HorizontalLayout {
+                                spacing: 0px;
+                                Text {
+                                    text: "Patina";
+                                    font-family: P.serif;
+                                    font-weight: P.kawaii ? 900 : 700;
+                                    font-size: P.kawaii ? 22px : 20px;
+                                    color: P.text;
+                                }
+                                Text {
+                                    text: "Player";
+                                    font-family: P.serif;
+                                    font-weight: P.kawaii ? 900 : 700;
+                                    font-size: P.kawaii ? 22px : 20px;
+                                    color: P.accent-text;
+                                }
+                                if P.kawaii: Rectangle {
+                                    width: 26px;
+                                    Icon {
+                                        x: 6px;
+                                        y: (parent.height - self.height) / 2 + 1px;
+                                        d: Icons.heart;
+                                        size: 18px;
+                                        stroke: P.verdigris;
+                                        stroke-width: 2px;
+                                    }
+                                }
+                                Rectangle {}
                             }
-                            Text {
-                                text: "Player";
-                                font-family: P.serif;
-                                font-weight: 700;
-                                font-size: 20px;
-                                color: P.verdigris;
+                            if P.kawaii: Text {
+                                text: P.light ? "おんがく の じかん" : "よる の おんがく";
+                                font-size: 10.5px;
+                                letter-spacing: 2px;
+                                color: P.muted;
                             }
-                            Rectangle {}
                         }
                         Flickable {
                             VerticalLayout {
                                 alignment: start;
                                 spacing: 2px;
                                 for item[i] in root.side: Rectangle {
+                                    // Kawaii: the open one is a pink pill.
+                                    property <bool> pill: item.active && P.kawaii && item.kind == 0;
                                     height: item.kind == 3 ? 12px : (item.kind == 2 ? 28px : 34px);
-                                    border-radius: 6px;
+                                    border-radius: 6px * P.round;
                                     border-width: 1px;
-                                    border-color: item.active ? P.verdigris-dim : transparent;
-                                    background: item.active ? P.raised : (sta.has-hover && item.kind <= 1 ? P.raised : transparent);
+                                    border-color: pill ? P.verdigris : (item.active ? P.verdigris-dim : transparent);
+                                    background: pill ? P.verdigris : (item.active ? P.raised : (sta.has-hover && item.kind <= 1 ? P.raised : transparent));
+                                    drop-shadow-offset-y: pill ? 3px : 0px;
+                                    drop-shadow-color: pill ? P.accent-edge : transparent;
                                     if item.kind == 2: Text {
                                         x: 10px;
                                         y: parent.height - self.height - 4px;
-                                        text: item.label;
+                                        text: item.sub != "" ? item.label + "  ·  " + item.sub : item.label;
                                         font-size: 11px;
                                         letter-spacing: 0.9px;
                                         color: P.muted;
@@ -976,12 +1068,31 @@ export component AppWindow inherits Window {
                                         padding-left: 10px;
                                         padding-right: 10px;
                                         spacing: 10px;
-                                        if item.kind == 0: Rectangle {
+                                        if item.kind == 0 && !P.kawaii: Rectangle {
                                             width: 16px;
                                             Icon {
                                                 y: (parent.height - self.height) / 2;
                                                 d: item.icon;
                                                 stroke: item.active ? P.verdigris : (sta.has-hover ? P.text : P.muted);
+                                            }
+                                        }
+                                        // Kawaii: the icon sits in a round bubble.
+                                        if item.kind == 0 && P.kawaii: Rectangle {
+                                            width: 24px;
+                                            Rectangle {
+                                                y: (parent.height - self.height) / 2;
+                                                width: 24px;
+                                                height: 24px;
+                                                border-radius: 12px;
+                                                background: pill ? P.on-accent : P.raised;
+                                                Icon {
+                                                    x: 5px;
+                                                    y: 5px;
+                                                    size: 14px;
+                                                    d: item.icon;
+                                                    stroke: P.verdigris;
+                                                    stroke-width: 2px;
+                                                }
                                             }
                                         }
                                         if item.kind == 1: Rectangle {
@@ -992,23 +1103,45 @@ export component AppWindow inherits Window {
                                                 width: 8px;
                                                 height: 8px;
                                                 border-radius: 4px;
-                                                background: item.dot == 0 ? P.verdigris : (item.dot == 1 ? P.verdigris-dim : (item.dot == 2 ? P.copper : P.muted));
+                                                background: item.dot == 0 ? (P.kawaii ? P.mint : P.verdigris) : (item.dot == 1 ? P.verdigris-dim : (item.dot == 2 ? P.copper : P.muted));
                                             }
                                         }
-                                        Text {
+                                        if item.sub == "": Text {
                                             text: item.label;
                                             overflow: elide;
                                             vertical-alignment: center;
                                             horizontal-stretch: 1;
                                             font-size: 13px;
-                                            color: item.active ? P.verdigris : (sta.has-hover ? P.text : P.muted);
+                                            font-weight: P.kawaii ? 500 : 400;
+                                            color: pill ? P.on-accent : (item.active ? P.accent-text : (sta.has-hover || P.kawaii ? P.text : P.muted));
+                                        }
+                                        // The Japanese name follows on the same line, small,
+                                        // so the sidebar keeps its height.
+                                        if item.sub != "": HorizontalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 6px;
+                                            Text {
+                                                text: item.label;
+                                                vertical-alignment: center;
+                                                font-size: 13px;
+                                                font-weight: 500;
+                                                color: pill ? P.on-accent : P.text;
+                                            }
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: item.sub;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                                font-size: 9.5px;
+                                                color: pill ? P.on-accent : P.muted;
+                                            }
                                         }
                                         Text {
                                             text: item.count;
                                             vertical-alignment: center;
                                             font-family: P.mono;
                                             font-size: 11px;
-                                            color: item.dot == 2 ? P.copper : P.muted;
+                                            color: pill ? P.on-accent : (item.dot == 2 ? P.copper : P.muted);
                                         }
                                     }
                                     sta := TouchArea {
@@ -1040,7 +1173,6 @@ export component AppWindow inherits Window {
                             padding-left: 24px;
                             padding-right: 24px;
                             spacing: 8px;
-                            alignment: start;
                             IconButton {
                                 y: (parent.height - self.height) / 2;
                                 icon: Icons.back;
@@ -1059,7 +1191,7 @@ export component AppWindow inherits Window {
                                 width: 480px;
                                 height: 36px;
                                 y: (parent.height - self.height) / 2;
-                                border-radius: 6px;
+                                border-radius: 6px * P.round;
                                 border-width: 1px;
                                 border-color: search-input.has-focus ? P.verdigris-dim : P.border;
                                 background: P.bg;
@@ -1106,7 +1238,7 @@ export component AppWindow inherits Window {
                                         width: 18px;
                                         height: 18px;
                                         y: (parent.height - self.height) / 2;
-                                        border-radius: 4px;
+                                        border-radius: 4px * P.round;
                                         border-width: 1px;
                                         border-color: P.border;
                                         Text {
@@ -1117,6 +1249,13 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            if P.kawaii && !root.compact: Text {
+                                text: P.light ? "ようこそ ♡ (｡•‿•｡)" : "おやすみ ☾ (っ˘ω˘ς )";
+                                vertical-alignment: center;
+                                font-size: 12px;
+                                color: P.muted;
                             }
                         }
                     }
@@ -1134,45 +1273,89 @@ export component AppWindow inherits Window {
                             padding-top: root.hero.show ? 28px : 20px;
                             spacing: 0px;
 
-                            if root.hero.show: HorizontalLayout {
-                                spacing: 28px;
-                                padding-bottom: 24px;
-                                Cover {
-                                    width: 200px;
-                                    height: 200px;
-                                    art: root.hero.art;
-                                    has-art: root.hero.has-art;
-                                    radius: 8px;
+                            if root.hero.show: Rectangle {
+                                // Kawaii: the hero is a rounded card with sparkles.
+                                property <length> pad: P.kawaii ? 18px : 0px;
+                                height: hl.preferred-height + (P.kawaii ? 22px : 0px);
+                                Rectangle {
+                                    y: 0;
+                                    height: parent.height - (P.kawaii ? 22px : 0px);
+                                    visible: P.kawaii;
+                                    border-radius: 26px;
+                                    border-width: 2px;
+                                    border-color: P.border;
+                                    background: P.surface;
                                 }
-                                VerticalLayout {
-                                    alignment: end;
-                                    spacing: 6px;
-                                    Text {
-                                        text: root.hero.kicker;
-                                        font-size: 11px;
-                                        letter-spacing: 0.9px;
-                                        color: P.muted;
+                                if P.kawaii: Rectangle {
+                                    x: parent.width - 92px;
+                                    y: 18px;
+                                    width: 70px;
+                                    height: 16px;
+                                    FilledIcon { x: 0; d: Icons.sparkle; size: 13px; fill: P.butter; }
+                                    FilledIcon { x: 26px; y: 3px; d: Icons.sparkle; size: 9px; fill: P.mint; }
+                                    FilledIcon { x: 46px; d: Icons.sparkle; size: 13px; fill: P.butter; }
+                                }
+                                hl := HorizontalLayout {
+                                    y: 0;
+                                    height: self.preferred-height;
+                                    padding: parent.pad;
+                                    spacing: 28px;
+                                    padding-bottom: P.kawaii ? parent.pad : 24px;
+                                    Cover {
+                                        width: P.kawaii ? 176px : 200px;
+                                        height: P.kawaii ? 176px : 200px;
+                                        art: root.hero.art;
+                                        has-art: root.hero.has-art;
+                                        radius: 8px;
                                     }
-                                    Text {
-                                        text: root.hero.title;
-                                        font-family: P.serif;
-                                        font-weight: 700;
-                                        font-size: 40px;
-                                        overflow: elide;
-                                        color: P.text;
-                                    }
-                                    Text { text: root.hero.sub; font-size: 15px; color: P.text; overflow: elide; }
-                                    Text { text: root.hero.meta; font-size: 12.5px; color: P.muted; overflow: elide; }
-                                    HorizontalLayout {
-                                        padding-top: 12px;
-                                        spacing: 8px;
-                                        alignment: start;
-                                        for a[i] in root.actions: Chip {
-                                            h: 40px;
-                                            text: root.action-labels[i];
-                                            primary: i == 0;
-                                            icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "queue" ? Icons.queue : (a == "playlist" ? Icons.playlists : "")));
-                                            clicked => { root.view-action(a); keys.focus(); }
+                                    VerticalLayout {
+                                        alignment: end;
+                                        spacing: 6px;
+                                        if !P.kawaii: Text {
+                                            text: root.hero.kicker;
+                                            font-size: 11px;
+                                            letter-spacing: 0.9px;
+                                            color: P.muted;
+                                        }
+                                        if P.kawaii: HorizontalLayout {
+                                            alignment: start;
+                                            Rectangle {
+                                                width: kt.preferred-width + 22px;
+                                                height: 22px;
+                                                border-radius: 11px;
+                                                background: P.raised;
+                                                kt := Text {
+                                                    text: "✿ " + root.hero.kicker;
+                                                    font-size: 10.5px;
+                                                    font-weight: 500;
+                                                    letter-spacing: 1.5px;
+                                                    color: P.accent-text;
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            text: root.hero.title;
+                                            font-family: P.serif;
+                                            font-weight: P.kawaii ? 900 : 700;
+                                            font-size: P.kawaii ? 36px : 40px;
+                                            overflow: elide;
+                                            color: P.text;
+                                        }
+                                        Text { text: root.hero.sub; font-size: 15px; color: P.text; overflow: elide; }
+                                        Text { text: root.hero.meta; font-size: 12.5px; color: P.muted; overflow: elide; }
+                                        HorizontalLayout {
+                                            padding-top: 12px;
+                                            padding-bottom: P.kawaii ? 3px : 0px;
+                                            spacing: 8px;
+                                            alignment: start;
+                                            for a[i] in root.actions: Chip {
+                                                h: P.kawaii ? 36px : 40px;
+                                                text: root.action-labels[i];
+                                                primary: i == 0;
+                                                icon-only: root.compact && i > 1;
+                                                icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "queue" ? Icons.plus : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
+                                                clicked => { root.view-action(a); keys.focus(); }
+                                            }
                                         }
                                     }
                                 }
@@ -1204,7 +1387,7 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: root.view-title;
                                         font-family: P.serif;
-                                        font-weight: 700;
+                                        font-weight: P.kawaii ? 900 : 700;
                                         font-size: 28px;
                                         color: P.text;
                                         overflow: elide;
@@ -1218,7 +1401,8 @@ export component AppWindow inherits Window {
                                     for a[i] in root.actions: Chip {
                                         y: parent.height - self.height;
                                         text: root.action-labels[i];
-                                        icon: a == "new" || a == "subscribe" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : ""));
+                                        icon: a == "new" || a == "subscribe" || a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
+                                        icon-only: root.compact && (a == "queue" || a == "playlist");
                                         primary: a == "play";
                                         clicked => { root.view-action(a); keys.focus(); }
                                     }
@@ -1300,7 +1484,7 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: root.view-title;
                                         font-family: P.serif;
-                                        font-weight: 700;
+                                        font-weight: P.kawaii ? 900 : 700;
                                         font-size: 28px;
                                         color: P.text;
                                     }
@@ -1309,10 +1493,12 @@ export component AppWindow inherits Window {
                                 Rectangle { horizontal-stretch: 1; }
                                 HorizontalLayout {
                                     spacing: 8px;
+                                    alignment: end;
                                     for a[i] in root.actions: Chip {
                                         y: parent.height - self.height;
                                         text: root.action-labels[i];
-                                        icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : "");
+                                        icon: a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
+                                        icon-only: root.compact && (a == "queue" || a == "playlist");
                                         primary: a == "play";
                                         clicked => { root.view-action(a); keys.focus(); }
                                     }
@@ -1349,36 +1535,38 @@ export component AppWindow inherits Window {
                                 padding-bottom: 18px;
                                 spacing: 8px;
                                 VerticalLayout {
-                                    Text { text: "Queue"; font-family: P.serif; font-weight: 700; font-size: 28px; color: P.text; }
+                                    Text { text: "Queue"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 28px; color: P.text; }
                                     Text { text: root.queue-summary; font-size: 12.5px; color: P.muted; }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
-                                Chip { y: parent.height - self.height; text: "Save as playlist"; clicked => { root.queue-save(); } }
+                                Chip { y: parent.height - self.height; text: "Add to playlist"; clicked => { root.queue-save(); } }
                                 Chip { y: parent.height - self.height; text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
                             }
                             qlist := ListView {
                                 vertical-stretch: 1;
                                 for q[i] in root.queue: Rectangle {
                                     height: 52px;
-                                    border-radius: 6px;
-                                    background: q.playing ? P.playing-bg : (i == root.queue-sel ? P.raised : (qta.has-hover ? #15262399 : transparent));
+                                    border-radius: 6px * P.round;
+                                    border-width: q.playing && P.kawaii ? 2px : 0px;
+                                    border-color: P.verdigris;
+                                    background: q.playing ? P.playing-bg : (i == root.queue-sel ? P.raised : (qta.has-hover ? P.hover : transparent));
                                     HorizontalLayout {
                                         padding: 6px;
                                         padding-right: 12px;
                                         spacing: 12px;
                                         Text {
                                             width: 32px;
-                                            text: q.playing ? "▶" : (i + 1);
+                                            text: q.playing ? (P.kawaii ? "♪" : "▶") : (i + 1);
                                             horizontal-alignment: right;
                                             vertical-alignment: center;
                                             font-family: P.mono;
                                             font-size: 12px;
-                                            color: q.playing ? P.verdigris : P.wave;
+                                            color: q.playing ? P.accent-text : (P.kawaii ? P.muted : P.wave);
                                         }
                                         Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; }
                                         VerticalLayout {
                                             alignment: center;
-                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 600 : 400; color: q.failed ? P.copper : (q.playing ? P.verdigris : P.text); }
+                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : P.text); }
                                             Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
                                         }
                                     }
@@ -1401,7 +1589,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if root.queue.length == 0: Text {
-                                text: "The queue is empty. Play something, or add it with Add to queue.";
+                                text: "The queue is empty. Play something, or add it with Add to queue." + (P.kawaii ? "  (｡•‿•｡)" : "");
                                 color: P.muted;
                                 horizontal-alignment: center;
                             }
@@ -1421,7 +1609,7 @@ export component AppWindow inherits Window {
                             padding-left: 16px;
                             padding-right: 16px;
                             padding-bottom: 10px;
-                            Text { text: "Queue"; font-family: P.serif; font-weight: 700; font-size: 17px; color: P.text; }
+                            Text { text: "Queue"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
                             Rectangle { horizontal-stretch: 1; }
                             Text { text: root.queue-summary; font-size: 11.5px; color: P.muted; vertical-alignment: center; }
                         }
@@ -1437,9 +1625,9 @@ export component AppWindow inherits Window {
                                     y: 1px;
                                     width: parent.width - 16px;
                                     height: 52px;
-                                    border-radius: 6px;
-                                    border-width: q.playing ? 1px : 0px;
-                                    border-color: P.verdigris-dim;
+                                    border-radius: 6px * P.round;
+                                    border-width: q.playing ? (P.kawaii ? 2px : 1px) : 0px;
+                                    border-color: P.kawaii ? P.verdigris : P.verdigris-dim;
                                     background: q.playing ? P.playing-bg : (pta.has-hover ? P.raised : transparent);
                                     HorizontalLayout {
                                         padding: 7px;
@@ -1447,7 +1635,7 @@ export component AppWindow inherits Window {
                                         Cover { width: 36px; height: 36px; radius: 4px; art: q.art; has-art: q.has-art; }
                                         VerticalLayout {
                                             alignment: center;
-                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 600 : 400; color: q.playing ? P.verdigris : P.text; }
+                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.playing ? P.accent-text : P.text; }
                                             Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
                                         }
                                     }
@@ -1457,6 +1645,14 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        if P.kawaii && root.queue.length > 0: Text {
+                            height: 30px;
+                            text: P.light ? "ゆっくり きいてね ♪  (っ˘ω˘ς )" : "☆ﾐ(o*･ω･)ﾉ  いい ゆめ を ♪";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 11.5px;
+                            color: P.muted;
+                        }
                         Rectangle {
                             height: 58px;
                             Rectangle { height: 1px; y: 0; background: P.border; }
@@ -1465,7 +1661,7 @@ export component AppWindow inherits Window {
                                 padding-left: 16px;
                                 spacing: 8px;
                                 alignment: start;
-                                Chip { text: "Save as playlist"; clicked => { root.queue-save(); } }
+                                Chip { text: "Add to playlist"; clicked => { root.queue-save(); } }
                                 Chip { text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
                             }
                         }
@@ -1529,7 +1725,9 @@ export component AppWindow inherits Window {
                                 width: 44px;
                                 height: 44px;
                                 border-radius: 22px;
-                                background: pp.has-hover ? #6fc8b5 : P.verdigris;
+                                background: pp.has-hover ? P.accent-hover : P.verdigris;
+                                drop-shadow-offset-y: P.kawaii ? 3px : 0px;
+                                drop-shadow-color: P.kawaii ? P.accent-edge : transparent;
                                 accessible-role: button;
                                 accessible-label: root.playing ? "Pause" : "Play";
                                 // Two bars as rectangles: a two-shape path draws its
@@ -1648,7 +1846,7 @@ export component AppWindow inherits Window {
                             bpb := Badge {
                                 y: (parent.height - self.height) / 2;
                                 text: root.bp-badge;
-                                fg: root.bp-tone == 0 ? P.verdigris : (root.bp-tone == 2 ? P.copper : P.muted);
+                                fg: root.bp-tone == 0 ? (P.kawaii ? P.mint : P.verdigris) : (root.bp-tone == 2 ? P.copper : P.muted);
                             }
                             TouchArea {
                                 mouse-cursor: pointer;
@@ -1684,7 +1882,7 @@ export component AppWindow inherits Window {
                             label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
                             value: root.volume-locked ? 1.0 : root.volume;
                             enabled: !root.volume-locked;
-                            fill: root.muted ? P.wave : P.verdigris;
+                            fill: root.muted ? P.wave : (P.kawaii ? P.mint : P.verdigris);
                             knob: 12px;
                             live: true;
                             changed(v) => { root.set-volume(v); }
@@ -1700,12 +1898,12 @@ export component AppWindow inherits Window {
             y: parent.height - 84px - self.height - 16px;
             width: min(tt.preferred-width + 36px, 520px);
             height: tt.preferred-height + 20px;
-            border-radius: 8px;
+            border-radius: 8px * P.round;
             border-width: 1px;
             border-color: root.toast-error ? P.copper-dim : P.verdigris-dim;
             background: P.raised;
             drop-shadow-blur: 12px;
-            drop-shadow-color: #00000080;
+            drop-shadow-color: P.shadow;
             tt := Text {
                 x: 18px;
                 width: parent.width - 36px;
@@ -1718,17 +1916,17 @@ export component AppWindow inherits Window {
 
         // ----- Dialogs -----
         if root.dialog != 0: Rectangle {
-            background: #050b0acc;
+            background: P.scrim;
             TouchArea { clicked => { root.dlg-cancel(); } }
             Rectangle {
                 width: root.dialog == 4 ? 620px : 460px;
                 height: dlg.preferred-height;
-                border-radius: 10px;
+                border-radius: 10px * P.round;
                 border-width: 1px;
                 border-color: P.border;
                 background: P.surface;
                 drop-shadow-blur: 24px;
-                drop-shadow-color: #00000099;
+                drop-shadow-color: P.shadow;
                 TouchArea {}
                 dlg := VerticalLayout {
                     padding: 22px;
@@ -1736,7 +1934,7 @@ export component AppWindow inherits Window {
                     Text {
                         text: root.dlg-title;
                         font-family: P.serif;
-                        font-weight: 700;
+                        font-weight: P.kawaii ? 900 : 700;
                         font-size: 19px;
                         color: P.text;
                     }
@@ -1760,21 +1958,28 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.dialog == 2: VerticalLayout {
-                        spacing: 2px;
+                    // Playlists to pick from. Scrolls once there are many.
+                    if root.dialog == 2: ListView {
+                        height: min(root.dlg-items.length * 38px, 380px);
                         for it[i] in root.dlg-items: Rectangle {
-                            height: 36px;
-                            border-radius: 6px;
-                            background: dta.has-hover ? P.raised : transparent;
-                            Text {
-                                x: 12px;
-                                text: it;
-                                vertical-alignment: center;
-                                color: i == 0 ? P.verdigris : P.text;
-                            }
-                            dta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.dlg-pick(i); }
+                            height: 38px;
+                            Rectangle {
+                                y: 1px;
+                                height: 36px;
+                                border-radius: 6px * P.round;
+                                background: dta.has-hover ? P.raised : transparent;
+                                Text {
+                                    x: 12px;
+                                    width: parent.width - 24px;
+                                    text: it;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    color: i == 0 && root.dlg-new-first ? P.accent-text : P.text;
+                                }
+                                dta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.dlg-pick(i); }
+                                }
                             }
                         }
                     }
