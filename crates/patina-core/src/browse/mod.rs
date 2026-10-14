@@ -4,6 +4,7 @@
 //! library, the queue or the config. That's how the two stay identical.
 
 pub mod model;
+pub mod settings;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,13 +12,16 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use crate::config::{self, Station};
+use crate::audio::output::BitPerfect;
+use crate::audio::output::exclusive::{self, HwDevice};
+use crate::config::{self, Config, Station};
 use crate::library::podcasts::EpisodeRow;
 use crate::library::{ArtistMode, LibEvent, Library, LibraryService, PlaylistRow, TrackRow};
 use crate::podcast::{PodEvent, PodcastService};
 use crate::{Command, Event, Player, TrackInfo};
 
 pub use model::*;
+pub use settings::{Change, Control, Key, Setting, SettingsInfo};
 
 /// A message for the person, shown however the frontend shows them.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,12 +60,9 @@ pub struct Startup {
     pub lib: Option<Library>,
     pub service: Option<LibraryService>,
     pub pod: Option<PodcastService>,
-    pub config_path: PathBuf,
-    pub stations: Vec<Station>,
-    pub feeds: Vec<String>,
-    pub podcast_tempo: f64,
-    pub podcast_trim: bool,
-    pub settings: Settings,
+    /// The config as loaded. Settings edits it, and the file, together.
+    pub config: Config,
+    pub settings_info: SettingsInfo,
 }
 
 pub struct Browser {
@@ -76,7 +77,10 @@ pub struct Browser {
     /// Levels backed out of, per section, for a Forward button.
     forward: HashMap<Section, Vec<Source>>,
     pub prefs: ViewPrefs,
-    pub settings: Settings,
+    pub config: Config,
+    pub settings_info: SettingsInfo,
+    /// Sound cards for the bit-perfect picker, looked up when Settings opens.
+    devices: Vec<HwDevice>,
     pub sidebar: Vec<SideEntry>,
     pub sidebar_sel: usize,
     pub view_error: Option<String>,
@@ -119,15 +123,17 @@ impl Browser {
             stacks: HashMap::new(),
             forward: HashMap::new(),
             prefs: ViewPrefs::default(),
-            settings: s.settings,
             sidebar: Vec::new(),
             sidebar_sel: 0,
             view_error: None,
-            config_path: s.config_path,
-            stations: s.stations,
-            feeds: s.feeds,
-            podcast_tempo: s.podcast_tempo,
-            podcast_trim: s.podcast_trim,
+            config_path: s.settings_info.config_path.clone(),
+            stations: s.config.stations.clone(),
+            feeds: s.config.podcasts.feeds.clone(),
+            podcast_tempo: s.config.podcasts.speed,
+            podcast_trim: s.config.podcasts.trim_silence,
+            config: s.config,
+            settings_info: s.settings_info,
+            devices: Vec::new(),
             checks: HashMap::new(),
             check_tx,
             check_rx,
@@ -323,6 +329,11 @@ impl Browser {
     pub fn switch(&mut self, s: Section) {
         self.section = s;
         self.view_error = None;
+        if s == Section::Settings {
+            // Cards come and go (a USB DAC); look again each time.
+            self.devices = exclusive::list_devices();
+            self.refresh_section(Section::Settings);
+        }
         if s != Section::Queue && !self.stacks.contains_key(&s) {
             let level = self.build(&Source::Section(s));
             self.stacks.insert(s, level.into_iter().collect());
@@ -335,7 +346,13 @@ impl Browser {
         Ctx {
             lib: self.lib.as_ref(),
             prefs: &self.prefs,
-            settings: &self.settings,
+            settings: SettingsState {
+                config: &self.config,
+                info: &self.settings_info,
+                devices: &self.devices,
+                podcast_tempo: self.podcast_tempo,
+                podcast_trim: self.podcast_trim,
+            },
             stations: &self.stations,
             checks: &self.checks,
         }
@@ -994,6 +1011,203 @@ impl Browser {
         self.note("Checking folders and feeds for changes");
     }
 
+    // ----- Settings -----
+
+    /// The setting a row stands for, in the open Settings view.
+    pub fn selected_setting(&self) -> Option<Setting> {
+        match self.selected_item() {
+            Some(Item::Setting(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// A warning to confirm before this change goes through, if it needs
+    /// one: turning bit-perfect on takes the sound card away from other
+    /// apps.
+    pub fn setting_warning(&self, key: &Key, change: &Change) -> Option<&'static str> {
+        if *key != Key::BitPerfect || self.config.output.bit_perfect != BitPerfect::Off {
+            return None;
+        }
+        let s = self.settings_row(key)?;
+        match settings::stepped(&s.control, change)? {
+            Control::Choice { index, .. } if index != 0 => Some(settings::BIT_PERFECT_WARNING),
+            _ => None,
+        }
+    }
+
+    fn settings_row(&self, key: &Key) -> Option<Setting> {
+        settings::rows(
+            &self.config,
+            &self.settings_info,
+            self.podcast_tempo,
+            self.podcast_trim,
+            &self.devices,
+        )
+        .into_iter()
+        .map(|(_, s)| s)
+        .find(|s| &s.key == key)
+    }
+
+    /// Apply a change from the Settings view: write it to config.toml
+    /// (comments kept) and put it into effect now where that's possible.
+    pub fn change_setting(&mut self, key: &Key, change: Change) {
+        let Some(row) = self.settings_row(key) else {
+            return;
+        };
+        let Some(new) = settings::stepped(&row.control, &change) else {
+            return;
+        };
+        let path = self.config_path.clone();
+        let res: Result<(), String> = (|| {
+            let w = |r: Result<bool, config::ConfigError>| r.map(|_| ()).map_err(|e| e.to_string());
+            match (key, &new) {
+                (Key::Watch, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "library", "watch", *on))?;
+                    self.config.library.watch = *on;
+                    self.apply_folders();
+                }
+                (Key::StartVolume, Control::Number { value, .. }) => {
+                    w(config::set_value(&path, "playback", "volume", *value))?;
+                    self.config.playback.volume = *value as u8;
+                }
+                (Key::FadeMs, Control::Number { value, .. }) => {
+                    w(config::set_value(&path, "playback", "fade_ms", *value))?;
+                    self.config.playback.fade_ms = *value as u32;
+                    self.player.send(Command::SetFadeMs(*value as u32));
+                }
+                (Key::Backend, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(&path, "output", "backend", v.as_str()))?;
+                    self.config.output.backend = v.parse().unwrap_or_default();
+                    self.apply_output();
+                }
+                (Key::Device, Control::Text { value, .. }) => {
+                    w(config::set_value(&path, "output", "device", value.as_str()))?;
+                    self.config.output.device = (!value.is_empty()).then(|| value.clone());
+                    self.apply_output();
+                }
+                (Key::BufferMs, Control::Number { value, .. }) => {
+                    w(config::set_value(&path, "output", "buffer_ms", *value))?;
+                    self.config.output.buffer_ms = *value as u32;
+                    self.apply_output();
+                }
+                (Key::BitPerfect, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(
+                        &path,
+                        "output",
+                        "bit_perfect",
+                        v.as_str(),
+                    ))?;
+                    self.config.output.bit_perfect = v.parse().unwrap_or_default();
+                    self.apply_bit_perfect();
+                }
+                (Key::BitPerfectDevice, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(
+                        &path,
+                        "output",
+                        "bit_perfect_device",
+                        v.as_str(),
+                    ))?;
+                    self.config.output.bit_perfect_device = (!v.is_empty()).then(|| v.clone());
+                    self.apply_bit_perfect();
+                }
+                (Key::PodcastSpeed, Control::Number { value, scale, .. }) => {
+                    let t = *value as f64 / *scale as f64;
+                    self.set_podcast_playback(t, self.podcast_trim);
+                }
+                (Key::PodcastTrim, Control::Toggle(on)) => {
+                    self.set_podcast_playback(self.podcast_tempo, *on);
+                }
+                _ => {}
+            }
+            Ok(())
+        })();
+        if let Err(e) = res {
+            self.error(format!("couldn't save the setting: {e}"));
+        }
+        self.sync_settings();
+    }
+
+    /// Add a music folder to the library: the config, then a scan.
+    /// Accepts `~/Music` as well as full paths.
+    pub fn add_folder(&mut self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let dir = match crate::session::absolute(std::path::Path::new(text)) {
+            Ok(d) => d,
+            Err(e) => {
+                self.error(format!("can't find {text}: {e}"));
+                return false;
+            }
+        };
+        if !dir.is_dir() {
+            self.error(format!("{} isn't a folder", dir.display()));
+            return false;
+        }
+        if self.config.library.folders.contains(&dir) {
+            self.note(format!("{} is already in the library", dir.display()));
+            return false;
+        }
+        match config::edit_library_folder(&self.config_path, &dir, true) {
+            Ok(_) => {
+                self.config.library.folders.push(dir.clone());
+                self.apply_folders();
+                self.note(format!("Added {}. Scanning it now.", dir.display()));
+                self.sync_settings();
+                true
+            }
+            Err(e) => {
+                self.error(format!("couldn't save: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Take a folder out of the library. The files stay where they are.
+    pub fn remove_folder(&mut self, dir: &std::path::Path) {
+        match config::edit_library_folder(&self.config_path, dir, false) {
+            Ok(_) => {
+                self.config.library.folders.retain(|f| f != dir);
+                self.apply_folders();
+                self.note(format!("Removed {} from the library", dir.display()));
+            }
+            Err(e) => self.error(format!("couldn't save: {e}")),
+        }
+        self.sync_settings();
+    }
+
+    fn apply_folders(&mut self) {
+        if let Some(svc) = &self.service {
+            svc.set_roots(
+                self.config.library.folders.clone(),
+                self.config.library.watch,
+            );
+        } else if !self.settings_info.no_library {
+            self.note("The library starts with the next launch");
+        }
+    }
+
+    fn apply_output(&self) {
+        let o = &self.config.output;
+        self.player.send(Command::SetOutput {
+            backend: o.backend,
+            device: o.device.clone(),
+            buffer_ms: o.buffer_ms,
+        });
+    }
+
+    fn apply_bit_perfect(&self) {
+        let o = &self.config.output;
+        self.player.send(Command::SetBitPerfect {
+            mode: o.bit_perfect,
+            device: o.bit_perfect_device.clone(),
+        });
+    }
+
     // ----- Radio -----
 
     fn save_stations(&mut self) {
@@ -1004,28 +1218,9 @@ impl Browser {
         self.sync_settings();
     }
 
-    /// Keep the Settings lines that the app itself can change in step with
-    /// what was just saved.
+    /// Settings shows live values; rebuild it after anything it shows
+    /// changed.
     fn sync_settings(&mut self) {
-        let speed = format!(
-            "{:.1}x{}",
-            self.podcast_tempo,
-            if self.podcast_trim {
-                ", trimming silence"
-            } else {
-                ""
-            }
-        );
-        let live = [
-            ("Radio stations", self.stations.len().to_string()),
-            ("Podcast feeds", self.feeds.len().to_string()),
-            ("Podcast speed", speed),
-        ];
-        for (label, value) in live {
-            if let Some(line) = self.settings.lines.iter_mut().find(|(l, _)| l == label) {
-                line.1 = value;
-            }
-        }
         self.refresh_section(Section::Settings);
     }
 

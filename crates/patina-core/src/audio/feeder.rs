@@ -21,7 +21,8 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::decoder::{OpenOptions, Source};
-use super::{SharedRef, StreamFormat};
+use super::output::BitPerfect;
+use super::{Depth, SharedRef, StreamFormat};
 use crate::queue::{EntryId, Queue};
 use crate::track::{MediaKind, TrackInfo};
 
@@ -36,6 +37,9 @@ pub enum FeedCmd {
     Seek(Duration),
     /// Stop decoding and empty the ring.
     Stop,
+    /// Open a new ring (and so a new output) at the next track, even if
+    /// the format is the same. For output settings that changed.
+    NewRing,
     Quit,
 }
 
@@ -62,6 +66,9 @@ pub enum FeedMsg {
     Open {
         format: StreamFormat,
         consumer: Consumer<f64>,
+        /// Play this ring through the bit-perfect output, for a source of
+        /// this depth. None is the normal shared output.
+        exclusive: Option<Depth>,
     },
     Segment(Segment),
     /// The ring was emptied for a Start, Seek or Stop.
@@ -122,6 +129,8 @@ struct Feeder {
     entry_info: TrackInfo,
     ring: Option<Producer<f64>>,
     format: Option<StreamFormat>,
+    /// The open ring plays bit-perfect, for this depth.
+    exclusive: Option<Depth>,
     /// Frames pushed into the ring, in `consumed_frames` coordinates.
     written: u64,
     /// Decoded samples not yet in the ring.
@@ -131,6 +140,8 @@ struct Feeder {
     retry: Option<Retry>,
     last_title_poll: Instant,
     last_mark: u64,
+    /// The current segment: first ring frame, track position there, rate.
+    seg: (u64, Duration, u32),
 }
 
 /// Longest we wait for the renderer to acknowledge a flush. If the output
@@ -162,6 +173,7 @@ impl Feeder {
             entry_info: TrackInfo::default(),
             ring: None,
             format: None,
+            exclusive: None,
             written: 0,
             pending: Vec::with_capacity(32768),
             pending_off: 0,
@@ -169,6 +181,7 @@ impl Feeder {
             retry: None,
             last_title_poll: Instant::now(),
             last_mark: 0,
+            seg: (0, Duration::ZERO, 0),
         }
     }
 
@@ -206,6 +219,7 @@ impl Feeder {
                 self.shared.abort_io.store(false, Ordering::Relaxed);
                 match cmd {
                     FeedCmd::Quit => return,
+                    FeedCmd::NewRing => self.format = None,
                     FeedCmd::Stop => {
                         self.retry = None;
                         self.flush();
@@ -405,11 +419,18 @@ impl Feeder {
         self.queue.lock().unwrap().set_info(entry, merged.clone());
 
         let fmt = src.format();
-        if self.format != Some(fmt) {
+        // Bit-perfect is for local files played as they are: never radio,
+        // never a sped-up or trimmed podcast.
+        let mode = BitPerfect::from_u8(self.shared.bit_perfect.load(Ordering::Relaxed));
+        let exclusive =
+            (mode.wanted(false) && info.kind == MediaKind::File && src.source_position().is_none())
+                .then(|| src.depth());
+        if self.format != Some(fmt) || self.exclusive != exclusive {
             if !self.drain_ring() {
                 // A command arrived while draining; it's stashed and wins.
                 return Opened::Interrupted;
             }
+            self.exclusive = exclusive;
             self.new_ring(fmt);
         }
         self.entry = entry;
@@ -454,11 +475,13 @@ impl Feeder {
         } else {
             1.0
         };
+        let start_frame = self.written
+            + (self.pending.len() - self.pending_off) as u64
+                / self.format.map(|f| f.channels as u64).unwrap_or(1);
+        self.seg = (start_frame, pos, src.format().rate);
         let _ = self.msgs.send(FeedMsg::Segment(Segment {
             entry: self.entry,
-            start_frame: self.written
-                + (self.pending.len() - self.pending_off) as u64
-                    / self.format.map(|f| f.channels as u64).unwrap_or(1),
+            start_frame,
             start_pos: pos,
             rate: src.format().rate,
             tempo,
@@ -500,6 +523,7 @@ impl Feeder {
         let _ = self.msgs.send(FeedMsg::Open {
             format: fmt,
             consumer: cons,
+            exclusive: self.exclusive,
         });
     }
 
@@ -530,7 +554,11 @@ impl Feeder {
                     self.next_track();
                     return;
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    if self.source.as_mut().unwrap().take_format_change() {
+                        self.follow_format_change();
+                    }
+                }
                 Err(e) if live => {
                     self.source = None;
                     self.schedule_retry(self.entry, 1, e.to_string());
@@ -557,6 +585,46 @@ impl Feeder {
         } else {
             self.mark();
         }
+    }
+
+    /// The stream switched rate or channels. What's in the ring plays out in
+    /// the old format, then a new ring and output take the new one, and the
+    /// track carries on from where it was.
+    fn follow_format_change(&mut self) {
+        let Some(fmt) = self.source.as_ref().map(|s| s.format()) else {
+            return;
+        };
+        // The freshly decoded samples are already in the new format: keep
+        // them out of the old ring.
+        let fresh = std::mem::take(&mut self.pending);
+        let off = std::mem::replace(&mut self.pending_off, 0);
+        let pos = self.position_at(self.written);
+        if !self.drain_ring() {
+            self.pending = fresh;
+            self.pending_off = off;
+            return;
+        }
+        self.new_ring(fmt);
+        self.entry_info.sample_rate = fmt.rate;
+        self.entry_info.channels = fmt.channels;
+        self.queue
+            .lock()
+            .unwrap()
+            .set_info(self.entry, self.entry_info.clone());
+        // Announced with nothing pending, so the segment starts at the
+        // first of the fresh samples.
+        self.announce(pos);
+        self.pending = fresh;
+        self.pending_off = off;
+    }
+
+    /// Track position of ring frame `frame`, from the current segment.
+    fn position_at(&self, frame: u64) -> Duration {
+        let (start, pos, rate) = self.seg;
+        if rate == 0 {
+            return pos;
+        }
+        pos + Duration::from_secs_f64(frame.saturating_sub(start) as f64 / rate as f64)
     }
 
     /// For filtered playback, tell the core where in the source the audio

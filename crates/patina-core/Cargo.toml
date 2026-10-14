@@ -18,6 +18,8 @@ static-ffmpeg = ["ffmpeg-next/static"]
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "filter"] }
 pipewire = { version = "0.10", optional = true }
 alsa = "0.12"
+# Device reservation over D-Bus, for the bit-perfect output.
+zbus = "5"
 rtrb = "0.4"
 crossbeam-channel = "0.5"
 thiserror = "2"

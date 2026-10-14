@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Proc;
 use std::time::{Duration, Instant};
 
-use patina_core::browse::{Activated, Browser, Item, Section, Settings, Startup};
+use patina_core::browse::{
+    Activated, Browser, Change, Control, Item, Key, Section, SettingsInfo, Startup,
+};
+use patina_core::config::Config;
 use patina_core::library::Library;
 use patina_core::{Backend, OutputConfig, Player, PlayerConfig};
 
@@ -88,16 +91,16 @@ fn browser(fx: &Fixture) -> Browser {
         lib: Some(lib),
         service: None,
         pod: None,
-        config_path: fx.config.clone(),
-        stations: Vec::new(),
-        feeds: Vec::new(),
-        podcast_tempo: 1.0,
-        podcast_trim: false,
-        settings: Settings {
-            lines: vec![
-                ("Radio stations".into(), "0".into()),
-                ("Podcast speed".into(), "1.0x".into()),
-            ],
+        config: Config {
+            library: patina_core::config::LibraryConfig {
+                folders: vec![fx.root.clone()],
+                watch: false,
+            },
+            ..Config::default()
+        },
+        settings_info: SettingsInfo {
+            config_path: fx.config.clone(),
+            ..Default::default()
         },
     })
 }
@@ -110,12 +113,15 @@ fn index_of(b: &Browser, f: impl Fn(&Item) -> bool) -> usize {
     items(b).iter().position(f).expect("item not found")
 }
 
-fn setting(b: &Browser, label: &str) -> String {
-    b.settings
-        .lines
+/// The value a Settings row shows.
+fn setting(b: &mut Browser, key: Key) -> String {
+    b.switch(Section::Settings);
+    items(b)
         .iter()
-        .find(|(l, _)| l == label)
-        .map(|(_, v)| v.clone())
+        .find_map(|i| match i {
+            Item::Setting(s) if s.key == key => Some(s.control.display()),
+            _ => None,
+        })
         .unwrap()
 }
 
@@ -238,7 +244,6 @@ fn stations_save_to_the_config_and_settings_follow() {
     let text = std::fs::read_to_string(&fx.config).unwrap();
     assert!(text.contains("# test config"), "comments kept");
     assert!(text.contains("Test FM"));
-    assert_eq!(setting(&b, "Radio stations"), "1");
 
     b.switch(Section::Radio);
     assert!(matches!(items(&b)[0], Item::Station { .. }));
@@ -249,7 +254,6 @@ fn stations_save_to_the_config_and_settings_follow() {
 
     b.delete_station(0);
     assert!(b.stations.is_empty());
-    assert_eq!(setting(&b, "Radio stations"), "0");
     assert!(
         !std::fs::read_to_string(&fx.config)
             .unwrap()
@@ -263,7 +267,8 @@ fn podcast_speed_is_rounded_saved_and_shown() {
     let mut b = browser(&fx);
     b.set_podcast_playback(1.25, true);
     assert!((b.podcast_tempo - 1.3).abs() < 1e-9);
-    assert_eq!(setting(&b, "Podcast speed"), "1.3x, trimming silence");
+    assert_eq!(setting(&mut b, Key::PodcastSpeed), "1.3x");
+    assert_eq!(setting(&mut b, Key::PodcastTrim), "on");
     b.nudge_tempo(5.0);
     assert!((b.podcast_tempo - 3.0).abs() < 1e-9, "clamped to 3x");
     let text = std::fs::read_to_string(&fx.config).unwrap();
@@ -393,4 +398,81 @@ fn listening_stats_rank_by_plays() {
     b.select(0);
     assert!(matches!(b.activate(), Activated::Opened));
     assert!(matches!(&items(&b)[0], Item::Album(a) if a.name == "Bleach"));
+}
+
+#[test]
+fn settings_are_saved_and_applied() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Settings);
+    // Every group is there.
+    for h in [
+        "Library",
+        "Playback",
+        "Output",
+        "Bit-perfect",
+        "Podcasts",
+        "Files",
+    ] {
+        assert!(
+            items(&b)
+                .iter()
+                .any(|i| matches!(i, Item::Header(x) if *x == h)),
+            "{h}"
+        );
+    }
+
+    b.change_setting(&Key::BufferMs, Change::Step(2));
+    assert_eq!(setting(&mut b, Key::BufferMs), "300 ms");
+    b.change_setting(&Key::FadeMs, Change::Set("0".into()));
+    assert_eq!(setting(&mut b, Key::FadeMs), "0 ms");
+    b.change_setting(&Key::Device, Change::Set(" hw:1,0 ".into()));
+
+    // Bit-perfect asks first, then saves.
+    assert!(
+        b.setting_warning(&Key::BitPerfect, &Change::Step(1))
+            .is_some()
+    );
+    b.change_setting(&Key::BitPerfect, Change::Step(1));
+    assert!(
+        b.setting_warning(&Key::BitPerfect, &Change::Step(1))
+            .is_none(),
+        "already on"
+    );
+
+    let cfg = Config::load_from(&fx.config).unwrap();
+    assert_eq!(cfg.output.buffer_ms, 300);
+    assert_eq!(cfg.playback.fade_ms, 0);
+    assert_eq!(cfg.output.device.as_deref(), Some("hw:1,0"));
+    assert_eq!(
+        cfg.output.bit_perfect,
+        patina_core::audio::output::BitPerfect::On
+    );
+    let text = std::fs::read_to_string(&fx.config).unwrap();
+    assert!(text.contains("# test config"), "comments kept");
+}
+
+#[test]
+fn folders_are_added_and_removed_from_the_app() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    let extra = tempfile::tempdir().unwrap();
+    let extra_path = std::fs::canonicalize(extra.path()).unwrap();
+
+    assert!(!b.add_folder("/no/such/folder"));
+    assert!(b.add_folder(extra_path.to_str().unwrap()));
+    assert!(!b.add_folder(extra_path.to_str().unwrap()), "already there");
+    let cfg = Config::load_from(&fx.config).unwrap();
+    assert!(cfg.library.folders.contains(&extra_path));
+
+    b.switch(Section::Settings);
+    assert!(items(&b).iter().any(|i| matches!(
+        i,
+        Item::Setting(s) if s.key == Key::Folder(extra_path.clone())
+            && s.control == Control::Folder
+    )));
+
+    b.remove_folder(&extra_path);
+    let cfg = Config::load_from(&fx.config).unwrap();
+    assert!(!cfg.library.folders.contains(&extra_path));
 }

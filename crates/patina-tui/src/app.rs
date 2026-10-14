@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use patina_core::browse::{Browser, Item, Note, Section, SideEntry, Source};
+use patina_core::browse::{
+    Browser, Change, Control, Item, Key as SettingKey, Note, Section, SideEntry, Source,
+};
 use patina_core::library::PlaylistRow;
 use patina_core::{Command, Event, Snapshot};
 use ratatui::DefaultTerminal;
@@ -44,6 +46,12 @@ pub enum InputPurpose {
         edit: Option<usize>,
     },
     FeedUrl,
+    AddFolder,
+    /// A typed value for a setting.
+    SetValue {
+        key: SettingKey,
+        label: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +60,8 @@ pub enum ConfirmAction {
     ClearQueue,
     DeleteStation(usize),
     RemoveFeed(String),
+    Setting(SettingKey, Change),
+    RemoveFolder(PathBuf),
 }
 
 pub enum Modal {
@@ -405,6 +415,9 @@ impl App {
         if self.media_key(k) {
             return;
         }
+        if self.b.section == Section::Settings && self.settings_key(k) {
+            return;
+        }
         let queue = self.b.section == Section::Queue;
         let playlist = self.b.in_playlist().is_some();
         let lists = self.b.section == Section::Playlists && !playlist;
@@ -483,6 +496,82 @@ impl App {
         }
     }
 
+    /// Settings: Enter flips, cycles or edits; h and l step back and
+    /// forward; N adds a library folder; d removes one.
+    fn settings_key(&mut self, k: KeyEvent) -> bool {
+        let st = self.b.selected_setting();
+        match (k.code, st) {
+            (KeyCode::Char('N'), _) => {
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::AddFolder,
+                    buf: "~/".into(),
+                };
+            }
+            (KeyCode::Enter, Some(st)) => match &st.control {
+                Control::Toggle(_) => self.change_setting(st.key, Change::Toggle),
+                Control::Choice { .. } => self.change_setting(st.key, Change::Step(1)),
+                Control::Number { value, scale, .. } => {
+                    let buf = if *scale == 1 {
+                        value.to_string()
+                    } else {
+                        format!("{:.1}", *value as f64 / *scale as f64)
+                    };
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::SetValue {
+                            key: st.key,
+                            label: st.label,
+                        },
+                        buf,
+                    };
+                }
+                Control::Text { value, .. } => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::SetValue {
+                            key: st.key,
+                            label: st.label,
+                        },
+                        buf: value.clone(),
+                    };
+                }
+                Control::Action(_) => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::AddFolder,
+                        buf: "~/".into(),
+                    };
+                }
+                Control::Folder | Control::Info(_) => {}
+            },
+            (KeyCode::Char('h'), Some(st)) => self.change_setting(st.key, Change::Step(-1)),
+            (KeyCode::Char('l'), Some(st)) => self.change_setting(st.key, Change::Step(1)),
+            (KeyCode::Char('d') | KeyCode::Delete, Some(st)) => {
+                if let SettingKey::Folder(p) = st.key {
+                    self.modal = Modal::Confirm {
+                        msg: format!(
+                            "Take {} out of the library? The files stay where they are.",
+                            p.display()
+                        ),
+                        action: ConfirmAction::RemoveFolder(p),
+                    };
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Change a setting, asking first if it needs a yes.
+    fn change_setting(&mut self, key: SettingKey, change: Change) {
+        match self.b.setting_warning(&key, &change) {
+            Some(w) => {
+                self.modal = Modal::Confirm {
+                    msg: w.to_string(),
+                    action: ConfirmAction::Setting(key, change),
+                }
+            }
+            None => self.b.change_setting(&key, change),
+        }
+    }
+
     fn input_key(&mut self, k: KeyEvent, purpose: InputPurpose, mut buf: String) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let search = matches!(purpose, InputPurpose::Search);
@@ -544,6 +633,16 @@ impl App {
                 }
             }
             InputPurpose::FeedUrl => self.b.subscribe(&text),
+            InputPurpose::AddFolder => {
+                if !self.b.add_folder(&text) && !text.is_empty() {
+                    // Keep the box up to fix a typo.
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::AddFolder,
+                        buf: text,
+                    };
+                }
+            }
+            InputPurpose::SetValue { key, .. } => self.change_setting(key, Change::Set(text)),
             // Enter keeps the results on screen for browsing.
             InputPurpose::Search => {}
             InputPurpose::NewPlaylist { add } => self.b.create_playlist(&text, &add),
@@ -596,6 +695,8 @@ impl App {
             ConfirmAction::RemoveFeed(url) => self.b.unsubscribe(&url),
             ConfirmAction::ClearQueue => self.b.clear_queue(),
             ConfirmAction::DeletePlaylist(id) => self.b.delete_playlist(id),
+            ConfirmAction::Setting(key, change) => self.b.change_setting(&key, change),
+            ConfirmAction::RemoveFolder(p) => self.b.remove_folder(&p),
         }
     }
 

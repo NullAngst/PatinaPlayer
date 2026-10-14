@@ -10,7 +10,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use patina_core::browse::{
-    Activated, Browser, Item, Note, Section, SideEntry, Source, fmt_duration, fmt_length,
+    Activated, Browser, Change, Control, Item, Key as SettingKey, Note, Section, SideEntry, Source,
+    fmt_duration, fmt_length,
 };
 use patina_core::library::PlaylistRow;
 use patina_core::track::MediaKind;
@@ -23,6 +24,11 @@ use crate::{AppWindow, Hero, Icons, QueueRow, Row, SideItem};
 
 enum Dlg {
     None,
+    /// Picking one of a setting's choices.
+    Choose(SettingKey),
+    /// Typing a setting's value.
+    SetValue(SettingKey),
+    AddFolder,
     NewPlaylist(Vec<PathBuf>),
     RenamePlaylist(i64),
     SaveQueue,
@@ -34,6 +40,9 @@ enum Dlg {
 }
 
 enum Confirm {
+    /// A settings change that needs a yes first (bit-perfect).
+    Setting(SettingKey, Change),
+    RemoveFolder(PathBuf),
     DeletePlaylist(i64),
     ClearQueue,
     DeleteStation(usize),
@@ -68,6 +77,9 @@ pub struct State {
     /// Row ranges that have art set right now.
     row_shown: Vec<Range<usize>>,
     queue_shown: Vec<Range<usize>>,
+    /// A native folder picker running on its own thread, and when it was
+    /// opened.
+    folder_pick: Option<(crossbeam_channel::Receiver<Option<PathBuf>>, Instant)>,
 }
 
 const HELP: &str = "Space        play / pause
@@ -83,7 +95,8 @@ v / V        play this whole view in order / shuffled
 Backspace    back a level (Alt+Left / Alt+Right: back, forward)
 a / A        add to queue / play next
 p            add to a playlist
-Delete       remove from the queue or the open playlist
+Delete       remove from the queue, the open playlist, or Settings
+Enter        in Settings: flip, pick or edit the option
 [ ]  z       podcast speed, silence trimming
 q            queue panel
 F5           check folders and feeds for changes
@@ -156,6 +169,7 @@ impl State {
             queue_art: Vec::new(),
             row_shown: Vec::new(),
             queue_shown: Vec::new(),
+            folder_pick: None,
         }
     }
 
@@ -326,6 +340,25 @@ impl State {
                 r.num = SharedString::new();
                 r.title = ss(label);
                 r.sub = ss(value);
+            }
+            Item::Setting(st) => {
+                r.kind = 12;
+                r.num = SharedString::new();
+                r.title = ss(&st.label);
+                r.sub = ss(st.control.display());
+                r.meta = ss(st.help);
+                (r.ctl, r.on) = match &st.control {
+                    Control::Toggle(on) => (1, *on),
+                    Control::Choice { .. } => (2, false),
+                    Control::Number { .. } => (3, false),
+                    Control::Text { value, .. } => (4, !value.is_empty()),
+                    Control::Folder => (5, false),
+                    Control::Action(_) => (6, false),
+                    Control::Info(_) => (7, false),
+                };
+                if matches!(st.control, Control::Folder) {
+                    r.meta = SharedString::new();
+                }
             }
         }
         r
@@ -536,7 +569,9 @@ impl State {
             _ => title.split(" · ").next().unwrap_or(&title).to_string(),
         }));
         ui.set_view_sub(ss(match self.b.level().map(|l| &l.source) {
-            Some(Source::Section(Section::Settings)) => "Read from your config file".to_string(),
+            Some(Source::Section(Section::Settings)) => {
+                "Changes are saved to config.toml as you make them".to_string()
+            }
             _ if items.is_empty() => String::new(),
             _ => count_label(&items),
         }));
@@ -792,12 +827,33 @@ impl State {
                 ui.set_np_has_art(art.is_some());
                 ui.set_np_art(art.unwrap_or_default());
                 ui.set_badge(ss(t.badge()));
+                let (bp, tone, tip) = match (&s.exclusive, &s.bit_perfect_refused) {
+                    (Some(e), _) if e.exact => (
+                        "BIT-PERFECT",
+                        0,
+                        format!("Bit-perfect to {} as {}", e.device, e.format),
+                    ),
+                    (Some(e), _) => (
+                        "EXCLUSIVE",
+                        1,
+                        format!(
+                            "Exclusive and unprocessed to {}, but the source isn't integer PCM",
+                            e.device
+                        ),
+                    ),
+                    (None, Some(r)) => ("NOT BIT-PERFECT", 2, r.clone()),
+                    (None, None) => ("", 0, String::new()),
+                };
+                ui.set_bp_badge(ss(bp));
+                ui.set_bp_tone(tone);
+                ui.set_bp_tip(ss(tip));
             }
             None => {
                 ui.set_np_title(SharedString::new());
                 ui.set_np_sub(SharedString::new());
                 ui.set_np_has_art(false);
                 ui.set_badge(SharedString::new());
+                ui.set_bp_badge(SharedString::new());
             }
         }
         let s = &self.snap;
@@ -823,6 +879,7 @@ impl State {
             Repeat::One => 2,
         });
         ui.set_volume(s.volume as f32);
+        ui.set_volume_locked(s.volume_locked);
         ui.set_muted(s.muted);
         ui.set_output_label(ss(s.output.clone().unwrap_or_default()));
         let podcast = s
@@ -886,6 +943,7 @@ impl State {
             }
         }
         self.snap = self.b.player.snapshot();
+        self.poll_folder_pick();
         let art_arrived = self.art.collect();
         let qv = self.b.player.queue().version;
         let gen_changed = self.b.generation() != self.last_gen;
@@ -1020,6 +1078,9 @@ impl State {
             self.follow = true;
             return;
         }
+        if self.b.selected_setting().is_some() {
+            return; // handled by key/act with the window at hand
+        }
         if self.b.activate() == Activated::Played {
             self.follow = true;
         }
@@ -1125,7 +1186,138 @@ impl State {
         self.dlg = Dlg::Confirm(c);
     }
 
+    /// Enter on a settings row: the obvious thing for its kind.
+    fn setting_default(&mut self, ui: &AppWindow) {
+        let Some(st) = self.b.selected_setting() else {
+            return;
+        };
+        let a = match st.control {
+            Control::Toggle(_) => "toggle",
+            Control::Choice { .. } => "choose",
+            Control::Number { .. } | Control::Text { .. } => "edit",
+            Control::Action(_) => "browse",
+            Control::Folder | Control::Info(_) => return,
+        };
+        self.setting_act(ui, a);
+    }
+
+    fn setting_act(&mut self, ui: &AppWindow, a: &str) {
+        let Some(st) = self.b.selected_setting() else {
+            return;
+        };
+        let key = st.key.clone();
+        match a {
+            "toggle" => self.change_setting(ui, key, Change::Toggle),
+            "dec" => self.change_setting(ui, key, Change::Step(-1)),
+            "inc" => self.change_setting(ui, key, Change::Step(1)),
+            "choose" => {
+                if let Control::Choice { options, index } = &st.control {
+                    let items: Vec<SharedString> = options
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, l))| {
+                            ss(if i == *index {
+                                format!("{l}   (current)")
+                            } else {
+                                l.clone()
+                            })
+                        })
+                        .collect();
+                    set_strings(&self.dlg_items, items.into_iter());
+                    ui.set_dlg_title(ss(&st.label));
+                    ui.set_dialog(2);
+                    self.dlg = Dlg::Choose(key);
+                }
+            }
+            "edit" if key == SettingKey::AddFolder => {
+                self.dlg = Dlg::AddFolder;
+                open_text(ui, "Add a music folder", "Folder", "~/", None, "Add");
+            }
+            "edit" => {
+                let current = match &st.control {
+                    Control::Number { value, scale, .. } if *scale == 1 => value.to_string(),
+                    Control::Number { value, scale, .. } => {
+                        format!("{:.1}", *value as f64 / *scale as f64)
+                    }
+                    Control::Text { value, .. } => value.clone(),
+                    _ => return,
+                };
+                self.dlg = Dlg::SetValue(key);
+                open_text(ui, &st.label, st.help, &current, None, "Save");
+            }
+            "remove" => {
+                if let SettingKey::Folder(p) = key {
+                    self.confirm(
+                        ui,
+                        format!(
+                            "Take {} out of the library? Its tracks leave the index; the files stay where they are.",
+                            p.display()
+                        ),
+                        "Remove",
+                        Confirm::RemoveFolder(p),
+                    );
+                }
+            }
+            "browse" => self.pick_folder(),
+            _ => {}
+        }
+    }
+
+    /// Change a setting, asking first if it needs a yes.
+    fn change_setting(&mut self, ui: &AppWindow, key: SettingKey, change: Change) {
+        match self.b.setting_warning(&key, &change) {
+            Some(w) => {
+                self.confirm(
+                    ui,
+                    w.to_string(),
+                    "Turn it on",
+                    Confirm::Setting(key, change),
+                );
+                ui.set_dlg_title(ss("Turn on bit-perfect?"));
+            }
+            None => self.b.change_setting(&key, change),
+        }
+    }
+
+    /// The desktop's own folder picker (through the XDG portal, so it's
+    /// KDE's dialog on Plasma), on a thread so the window keeps drawing.
+    fn pick_folder(&mut self) {
+        if self.folder_pick.is_some() {
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Add a music folder")
+                .pick_folder();
+            let _ = tx.send(picked);
+        });
+        self.folder_pick = Some((rx, Instant::now()));
+    }
+
+    fn poll_folder_pick(&mut self) {
+        let Some((rx, opened)) = &self.folder_pick else {
+            return;
+        };
+        let Ok(picked) = rx.try_recv() else { return };
+        let quick = opened.elapsed() < Duration::from_millis(700);
+        self.folder_pick = None;
+        match picked {
+            Some(p) => {
+                self.b.add_folder(&p.to_string_lossy());
+            }
+            // Back that fast means no dialog ever showed up.
+            None if quick => self
+                .b
+                .note("No folder picker is available here. Use \"Type a path\" instead."),
+            None => {}
+        }
+    }
+
     fn row_act(&mut self, ui: &AppWindow, a: &str) {
+        if self.b.selected_setting().is_some() {
+            return self.setting_act(ui, a);
+        }
         let item = self.b.selected_item();
         match a {
             "play" => self.play_selected(),
@@ -1230,6 +1422,14 @@ impl State {
         let t1 = ui.get_dlg_text1().trim().to_string();
         let t2 = ui.get_dlg_text2().trim().to_string();
         match std::mem::replace(&mut self.dlg, Dlg::None) {
+            Dlg::AddFolder => {
+                if !self.b.add_folder(&t1) {
+                    // Leave the dialog up to fix the path.
+                    self.dlg = Dlg::AddFolder;
+                    return;
+                }
+            }
+            Dlg::SetValue(key) => self.change_setting(ui, key, Change::Set(t1)),
             Dlg::NewPlaylist(paths) => self.b.create_playlist(&t1, &paths),
             Dlg::RenamePlaylist(id) => self.b.rename_playlist(id, &t1),
             Dlg::SaveQueue => {
@@ -1247,18 +1447,29 @@ impl State {
             }
             Dlg::Feed => self.b.subscribe(&t1),
             Dlg::Confirm(c) => match c {
+                Confirm::Setting(key, change) => self.b.change_setting(&key, change),
+                Confirm::RemoveFolder(p) => self.b.remove_folder(&p),
                 Confirm::DeletePlaylist(id) => self.b.delete_playlist(id),
                 Confirm::ClearQueue => self.b.clear_queue(),
                 Confirm::DeleteStation(i) => self.b.delete_station(i),
                 Confirm::Unsubscribe(url) => self.b.unsubscribe(&url),
             },
-            Dlg::Pick(..) | Dlg::Help | Dlg::None => {}
+            Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Help | Dlg::None => {}
         }
         ui.set_dialog(0);
         ui.invoke_focus_root();
     }
 
     fn dlg_pick(&mut self, ui: &AppWindow, i: usize) {
+        if let Dlg::Choose(key) = &self.dlg {
+            let key = key.clone();
+            self.dlg = Dlg::None;
+            ui.set_dialog(0);
+            ui.invoke_focus_root();
+            // A confirm may open in place of the picker.
+            self.change_setting(ui, key, Change::Choose(i));
+            return;
+        }
         if let Dlg::Pick(paths, rows) = std::mem::replace(&mut self.dlg, Dlg::None) {
             if i == 0 {
                 self.dlg = Dlg::NewPlaylist(paths);
@@ -1314,7 +1525,11 @@ impl State {
         } else if is(Key::End) {
             self.move_sel(ui, isize::MAX / 2);
         } else if is(Key::Return) {
-            self.activate();
+            if self.b.selected_setting().is_some() {
+                self.setting_default(ui);
+            } else {
+                self.activate();
+            }
         } else if is(Key::Backspace) {
             self.b.pop();
         } else if is(Key::LeftArrow) {
@@ -1322,7 +1537,12 @@ impl State {
         } else if is(Key::RightArrow) {
             p.send(Command::SeekBy(if shift { 30.0 } else { 5.0 }));
         } else if is(Key::Delete) {
-            if queue {
+            if matches!(
+                self.b.selected_setting().map(|s| s.key),
+                Some(SettingKey::Folder(_))
+            ) {
+                self.setting_act(ui, "remove");
+            } else if queue {
                 self.b.remove_queue_position(self.queue_sel);
             } else if self.b.in_playlist().is_some() {
                 self.b.edit_playlist(true, 0);
@@ -1527,6 +1747,12 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
             s.activate();
         }
     });
+    on!(on_bp_clicked, |s, u| {
+        let tip = u.get_bp_tip().to_string();
+        if !tip.is_empty() {
+            s.b.note(tip);
+        }
+    });
     on!(on_row_act, |s, u, i, a| {
         s.b.select(i as usize);
         s.row_act(&u, a.as_str());
@@ -1644,7 +1870,7 @@ fn count_label(items: &[Item]) -> String {
             Item::Station { .. } => "station",
             Item::Podcast(_) => "podcast",
             Item::Episode(_) => "episode",
-            Item::Header(_) | Item::Info { .. } => continue,
+            Item::Header(_) | Item::Info { .. } | Item::Setting(_) => continue,
         };
         match counts.iter_mut().find(|(n, _)| *n == noun) {
             Some((_, c)) => *c += 1,

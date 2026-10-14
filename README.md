@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 4.5 of the build plan: the audio engine, the library, internet radio, podcasts, the desktop app and cover art from milestones 1 to 4, plus play-the-whole-view, listening stats, and an AppImage that GitHub builds for you. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Bit-perfect comes next, then Subsonic and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 5 of the build plan: everything from milestones 1 to 4.5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats and the AppImage), plus bit-perfect output, a Settings view that changes settings instead of only showing them, and a fix for stations that switch audio format mid-stream. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Subsonic client comes next, then the cache and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -15,6 +15,23 @@ This is milestone 4.5 of the build plan: the audio engine, the library, internet
 - The podcast speed chip in the bottom bar cycles 1.0x, 1.2x, 1.5x and 2.0x on click.
 - On a narrow window the queue panel folds away and the bottom bar drops the format badge and output chip, so nothing gets cut off.
 - Inter, Noto Serif and JetBrains Mono are bundled, so it looks the same on any system.
+
+**Bit-perfect**
+- Off by default. Turn it on in Settings, under Bit-perfect, and local files go straight to the DAC: an ALSA hardware device, opened exclusively, at the file's own sample rate and bit depth, with nothing in between. No resampling, no software volume, no dither, and no silence slipped in.
+- Turning it on asks first, since the card is PatinaPlayer's alone while it plays: other apps can't use it until you pause, stop, or turn this off.
+- On a PipeWire desktop it asks PipeWire to let go of the card first (the standard D-Bus device reservation, the same thing JACK does), and PipeWire takes the card back as soon as bit-perfect closes it.
+- If the DAC can't take the file as it is (a 24/192 file on a 16/48 DAC, say), it refuses and says why ("the DAC doesn't support 24/192"), then plays through the normal output so the music doesn't stop. It never resamples quietly.
+- The bottom bar shows BIT-PERFECT while it's happening. NOT BIT-PERFECT in copper means it was refused; click it for the reason. EXCLUSIVE means a lossy source (MP3, AAC) going out untouched as integers, which is as good as it gets for those.
+- Volume goes to the DAC's own volume control if it has one. If it doesn't, volume is fixed at 100% and the slider greys out. Mute still mutes.
+- Radio and podcasts never play bit-perfect. Radio isn't a file, and a sped-up podcast is processed by definition.
+- Auto mode means "bit-perfect whenever nothing would change the sound". There's no EQ or leveling yet, so for now it's the same as On.
+- Pick the card under Bit-perfect device. The list comes from ALSA when you open Settings, so a USB DAC you just plugged in shows up.
+
+**Settings**
+- Every option in config.toml can be changed from the Settings view in either app, and is written straight back to the file with your comments kept.
+- Library folders: add one with the desktop's own folder picker (Browse) or by typing a path, and the scan starts right away. Remove one and its tracks leave the index. The files stay where they are.
+- Output, device and buffer changes reopen the output on the spot, and a playing song carries on from where it was. So does switching bit-perfect on or off.
+- In the TUI: Enter flips, cycles or edits; `h` and `l` step a value down or up; `N` adds a folder; `d` removes one.
 
 **Play or shuffle wherever you are**
 - Every library view has Play and Shuffle at the top (`v` and `V` from the keyboard, in both apps). They play the whole view: a folder plays everything under it, subfolders and all, an artist plays all their albums, Albums or Songs plays the library.
@@ -53,7 +70,7 @@ This is milestone 4.5 of the build plan: the audio engine, the library, internet
 - Radio: your stations, with add, edit, test, reorder and delete.
 - Podcasts: your subscriptions, then each show's episodes with what's new, how far you got, and what's downloaded.
 - Downloads: downloaded podcast episodes. The track cache joins it in milestone 7.
-- Settings: shows what the config file currently says.
+- Settings: every option, editable. See above.
 - Search: type-ahead over the index, artists, albums and songs at once. Every word has to match somewhere, so `nirv blea` finds Bleach.
 - A queue panel (`q`) that shows what's coming up beside any view.
 
@@ -61,7 +78,8 @@ This is milestone 4.5 of the build plan: the audio engine, the library, internet
 - Any direct stream FFmpeg can decode: MP3, AAC and HE-AAC, Ogg Vorbis, Opus, FLAC over HTTP. Icecast and SHOUTcast included.
 - Playlist links resolve on their own. Paste a `.pls`, `.m3u` or `.m3u8` URL and the player reads it, pulls out the stream URLs, and plays the first one that answers. A playlist that points at another playlist is followed too.
 - HLS streams (an `.m3u8` with segments) go straight to FFmpeg.
-- Test a station with `T` and the list shows what the URL turned out to be: `Playlist, 3 mirrors, AAC 128 kbps`, or why it isn't working. New stations get tested as soon as you save them.
+- Test a station with `T` and the list shows what the URL turned out to be: `Playlist, 3 mirrors, AAC 128 kbps, 48 kHz stereo`, or why it isn't working. The test plays a second of the stream, so "working" means it actually decodes, not just that the server answered. New stations get tested as soon as you save them.
+- Stations that switch audio format mid-stream keep playing. HE-AAC streams (a lot of public broadcasters use them) announce half their real sample rate and often mono, then decode to the full rate in stereo; ad breaks sometimes switch rates too. The player now follows the switch instead of treating it as a dropped connection and reconnecting forever.
 - Now-playing titles from ICY metadata show in the bottom bar. HLS timed ID3 titles are read too where FFmpeg exposes them, though that path hasn't been tried against a real station yet.
 - A dropped connection reconnects on its own with backoff (1, 2, 4, 8, 16, then every 30 seconds), going through the mirrors again each time. The bottom bar says when the next try is.
 
@@ -145,10 +163,9 @@ Built this way there's no menu entry. Start it from a terminal or KRunner (or wh
 Everything below works the same with `patinaplayer` or `patinaplayer-tui`. They share the config and the library, though you'd only run one at a time.
 
 1. Run it once: `patinaplayer`. That writes `~/.config/patinaplayer/config.toml`. If your system has a Music folder (`xdg-user-dir MUSIC`), it's already in the list.
-2. Add any other folders: `patinaplayer --add-folder /mnt/storage/music`. This edits the config and exits. Your comments in the file are kept.
-3. Run it again. The first scan shows progress next to the folder in the sidebar, and the views fill in as it goes.
+2. Add any other folders in Settings, under Library: Browse for one, or type its path. The scan starts right away, with progress next to the folder in the sidebar, and the views fill in as it goes.
 
-To take a folder back out: `patinaplayer --remove-folder /mnt/storage/music`. Its tracks leave the index on the next start.
+The command line does the same, if you'd rather: `patinaplayer --add-folder /mnt/storage/music` adds one and exits, and `--remove-folder` takes one out.
 
 You can still play files directly without touching the library: `patinaplayer song.flac ~/Downloads/SomeAlbum`. They go straight into the queue.
 
@@ -165,6 +182,8 @@ watch = true             # pick up changes while running
 backend = "auto"         # auto, pipewire, alsa or null
 device = ""              # ALSA device or PipeWire node; empty is the default
 buffer_ms = 200          # 50 to 1000
+bit_perfect = "off"      # off, on or auto
+bit_perfect_device = ""  # like "hw:CARD=DAC,DEV=0"; empty is the first card
 
 [playback]
 volume = 80              # starting volume, 0 to 100
@@ -180,7 +199,7 @@ name = "Some Station"
 url = "https://example.com/listen.pls"
 ```
 
-The Radio and Podcasts views edit these sections for you, and keep the rest of the file as you wrote it.
+Settings, Radio and Podcasts edit this file for you, and keep the rest of it as you wrote it.
 
 A typo in a key name is an error, not a silent default, so you find out right away. Command line flags (`--backend`, `--device`, `--buffer-ms`, `--volume`, `--fade-ms`) override the file for one run.
 
@@ -197,7 +216,7 @@ The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wi
 
 ## Keys
 
-These are the TUI keys. The desktop app uses the same ones, with these differences: there's no Tab focus switching, `Delete` removes from the queue or the open playlist, `Ctrl+F` also searches, `Alt+Left` and `Alt+Right` go back and forward, and the per-view letter commands (new station, rename, unsubscribe and so on) live in the right-click menu and the buttons at the top of each view instead.
+These are the TUI keys. The desktop app uses the same ones, with these differences: there's no Tab focus switching, `Delete` removes from the queue, the open playlist, or the library folders in Settings, `Ctrl+F` also searches, `Alt+Left` and `Alt+Right` go back and forward, and the per-view letter commands (new station, rename, unsubscribe and so on) live in the right-click menu and the buttons at the top of each view instead.
 
 | Key | Action |
 |---|---|
@@ -226,7 +245,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
 
-In the Queue: `d` remove, `J`/`K` move down or up, `S` save as a playlist, `C` clear. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` save as a playlist, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes one. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
@@ -269,12 +288,17 @@ The queue refers to entries by id, never by position. That's what lets you reord
 
 To see how fast indexing is on your own collection: `cargo run --release -p patina-core --example scan -- ~/Music`. It uses a throwaway database, so your real index isn't touched.
 
+The bit-perfect test plays a 16/44.1 and a 24/96 FLAC of white noise to ALSA's `file` plugin, which writes everything it's sent to a file, then compares that file byte for byte with FFmpeg's own decode. Any resampling, volume, dither or padding anywhere in the chain fails it. No sound card needed.
+
 The network tests run a small HTTP server inside the test itself: an ICY stream that hangs up on purpose to check reconnects, a `.pls` with a dead first mirror, real HLS segments, an RSS feed, and a download that breaks halfway to check resume. No internet needed.
 
 ## Known gaps in this milestone
 
 - Podcasts and stations have no art yet. Podcast feed images and station logos come later, cover art for tracks works now.
-- There's no settings screen. Edit the config file and restart. The Settings view shows what's in effect.
+- Bit-perfect was checked bit for bit here through ALSA's file plugin, at 16/44.1 and 24/96, and the PipeWire hand-off was checked against a stand-in on a private D-Bus. It hasn't touched a real DAC or a real PipeWire from this box. CI also tries a real ALSA kernel driver (snd-aloop) when the runner can load it.
+- In bit-perfect mode, going between tracks of different formats (16/44.1 into 24/96) closes and reopens the card, so there's a short gap. Same-format tracks are gapless as always.
+- The Browse folder picker goes through the desktop portal (xdg-desktop-portal), which Plasma, GNOME and most desktops run. Without it, Browse says so and Type a path still works.
+- Command line flags like `--backend` still override the file for one run, but Settings shows the file's values, not the override.
 - No tray icon and no MPRIS media keys yet. Those are milestone 14.
 - The AppImage build was run end to end on Ubuntu 24.04 here, the same system as the GitHub runner, but the workflow itself hasn't run on GitHub yet. The first tagged run is the real test.
 - The desktop app was checked under X11 (Xvfb) here, not on a real Plasma Wayland session. Slint supports Wayland natively, so it should be fine, but that's untested from this box.
@@ -294,4 +318,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/OFL.txt`.
 
-Now PatinaPlayer is building itself on GitHub, shuffling whole folders on command, and keeping score of what you play most.
+Now PatinaPlayer plays your files bit for bit when you ask it to, takes its settings from its own Settings view, and keeps the stations that change format on air.

@@ -130,7 +130,9 @@ pub enum Item {
     Episode(EpisodeRow),
     /// Group label inside search results. Not selectable.
     Header(&'static str),
-    /// Label and value, for Settings and Downloads.
+    /// One option in Settings.
+    Setting(super::settings::Setting),
+    /// Label and value, for Downloads.
     Info {
         label: String,
         value: String,
@@ -157,6 +159,7 @@ impl Item {
             Item::Episode(e) => format!("e:{}", e.id),
             Item::Header(h) => format!("h:{h}"),
             Item::Info { label, .. } => format!("i:{label}"),
+            Item::Setting(s) => format!("s:{:?}", s.key),
         }
     }
 }
@@ -209,15 +212,20 @@ pub struct ViewPrefs {
     pub genre_songs: bool,
 }
 
-pub struct Settings {
-    pub lines: Vec<(String, String)>,
+/// What the Settings view is built from.
+pub struct SettingsState<'a> {
+    pub config: &'a crate::config::Config,
+    pub info: &'a super::settings::SettingsInfo,
+    pub devices: &'a [crate::audio::output::exclusive::HwDevice],
+    pub podcast_tempo: f64,
+    pub podcast_trim: bool,
 }
 
 /// Everything a view can draw from besides the library itself.
 pub struct Ctx<'a> {
     pub lib: Option<&'a Library>,
     pub prefs: &'a ViewPrefs,
-    pub settings: &'a Settings,
+    pub settings: SettingsState<'a>,
     pub stations: &'a [Station],
     /// Last test result per station URL.
     pub checks: &'a HashMap<String, String>,
@@ -260,7 +268,7 @@ const NO_FOLDERS: &str = "No library folders yet. Add one with --add-folder.";
 /// Build the rows for a source. Queue rows come from the player, not the
 /// library, so the Queue section returns nothing here.
 pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> {
-    let (lib, prefs, settings) = (ctx.lib, ctx.prefs, ctx.settings);
+    let (lib, prefs) = (ctx.lib, ctx.prefs);
     let none = || Err(NO_FOLDERS.to_string());
     let err = |e: crate::library::LibError| e.to_string();
     match source {
@@ -291,17 +299,28 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             let eps = lib.episodes(*id).map_err(err)?;
             Ok((title.clone(), eps.into_iter().map(Item::Episode).collect()))
         }
-        Source::Section(Section::Settings) => Ok((
-            "Settings".into(),
-            settings
-                .lines
-                .iter()
-                .map(|(l, v)| Item::Info {
-                    label: l.clone(),
-                    value: v.clone(),
-                })
-                .collect(),
-        )),
+        Source::Section(Section::Settings) => {
+            let st = &ctx.settings;
+            let rows = super::settings::rows(
+                st.config,
+                st.info,
+                st.podcast_tempo,
+                st.podcast_trim,
+                st.devices,
+            );
+            let mut items = Vec::new();
+            let mut last = None;
+            for (group, setting) in rows {
+                if group != last
+                    && let Some(g) = group
+                {
+                    items.push(Item::Header(g));
+                }
+                last = group;
+                items.push(Item::Setting(setting));
+            }
+            Ok(("Settings".into(), items))
+        }
         Source::Section(Section::Downloads) => {
             let eps = lib
                 .and_then(|l| l.downloaded_episodes().ok())

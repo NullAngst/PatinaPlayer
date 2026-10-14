@@ -108,6 +108,27 @@ fn serve_icy(mut s: &TcpStream, mp3: &[u8], wants_meta: bool, limit: usize) {
     }
 }
 
+/// An endless stream with no length and no ICY metadata: the file over
+/// and over, at roughly real time.
+fn serve_raw(mut s: &TcpStream, ctype: &str, data: &[u8]) {
+    if write!(
+        s,
+        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return;
+    }
+    for _ in 0..4 {
+        for chunk in data.chunks(8192) {
+            if s.write_all(chunk).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(60));
+        }
+    }
+}
+
 fn start_server() -> Server {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().to_path_buf();
@@ -135,6 +156,57 @@ fn start_server() -> Server {
         "128k",
         &d("ep1.mp3"),
     ]);
+    // A raw ADTS AAC station, the kind public broadcasters serve.
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=f=500:r=48000:d=20",
+        "-ac",
+        "2",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-f",
+        "adts",
+        &d("station.aac"),
+    ]);
+    // A station that switches from 44.1 kHz mono to 48 kHz stereo partway
+    // through, the way ad breaks and HE-AAC streams do.
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=f=300:r=44100:d=2",
+        "-ac",
+        "1",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k",
+        "-f",
+        "adts",
+        &d("part1.aac"),
+    ]);
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=f=600:r=48000:d=8",
+        "-ac",
+        "2",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-f",
+        "adts",
+        &d("part2.aac"),
+    ]);
+    let mut mixed = std::fs::read(d("part1.aac")).unwrap();
+    mixed.extend(std::fs::read(d("part2.aac")).unwrap());
+    std::fs::write(d("mixed.aac"), mixed).unwrap();
     std::fs::create_dir_all(dir.join("hls")).unwrap();
     ffmpeg(&[
         "-f",
@@ -183,6 +255,14 @@ fn start_server() -> Server {
                         respond(&stream, "200 OK", "audio/x-scpls", body.as_bytes(), "");
                     }
                     "/dead" => respond(&stream, "404 Not Found", "text/plain", b"gone", ""),
+                    "/mixed.aac" => {
+                        let aac = std::fs::read(root.join("mixed.aac")).unwrap();
+                        serve_raw(&stream, "audio/aac", &aac);
+                    }
+                    p if p.starts_with("/stream.aac") => {
+                        let aac = std::fs::read(root.join("station.aac")).unwrap();
+                        serve_raw(&stream, "audio/aac", &aac);
+                    }
                     "/icy" => {
                         icy_c.fetch_add(1, Ordering::SeqCst);
                         let mp3 = std::fs::read(root.join("station.mp3")).unwrap();
@@ -311,7 +391,10 @@ fn pls_skips_the_dead_mirror_and_reads_icy() {
     assert_eq!(c.codec.as_deref(), Some("MP3"));
     assert_eq!(c.kbps, Some(128));
     assert_eq!(c.name.as_deref(), Some("Test FM"));
-    assert_eq!(c.summary(), "Playlist, 2 mirrors, MP3 128 kbps");
+    assert_eq!(
+        c.summary(),
+        "Playlist, 2 mirrors, MP3 128 kbps, 44.1 kHz stereo"
+    );
 }
 
 #[test]
@@ -496,4 +579,63 @@ fn podcast_service_refreshes_and_downloads() {
     );
     patina_core::podcast::delete_download(&lib, ep.id).unwrap();
     assert!(!path.exists());
+}
+
+#[test]
+fn raw_aac_station_with_a_query_string_plays() {
+    let srv = start_server();
+    let p = null_player(Hooks::default());
+    let station = TrackInfo {
+        kind: MediaKind::Radio,
+        url: Some(srv.url("/stream.aac?aggregator=web")),
+        title: Some("AAC Station".into()),
+        ..Default::default()
+    };
+    let check = patina_core::radio::check(station.url.as_deref().unwrap()).unwrap();
+    assert!(check.error.is_none(), "{:?}", check.error);
+    p.send(Command::SetQueueTracks {
+        tracks: vec![station],
+        start: 0,
+        pos: Duration::ZERO,
+    });
+    wait(15, || {
+        let s = p.snapshot();
+        assert!(s.last_error.is_none(), "{:?}", s.last_error);
+        (s.state == patina_core::PlayState::Playing
+            && !s.buffering
+            && s.position > Duration::from_secs(2))
+        .then_some(())
+    });
+    p.send(Command::Quit);
+}
+
+#[test]
+fn station_that_changes_format_keeps_playing() {
+    let srv = start_server();
+    let p = null_player(Hooks::default());
+    let url = srv.url("/mixed.aac");
+    let check = patina_core::radio::check(&url).unwrap();
+    assert!(check.error.is_none(), "{:?}", check.error);
+    p.send(Command::SetQueueTracks {
+        tracks: vec![TrackInfo {
+            kind: MediaKind::Radio,
+            url: Some(url),
+            title: Some("Switching".into()),
+            ..Default::default()
+        }],
+        start: 0,
+        pos: Duration::ZERO,
+    });
+    // Past the switch at 2 s, with no reconnect along the way, and the
+    // badge showing the new format.
+    let mut reconnected = false;
+    wait(20, || {
+        let s = p.snapshot();
+        reconnected |= s.reconnect.is_some();
+        let t = s.track.as_ref()?;
+        (s.position > Duration::from_secs(4) && t.sample_rate == 48000 && t.channels == 2)
+            .then_some(())
+    });
+    assert!(!reconnected, "a format change isn't a dropped connection");
+    p.send(Command::Quit);
 }

@@ -18,7 +18,7 @@ use std::time::Duration;
 use ffmpeg::format::sample::{Sample, Type as SampleType};
 use ffmpeg_next as ffmpeg;
 
-use super::StreamFormat;
+use super::{Depth, StreamFormat};
 use crate::track::TrackInfo;
 
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +85,8 @@ pub fn is_network(loc: &str) -> bool {
 struct Filter {
     graph: ffmpeg::filter::Graph,
     out: ffmpeg::frame::Audio,
+    /// What comes out, fixed for the life of the source.
+    out_format: StreamFormat,
     /// Source time at the end of the last frame fed in.
     src_end: f64,
     flushed: bool,
@@ -110,6 +112,13 @@ pub struct Source {
     filter: Option<Filter>,
     /// Last title seen in ICY or timed metadata.
     last_title: Option<String>,
+    /// `frame` holds a decoded frame not handed out yet: the one decoded at
+    /// open to learn the real format.
+    primed: bool,
+    /// The stream switched sample rate or channels mid-play. The samples
+    /// returned by the last decode are already in the new format.
+    format_changed: bool,
+    depth: Depth,
 }
 
 /// Highest channel count we pass through. FFmpeg can report more, but
@@ -165,9 +174,6 @@ impl Source {
         let decoder = ctx.decoder().audio()?;
 
         let channels = decoder.channels();
-        if channels == 0 || channels > MAX_CHANNELS {
-            return Err(DecodeError::Channels(channels));
-        }
         let format = StreamFormat {
             rate: decoder.rate(),
             channels,
@@ -177,11 +183,9 @@ impl Source {
         if opts.live {
             info.duration = None;
         }
-
-        let filter = if opts.filtered() {
-            Some(Filter::new(&decoder, format, tb, &opts)?)
-        } else {
-            None
+        let depth = match info.bits {
+            Some(b) if info.lossless && is_int(decoder.format()) => Depth::Int(b.min(32) as u8),
+            _ => Depth::Float,
         };
 
         let mut src = Self {
@@ -198,9 +202,32 @@ impl Source {
             done: false,
             skip_until: None,
             opts,
-            filter,
+            filter: None,
             last_title: None,
+            primed: false,
+            format_changed: false,
+            depth,
         };
+        // Decode the first frame now. What the container header says isn't
+        // always what comes out: HE-AAC streams announce half their sample
+        // rate (and often mono) and decode to the full rate in stereo. The
+        // frame is the truth, and it's kept to be handed out first.
+        src.prime()?;
+        if src.format.channels == 0 || src.format.channels > MAX_CHANNELS {
+            return Err(DecodeError::Channels(src.format.channels));
+        }
+        if src.format.rate == 0 {
+            return Err(DecodeError::NoAudio);
+        }
+        if src.opts.filtered() {
+            src.filter = Some(Filter::new(
+                src.decoder.format(),
+                src.format,
+                src.format,
+                tb,
+                &src.opts,
+            )?);
+        }
         if src.opts.live {
             src.apply_icy_headers();
         }
@@ -209,6 +236,31 @@ impl Source {
 
     pub fn is_live(&self) -> bool {
         self.opts.live
+    }
+
+    /// Sample depth of the source, for the bit-perfect output.
+    pub fn depth(&self) -> Depth {
+        self.depth
+    }
+
+    /// True once after the stream changed format mid-play. The samples the
+    /// last [`decode_into`](Self::decode_into) returned are in the new
+    /// [`format`](Self::format).
+    pub fn take_format_change(&mut self) -> bool {
+        std::mem::take(&mut self.format_changed)
+    }
+
+    /// Decode until the first frame with samples, and take the stream's
+    /// format from it. An empty stream keeps the header's format.
+    fn prime(&mut self) -> Result<(), DecodeError> {
+        let n = self.decode_raw_frame()?;
+        if n > 0 {
+            self.primed = true;
+            self.format = frame_format(&self.frame);
+            self.info.sample_rate = self.format.rate;
+            self.info.channels = self.format.channels;
+        }
+        Ok(())
     }
 
     /// For filtered sources, where in the source the audio returned so far
@@ -309,8 +361,12 @@ impl Source {
         }
     }
 
+    /// Format of the samples [`decode_into`](Self::decode_into) returns.
     pub fn format(&self) -> StreamFormat {
-        self.format
+        match &self.filter {
+            Some(f) => f.out_format,
+            None => self.format,
+        }
     }
 
     pub fn info(&self) -> &TrackInfo {
@@ -327,6 +383,7 @@ impl Source {
         }
         self.input.seek(ts, ..ts)?;
         self.decoder.flush();
+        self.primed = false;
         self.eof_sent = false;
         self.eof_drained = false;
         self.done = false;
@@ -335,7 +392,12 @@ impl Source {
             // Tempo and silence filters carry state across samples; a seek
             // starts them fresh.
             let tb = self.input.stream(self.stream_index).unwrap().time_base();
-            let mut f = Filter::new(&self.decoder, self.format, tb, &self.opts)?;
+            let out = self
+                .filter
+                .as_ref()
+                .map(|f| f.out_format)
+                .unwrap_or(self.format);
+            let mut f = Filter::new(self.decoder.format(), self.format, out, tb, &self.opts)?;
             f.src_end = pos.as_secs_f64();
             self.filter = Some(f);
         }
@@ -353,7 +415,13 @@ impl Source {
 
     /// Decode through the tempo and silence filters.
     fn decode_filtered(&mut self, out: &mut Vec<f64>) -> Result<usize, DecodeError> {
-        let ch = self.format.channels as usize;
+        // The filter's output format never changes: if the input does, the
+        // graph is rebuilt to convert the new input to the old output.
+        let ch = self
+            .filter
+            .as_ref()
+            .map(|f| f.out_format.channels as usize)
+            .unwrap_or(1);
         loop {
             // Drain whatever the filter has ready.
             let f = self.filter.as_mut().unwrap();
@@ -391,6 +459,21 @@ impl Source {
                 }
                 continue;
             }
+            let in_fmt = frame_format(&self.frame);
+            if in_fmt != self.format {
+                log::info!(
+                    "stream format changed to {} ch {} Hz, converting",
+                    in_fmt.channels,
+                    in_fmt.rate
+                );
+                let tb = self.input.stream(self.stream_index).unwrap().time_base();
+                let old = self.filter.take().unwrap();
+                let mut f =
+                    Filter::new(self.frame.format(), in_fmt, old.out_format, tb, &self.opts)?;
+                f.src_end = old.src_end;
+                self.filter = Some(f);
+                self.format = in_fmt;
+            }
             let ts = self.frame.timestamp();
             let tb = self.time_base;
             let rate = self.format.rate as f64;
@@ -421,6 +504,9 @@ impl Source {
     /// Decode one frame into the codec's frame buffer, returning its
     /// sample count (0 at end of stream). Used to feed the filter.
     fn decode_raw_frame(&mut self) -> Result<usize, DecodeError> {
+        if std::mem::take(&mut self.primed) {
+            return Ok(self.frame.samples());
+        }
         loop {
             if self.done || self.eof_drained {
                 return Ok(0);
@@ -474,6 +560,12 @@ impl Source {
     }
 
     fn decode_raw(&mut self, out: &mut Vec<f64>) -> Result<usize, DecodeError> {
+        if std::mem::take(&mut self.primed) {
+            let n = self.append_frame(out)?;
+            if n > 0 {
+                return Ok(n);
+            }
+        }
         loop {
             if self.done {
                 return Ok(0);
@@ -507,23 +599,35 @@ impl Source {
     }
 
     fn append_frame(&mut self, out: &mut Vec<f64>) -> Result<usize, DecodeError> {
+        if self.frame.samples() == 0 {
+            return Ok(0);
+        }
+        let now = frame_format(&self.frame);
+        if now != self.format {
+            // Broadcast streams do this: an ad break at another rate, or
+            // HE-AAC switching parametric stereo on. Follow it, and let the
+            // decoder thread open a new output for the new format.
+            if now.channels == 0 || now.channels > MAX_CHANNELS || now.rate == 0 {
+                return Err(DecodeError::Channels(now.channels));
+            }
+            log::info!(
+                "stream format changed from {} ch {} Hz to {} ch {} Hz",
+                self.format.channels,
+                self.format.rate,
+                now.channels,
+                now.rate
+            );
+            // Each decode returns one frame's worth, so the caller's buffer
+            // never holds both formats.
+            debug_assert!(out.is_empty(), "format change inside one batch");
+            self.format = now;
+            self.info.sample_rate = now.rate;
+            self.info.channels = now.channels;
+            self.format_changed = true;
+        }
         let frame = &self.frame;
         let samples = frame.samples();
         let ch = self.format.channels as usize;
-        if samples == 0 {
-            return Ok(0);
-        }
-        if frame.channels() as usize != ch || frame.rate() != self.format.rate {
-            // Mid-stream format changes happen in some broadcast captures.
-            // Rather than play garbage, treat it as a decode error.
-            log::warn!(
-                "format changed mid-stream in {} ({} ch {} Hz)",
-                self.info.path.display(),
-                frame.channels(),
-                frame.rate()
-            );
-            return Err(DecodeError::Channels(frame.channels()));
-        }
 
         // Work out how many leading frames to drop after a seek.
         let mut skip = 0usize;
@@ -590,6 +694,38 @@ impl Source {
     }
 }
 
+/// Rate, channels and layout of a decoded frame.
+fn frame_format(frame: &ffmpeg::frame::Audio) -> StreamFormat {
+    // SAFETY: reading the layout of a valid decoded frame; the mask member
+    // of the union only for native order.
+    let (channels, native, mask) = unsafe {
+        let l = &(*frame.as_ptr()).ch_layout;
+        let native = l.order == ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_NATIVE;
+        (
+            l.nb_channels.max(0) as u16,
+            native,
+            if native { l.u.mask } else { 0 },
+        )
+    };
+    let mask = if native && mask.count_ones() == channels as u32 {
+        mask
+    } else {
+        ffmpeg::ChannelLayout::default(channels as i32).bits()
+    };
+    StreamFormat {
+        rate: frame.rate(),
+        channels,
+        mask,
+    }
+}
+
+fn is_int(fmt: Sample) -> bool {
+    matches!(
+        fmt,
+        Sample::U8(_) | Sample::I16(_) | Sample::I32(_) | Sample::I64(_)
+    )
+}
+
 /// Channel mask for a decoder's layout, or FFmpeg's default for the count
 /// when the file doesn't say (or uses a custom order we can't map).
 fn channel_mask(decoder: &ffmpeg::decoder::Audio, channels: u16) -> u64 {
@@ -622,9 +758,12 @@ pub fn parse_stream_title(packet: &str) -> Option<String> {
 }
 
 impl Filter {
+    /// A graph from `input` (decoded frames in `sample_fmt`) to packed f64
+    /// in `output`. The two differ only when a stream changed format.
     fn new(
-        decoder: &ffmpeg::decoder::Audio,
-        format: StreamFormat,
+        sample_fmt: Sample,
+        input: StreamFormat,
+        output: StreamFormat,
         tb: ffmpeg::Rational,
         opts: &OpenOptions,
     ) -> Result<Self, DecodeError> {
@@ -633,9 +772,9 @@ impl Filter {
             "time_base={}/{}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
             tb.numerator(),
             tb.denominator().max(1),
-            format.rate,
-            decoder.format().name(),
-            format.mask
+            input.rate,
+            sample_fmt.name(),
+            input.mask
         );
         let abuffer = ffmpeg::filter::find("abuffer").ok_or(DecodeError::NoAudio)?;
         let sink = ffmpeg::filter::find("abuffersink").ok_or(DecodeError::NoAudio)?;
@@ -668,7 +807,7 @@ impl Filter {
         }
         chain.push(format!(
             "aformat=sample_fmts=dbl:channel_layouts=0x{:x}:sample_rates={}",
-            format.mask, format.rate
+            output.mask, output.rate
         ));
         graph
             .output("in", 0)?
@@ -678,6 +817,7 @@ impl Filter {
         Ok(Self {
             graph,
             out: ffmpeg::frame::Audio::empty(),
+            out_format: output,
             src_end: 0.0,
             flushed: false,
         })

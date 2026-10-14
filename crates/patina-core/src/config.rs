@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::audio::output::{Backend, OutputConfig};
+use crate::audio::output::{Backend, BitPerfect, OutputConfig};
 
 pub const APP_DIR: &str = "patinaplayer";
 
@@ -181,6 +181,8 @@ struct RawOutput {
     backend: Option<String>,
     device: Option<String>,
     buffer_ms: Option<u32>,
+    bit_perfect: Option<String>,
+    bit_perfect_device: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -221,6 +223,13 @@ impl Config {
             })?,
             None => d.output.backend,
         };
+        let bit_perfect = match out.bit_perfect {
+            Some(b) => b.parse::<BitPerfect>().map_err(|msg| ConfigError::Parse {
+                path: path.to_path_buf(),
+                msg: format!("output.bit_perfect: {msg}"),
+            })?,
+            None => d.output.bit_perfect,
+        };
         Ok(Self {
             library: LibraryConfig {
                 folders: lib
@@ -235,6 +244,8 @@ impl Config {
                 backend,
                 device: out.device.filter(|d| !d.is_empty()),
                 buffer_ms: out.buffer_ms.unwrap_or(d.output.buffer_ms).clamp(50, 1000),
+                bit_perfect,
+                bit_perfect_device: out.bit_perfect_device.filter(|d| !d.trim().is_empty()),
             },
             playback: PlaybackConfig {
                 volume: pb.volume.unwrap_or(d.playback.volume).min(100),
@@ -315,6 +326,13 @@ backend = "auto"
 device = ""
 # Output buffer in milliseconds, 50 to 1000.
 buffer_ms = 200
+# Bit-perfect playback of local files: off, on, or auto (whenever no EQ or
+# leveling is changing the sound). It takes the sound card for itself while
+# it plays, so other apps can't use it until you pause or turn this off.
+bit_perfect = "off"
+# Card for bit-perfect playback, like "hw:CARD=DAC,DEV=0". Empty is the
+# first sound card. Settings lists the ones you have.
+bit_perfect_device = ""
 
 [playback]
 # Starting volume, 0 to 100.
@@ -441,6 +459,43 @@ pub fn set_podcast_playback(path: &Path, speed: f64, trim: bool) -> Result<bool,
     })
 }
 
+/// Set one value, like `output.buffer_ms = 300`, keeping the rest of the
+/// file as it was.
+pub fn set_value(
+    path: &Path,
+    section: &str,
+    key: &str,
+    value: impl Into<toml_edit::Value>,
+) -> Result<bool, ConfigError> {
+    let value = value.into();
+    edit(path, |doc| {
+        let t = table(doc, section)?;
+        let bare = |v: &toml_edit::Value| {
+            let mut v = v.clone();
+            v.decor_mut().clear();
+            v.to_string()
+        };
+        let same = t
+            .get(key)
+            .and_then(|i| i.as_value())
+            .is_some_and(|v| bare(v) == bare(&value));
+        if same {
+            return Ok(false);
+        }
+        // Keep a trailing comment on the line if there was one.
+        let suffix = t
+            .get(key)
+            .and_then(|i| i.as_value())
+            .and_then(|v| v.decor().suffix().cloned());
+        let mut v = value;
+        if let Some(sfx) = suffix {
+            v.decor_mut().set_suffix(sfx);
+        }
+        t.insert(key, toml_edit::Item::Value(v));
+        Ok(true)
+    })
+}
+
 /// Add or remove a library folder in the config file, keeping the rest of
 /// the file as you wrote it. Returns false if nothing needed changing.
 pub fn edit_library_folder(path: &Path, folder: &Path, add: bool) -> Result<bool, ConfigError> {
@@ -531,6 +586,24 @@ mod tests {
         // Removing every station leaves a valid file.
         set_stations(&p, &[]).unwrap();
         assert!(Config::load_from(&p).unwrap().stations.is_empty());
+    }
+
+    #[test]
+    fn set_value_keeps_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "# top\n[output]\nbuffer_ms = 200 # latency\n").unwrap();
+        assert!(set_value(&p, "output", "buffer_ms", 300i64).unwrap());
+        assert!(!set_value(&p, "output", "buffer_ms", 300i64).unwrap());
+        assert!(set_value(&p, "output", "bit_perfect", "on").unwrap());
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("# top") && text.contains("# latency"),
+            "{text}"
+        );
+        let c = Config::load_from(&p).unwrap();
+        assert_eq!(c.output.buffer_ms, 300);
+        assert_eq!(c.output.bit_perfect, BitPerfect::On);
     }
 
     #[test]

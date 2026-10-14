@@ -47,7 +47,7 @@ export struct SideItem {
 
 export struct Row {
     // 0 track, 1 album, 2 artist, 3 folder, 4 genre, 5 playlist, 6 station,
-    // 7 podcast, 8 episode, 9 header, 10 info, 11 missing file
+    // 7 podcast, 8 episode, 9 header, 10 info, 11 missing file, 12 setting
     kind: int,
     num: string,
     title: string,
@@ -61,6 +61,10 @@ export struct Row {
     art: image,
     has-art: bool,
     downloaded: bool,
+    // Settings rows (kind 12): 1 toggle, 2 choice, 3 number, 4 text,
+    // 5 library folder, 6 add folder, 7 read-only.
+    ctl: int,
+    on: bool,
 }
 
 export struct QueueRow {
@@ -212,6 +216,7 @@ component Chip inherits Rectangle {
         Text {
             text: root.text;
             vertical-alignment: center;
+            overflow: elide;
             font-size: 12.5px;
             font-weight: primary ? 600 : 400;
             color: primary ? P.on-accent : (danger ? P.copper : (active ? P.verdigris : P.text));
@@ -336,7 +341,14 @@ component Field inherits Rectangle {
     callback accepted;
     callback edited(string);
     public function focus-field() { ti.focus(); }
-    init => { if autofocus { ti.focus(); } }
+    // Cursor at the end, so a prefilled "~/" or value is added to, not
+    // typed in front of.
+    init => {
+        if autofocus {
+            ti.focus();
+            ti.set-selection-offsets(ti.text.character-count * 4, ti.text.character-count * 4);
+        }
+    }
     height: 58px;
     VerticalLayout {
         spacing: 6px;
@@ -372,6 +384,33 @@ component Field inherits Rectangle {
 
 // ----- Rows -----
 
+component Switch inherits Rectangle {
+    in property <bool> on;
+    callback toggled;
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: on ? P.verdigris : P.raised;
+    border-width: 1px;
+    border-color: on ? P.verdigris : P.border;
+    accessible-role: switch;
+    accessible-checked: on;
+    accessible-action-default => { toggled(); }
+    Rectangle {
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        y: 2px;
+        x: root.on ? root.width - self.width - 3px : 3px;
+        background: root.on ? P.on-accent : P.muted;
+        animate x { duration: 120ms; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(); }
+    }
+}
+
 component ListRow inherits Rectangle {
     // Rows are placed by the list, so they take its width.
     in property <Row> item;
@@ -381,7 +420,7 @@ component ListRow inherits Rectangle {
     callback select;
     callback activate;
     callback act(string);
-    height: item.kind == 9 ? 34px : 40px;
+    height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
     background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : #15262380) : (ta.has-hover && item.selectable ? #15262399 : transparent));
     border-radius: 6px;
 
@@ -396,7 +435,7 @@ component ListRow inherits Rectangle {
         letter-spacing: 0.9px;
     }
 
-    if item.kind != 9: HorizontalLayout {
+    if item.kind != 9 && item.kind != 12: HorizontalLayout {
         padding-left: 8px;
         padding-right: 12px;
         spacing: 12px;
@@ -476,11 +515,11 @@ component ListRow inherits Rectangle {
                 title: item.kind == 8 ? "Play (resume)" : "Play";
                 activated => { root.act("play"); }
             }
-            if item.kind != 9 && item.kind != 10 && item.kind != 11: MenuItem {
+            if item.kind <= 8: MenuItem {
                 title: "Play next";
                 activated => { root.act("next"); }
             }
-            if item.kind != 9 && item.kind != 10 && item.kind != 11: MenuItem {
+            if item.kind <= 8: MenuItem {
                 title: "Add to queue";
                 activated => { root.act("queue"); }
             }
@@ -531,7 +570,126 @@ component ListRow inherits Rectangle {
                 }
             }
             double-clicked => {
-                if item.selectable { root.activate(); }
+                if item.selectable && item.kind != 12 { root.activate(); }
+            }
+        }
+    }
+
+    // A settings row: label and help on the left, its control on the
+    // right. Laid over the row's touch area so the buttons get the clicks.
+    if item.kind == 12: HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 16px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: item.title;
+                font-size: 13px;
+                color: item.ctl == 5 ? P.text : P.text;
+                font-family: item.ctl == 5 ? P.mono : "Inter";
+                overflow: elide;
+            }
+            if item.meta != "": Text {
+                text: item.meta;
+                font-size: 11.5px;
+                color: P.muted;
+                overflow: elide;
+            }
+        }
+        HorizontalLayout {
+            horizontal-stretch: 0;
+            alignment: end;
+            spacing: 6px;
+            if item.ctl == 1: Rectangle {
+                width: 36px;
+                Switch {
+                    y: (parent.height - self.height) / 2;
+                    on: item.on;
+                    toggled => { root.act("toggle"); }
+                }
+            }
+            if item.ctl == 2: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                max-width: 340px;
+                text: item.sub + "  ▾";
+                clicked => { root.act("choose"); }
+            }
+            if item.ctl == 3: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "−";
+                clicked => { root.act("dec"); }
+            }
+            if item.ctl == 3: Rectangle {
+                min-width: 72px;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: item.sub;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-family: P.mono;
+                    font-size: 12px;
+                    color: P.text;
+                }
+                TouchArea {
+                    mouse-cursor: text;
+                    clicked => { root.act("edit"); }
+                }
+            }
+            if item.ctl == 3: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "+";
+                clicked => { root.act("inc"); }
+            }
+            if item.ctl == 4: Text {
+                max-width: 300px;
+                text: item.sub;
+                vertical-alignment: center;
+                font-family: P.mono;
+                font-size: 12px;
+                color: item.on ? P.text : P.muted;
+                overflow: elide;
+            }
+            if item.ctl == 4: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Edit";
+                clicked => { root.act("edit"); }
+            }
+            if item.ctl == 5: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Remove";
+                danger: true;
+                clicked => { root.act("remove"); }
+            }
+            if item.ctl == 6: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Browse…";
+                primary: true;
+                clicked => { root.act("browse"); }
+            }
+            if item.ctl == 6: Chip {
+                y: (parent.height - self.height) / 2;
+                h: 28px;
+                text: "Type a path…";
+                clicked => { root.act("edit"); }
+            }
+            if item.ctl == 7: Text {
+                max-width: 520px;
+                text: item.sub;
+                vertical-alignment: center;
+                font-family: P.mono;
+                font-size: 11.5px;
+                color: P.muted;
+                overflow: elide;
             }
         }
     }
@@ -674,6 +832,13 @@ export component AppWindow inherits Window {
     in property <string> elapsed;
     in property <string> remaining;
     in property <string> badge;
+    // "BIT-PERFECT", "EXCLUSIVE", or "NOT BIT-PERFECT" when it was refused.
+    in property <string> bp-badge;
+    in property <int> bp-tone; // 0 good, 1 plain, 2 refused
+    in property <string> bp-tip;
+    callback bp-clicked;
+    // Bit-perfect on a DAC with no volume control: fixed at 100%.
+    in property <bool> volume-locked;
     in property <string> output-label;
     in property <string> speed-label;
     // Narrow window: fewer things in the bottom bar.
@@ -1477,6 +1642,19 @@ export component AppWindow inherits Window {
                             }
                             TouchArea { mouse-cursor: pointer; clicked => { root.speed-clicked(); } }
                         }
+                        // Click it to hear why (or what device, and how).
+                        if root.bp-badge != "": Rectangle {
+                            width: bpb.width;
+                            bpb := Badge {
+                                y: (parent.height - self.height) / 2;
+                                text: root.bp-badge;
+                                fg: root.bp-tone == 0 ? P.verdigris : (root.bp-tone == 2 ? P.copper : P.muted);
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.bp-clicked(); }
+                            }
+                        }
                         if root.badge != "" && !root.compact: Badge {
                             y: (parent.height - self.height) / 2;
                             text: root.badge;
@@ -1503,8 +1681,9 @@ export component AppWindow inherits Window {
                         Bar {
                             width: 96px;
                             y: (parent.height - self.height) / 2;
-                            label: "Volume";
-                            value: root.volume;
+                            label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
+                            value: root.volume-locked ? 1.0 : root.volume;
+                            enabled: !root.volume-locked;
                             fill: root.muted ? P.wave : P.verdigris;
                             knob: 12px;
                             live: true;

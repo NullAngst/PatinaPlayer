@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::browse::{Browser, Settings, Startup};
+use crate::browse::{Browser, SettingsInfo, Startup};
 use crate::config::{self, Config};
 use crate::library::{Library, LibraryService};
 use crate::player::{Hooks, PlayedHook, ProgressHook};
@@ -66,6 +66,8 @@ impl Session {
             backend: opts.backend.unwrap_or(cfg.output.backend),
             device: opts.device.clone().or(cfg.output.device.clone()),
             buffer_ms: opts.buffer_ms.unwrap_or(cfg.output.buffer_ms),
+            bit_perfect: cfg.output.bit_perfect,
+            bit_perfect_device: cfg.output.bit_perfect_device.clone(),
         };
         let volume = opts.volume.unwrap_or(cfg.playback.volume);
         let fade_ms = opts.fade_ms.unwrap_or(cfg.playback.fade_ms);
@@ -160,28 +162,18 @@ impl Session {
             player.send(Command::ToggleShuffle);
         }
 
-        let settings = Settings {
-            lines: settings_lines(
-                &config_path,
-                &cfg,
-                &output,
-                volume,
-                fade_ms,
-                &db_path,
-                opts.no_library,
-            ),
-        };
         let browser = Browser::new(Startup {
             player,
             lib,
             service,
             pod,
-            config_path: config_path.clone(),
-            stations: cfg.stations.clone(),
-            feeds: cfg.podcasts.feeds.clone(),
-            podcast_tempo: cfg.podcasts.speed,
-            podcast_trim: cfg.podcasts.trim_silence,
-            settings,
+            config: cfg.clone(),
+            settings_info: SettingsInfo {
+                config_path: config_path.clone(),
+                db_path: db_path.clone(),
+                offline_dir: config::offline_dir().join("podcasts"),
+                no_library: opts.no_library,
+            },
         });
         Ok(Self {
             browser,
@@ -241,81 +233,4 @@ pub fn edit_folders(
     }
     out.push(format!("Config: {}", config_path.display()));
     Ok(out)
-}
-
-fn settings_lines(
-    config_path: &Path,
-    cfg: &Config,
-    output: &OutputConfig,
-    volume: u8,
-    fade_ms: u32,
-    db: &Path,
-    no_library: bool,
-) -> Vec<(String, String)> {
-    let mut v = vec![("Config file".to_string(), config_path.display().to_string())];
-    if no_library {
-        v.push(("Library".into(), "off (--no-library)".into()));
-    } else if cfg.library.folders.is_empty() {
-        v.push((
-            "Library folders".into(),
-            "none. Add one with --add-folder DIR".into(),
-        ));
-    } else {
-        for (i, f) in cfg.library.folders.iter().enumerate() {
-            let label = if i == 0 { "Library folders" } else { "" };
-            v.push((label.into(), f.display().to_string()));
-        }
-    }
-    v.push((
-        "Watch for changes".into(),
-        if cfg.library.watch { "on" } else { "off" }.into(),
-    ));
-    v.push(("Library index".into(), db.display().to_string()));
-    v.push((
-        "Output".into(),
-        format!(
-            "{:?}{}",
-            output.backend,
-            output
-                .device
-                .as_ref()
-                .map(|d| format!(", device {d}"))
-                .unwrap_or_default()
-        )
-        .to_lowercase(),
-    ));
-    v.push(("Buffer".into(), format!("{} ms", output.buffer_ms)));
-    v.push(("Starting volume".into(), format!("{volume}%")));
-    v.push((
-        "Fades".into(),
-        if fade_ms == 0 {
-            "off".into()
-        } else {
-            format!("{fade_ms} ms")
-        },
-    ));
-    v.push(("Radio stations".into(), cfg.stations.len().to_string()));
-    v.push(("Podcast feeds".into(), cfg.podcasts.feeds.len().to_string()));
-    v.push((
-        "Podcast speed".into(),
-        format!(
-            "{:.1}x{}",
-            cfg.podcasts.speed,
-            if cfg.podcasts.trim_silence {
-                ", trimming silence"
-            } else {
-                ""
-            }
-        ),
-    ));
-    v.push((
-        "Downloaded episodes".into(),
-        config::offline_dir().join("podcasts").display().to_string(),
-    ));
-    v.push(("".into(), "".into()));
-    v.push((
-        "Changing settings".into(),
-        "edit the config file and restart, since there's no settings screen yet".into(),
-    ));
-    v
 }

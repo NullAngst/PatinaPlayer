@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, 
 
 use crate::app::{App, Focus, InputPurpose, Modal};
 use patina_core::browse::SideEntry;
-use patina_core::browse::{Item, Section, Source, fmt_duration, fmt_length};
+use patina_core::browse::{Control, Item, Section, Source, fmt_duration, fmt_length};
 
 const SIDEBAR_W: u16 = 24;
 const QUEUE_W: u16 = 42;
@@ -67,6 +67,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::StationName { .. } => "Edit station: name",
                 InputPurpose::StationUrl { .. } => "Station URL (stream, .pls, .m3u or .m3u8)",
                 InputPurpose::FeedUrl => "Podcast feed URL",
+                InputPurpose::AddFolder => "Add a music folder",
+                InputPurpose::SetValue { label, .. } => label.as_str(),
             };
             draw_input_box(f, app, area, title, buf);
         }
@@ -212,7 +214,13 @@ fn level_kind(items: &[Item]) -> Kind {
             .any(|i| matches!(i, Item::Album(_) | Item::Artist { .. }))
     {
         Kind::Tracks
-    } else if items.iter().all(|i| matches!(i, Item::Info { .. })) {
+    } else if items
+        .iter()
+        .all(|i| matches!(i, Item::Info { .. } | Item::Setting(_) | Item::Header(_)))
+        && items
+            .iter()
+            .any(|i| matches!(i, Item::Info { .. } | Item::Setting(_)))
+    {
         Kind::Info
     } else if items.iter().all(|i| matches!(i, Item::Station { .. })) {
         Kind::Stations
@@ -245,7 +253,7 @@ fn hints(app: &App) -> &'static str {
         }
         (Section::Podcasts, _) => "Enter open · N subscribe · D unsubscribe · F5 refresh",
         (Section::Downloads, _) => "Enter play · x delete file · P played",
-        (Section::Settings, _) => "",
+        (Section::Settings, _) => "Enter change · h/l step · N add folder · d remove folder",
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
             "Enter open · v play all · V shuffle · a add"
         }
@@ -382,6 +390,22 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         Kind::Stations => vec!["", "", "Station", "Last test", "", ""],
         Kind::Episodes => vec!["", "", "Episode", "Published", "Progress", "Length"],
     };
+    // In Settings, the selected option's help sits under the list.
+    let help = match level.items.get(level.selected) {
+        Some(Item::Setting(st)) if !st.help.is_empty() => Some(st.help),
+        _ => None,
+    };
+    let body = if let Some(h) = help {
+        let [list, line] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" {h}"), Style::default().fg(t.muted))),
+            line,
+        );
+        list
+    } else {
+        body
+    };
     let rows_h = body.height.saturating_sub(1) as usize;
     let n = level.items.len();
     let (sel, mut offset) = (level.selected.min(n - 1), level.offset);
@@ -438,7 +462,7 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         Kind::Info => [
             Constraint::Length(1),
             Constraint::Length(0),
-            Constraint::Length(22),
+            Constraint::Length(24),
             Constraint::Min(10),
             Constraint::Length(0),
             Constraint::Length(0),
@@ -752,6 +776,49 @@ fn item_row<'a>(
             Cell::from(""),
             Cell::from(""),
         ],
+        Item::Setting(st) => {
+            let accent = Style::default().fg(t.verdigris);
+            let (label, value) = match &st.control {
+                Control::Folder => (
+                    Span::styled("Folder", muted),
+                    Span::styled(st.label.clone(), text),
+                ),
+                Control::Toggle(on) => (
+                    Span::styled(st.label.clone(), text),
+                    Span::styled(
+                        if *on { "[x] on" } else { "[ ] off" },
+                        if *on { accent } else { muted },
+                    ),
+                ),
+                Control::Choice { .. } | Control::Number { .. } => (
+                    Span::styled(st.label.clone(), text),
+                    Span::styled(format!("‹ {} ›", st.control.display()), text),
+                ),
+                Control::Action(a) => (
+                    Span::styled(st.label.clone(), text),
+                    Span::styled(format!("Enter or N: {}", a.to_lowercase()), accent),
+                ),
+                Control::Text { value, .. } => (
+                    Span::styled(st.label.clone(), text),
+                    Span::styled(
+                        st.control.display(),
+                        if value.is_empty() { muted } else { text },
+                    ),
+                ),
+                Control::Info(v) => (
+                    Span::styled(st.label.clone(), muted),
+                    Span::styled(v.clone(), muted),
+                ),
+            };
+            vec![
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(label),
+                Cell::from(value),
+                Cell::from(""),
+                Cell::from(""),
+            ]
+        }
     };
     Row::new(cells)
 }
@@ -1027,6 +1094,25 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         right.push(Span::styled(tag, Style::default().fg(t.copper)));
         right.push(Span::raw(" "));
     }
+    match (&s.exclusive, &s.bit_perfect_refused) {
+        (Some(e), _) => {
+            let (label, fg) = if e.exact {
+                (" BIT-PERFECT ", t.verdigris)
+            } else {
+                (" EXCLUSIVE ", t.muted)
+            };
+            right.push(Span::styled(label, Style::default().fg(fg).bg(t.raised)));
+            right.push(Span::raw(" "));
+        }
+        (None, Some(_)) => {
+            right.push(Span::styled(
+                " NOT BIT-PERFECT ",
+                Style::default().fg(t.copper).bg(t.raised),
+            ));
+            right.push(Span::raw(" "));
+        }
+        _ => {}
+    }
     if let Some(info) = &s.track {
         let badge = info.badge();
         if !badge.is_empty() {
@@ -1069,6 +1155,9 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let vol_label = if s.muted {
         " mute".to_string()
+    } else if s.volume_locked {
+        // Bit-perfect on a DAC with no volume control.
+        " 100% fixed".to_string()
     } else {
         format!(" {:>3}%", (s.volume * 100.0).round() as u32)
     };
@@ -1254,6 +1343,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ("Queue", "d remove, J/K move, S save as playlist, C clear"),
         ("Playlists", "N new, R rename, D delete; inside: d, J/K"),
         ("Radio", "N new, E edit, T test, D delete, J/K move"),
+        (
+            "Settings",
+            "Enter change, h/l step, N add folder, d remove folder",
+        ),
         (
             "Podcasts",
             "N subscribe, D unsubscribe; episodes: w download, x delete, P played",

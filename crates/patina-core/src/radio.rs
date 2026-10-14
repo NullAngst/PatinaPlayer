@@ -268,6 +268,9 @@ pub struct StationCheck {
     pub kbps: Option<u32>,
     /// icy-name, if the stream sent one.
     pub name: Option<String>,
+    /// What the audio actually decodes to, after a second of it.
+    pub rate: Option<u32>,
+    pub channels: Option<u16>,
     pub error: Option<String>,
 }
 
@@ -280,11 +283,45 @@ impl StationCheck {
             (Some(c), None) => s.push_str(&format!(", {c}")),
             _ => {}
         }
+        if let (Some(r), Some(ch)) = (self.rate, self.channels) {
+            let khz = if r % 1000 == 0 {
+                format!("{}", r / 1000)
+            } else {
+                format!("{:.1}", r as f64 / 1000.0)
+            };
+            let layout = match ch {
+                1 => "mono".to_string(),
+                2 => "stereo".to_string(),
+                n => format!("{n} ch"),
+            };
+            s.push_str(&format!(", {khz} kHz {layout}"));
+        }
         if let Some(e) = &self.error {
             s.push_str(&format!(", {e}"));
         }
         s
     }
+}
+
+/// Decode `want` of audio from a stream, following any format change, or
+/// say why not. Gives up after 15 seconds of trying.
+fn listen(src: &mut Source, want: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut got = 0f64;
+    let mut buf = Vec::new();
+    while got < want.as_secs_f64() {
+        if std::time::Instant::now() > deadline {
+            return Err("too slow to deliver audio".into());
+        }
+        buf.clear();
+        match src.decode_into(&mut buf) {
+            Ok(0) => return Err("the stream ended".into()),
+            Ok(n) => got += n as f64 / src.format().rate.max(1) as f64,
+            Err(e) => return Err(e.to_string()),
+        }
+        src.take_format_change();
+    }
+    Ok(())
 }
 
 /// Resolve and try to open a station, the way playing it would.
@@ -299,10 +336,19 @@ pub fn check(url: &str) -> Result<StationCheck, RadioError> {
                 ..Default::default()
             },
         ) {
-            Ok(src) => {
+            Ok(mut src) => {
+                // Opening only proves the server answers. Play a second of
+                // it, the way the player would, to prove it decodes.
+                if let Err(e) = listen(&mut src, Duration::from_secs(1)) {
+                    last_err = Some(format!("answers but doesn't play: {e}"));
+                    continue;
+                }
+                let fmt = src.format();
                 let info = src.info();
                 return Ok(StationCheck {
                     working: Some(i),
+                    rate: Some(fmt.rate),
+                    channels: Some(fmt.channels),
                     codec: Some(info.codec.clone()).filter(|c| !c.is_empty()),
                     kbps: info.kbps,
                     name: info.album.clone(),
@@ -319,6 +365,8 @@ pub fn check(url: &str) -> Result<StationCheck, RadioError> {
         codec: None,
         kbps: None,
         name: None,
+        rate: None,
+        channels: None,
         error: Some(match last_err {
             Some(e) => format!("no stream answered ({e})"),
             None => "no stream answered".into(),
@@ -384,8 +432,13 @@ mod tests {
             codec: Some("AAC".into()),
             kbps: Some(128),
             name: None,
+            rate: Some(48000),
+            channels: Some(2),
             error: None,
         };
-        assert_eq!(c.summary(), "Playlist, 3 mirrors, AAC 128 kbps");
+        assert_eq!(
+            c.summary(),
+            "Playlist, 3 mirrors, AAC 128 kbps, 48 kHz stereo"
+        );
     }
 }

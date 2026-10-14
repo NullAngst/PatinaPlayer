@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 
 use crate::audio::feeder::{self, FeedCmd, FeedMsg, Segment};
-use crate::audio::output::{self, Output, OutputConfig};
+use crate::audio::output::exclusive::{self, ExclusiveInfo, ExclusiveOutput};
+use crate::audio::output::{self, Backend, BitPerfect, Output, OutputConfig};
 use crate::audio::render::Renderer;
 use crate::audio::{Shared, SharedRef, gain_to_db, volume_to_gain};
 use crate::queue::{EntryId, Queue, Repeat};
@@ -81,6 +82,18 @@ pub enum Command {
     CycleRepeat,
     /// Fade length for pause, resume, seek and stop. 0 turns fades off.
     SetFadeMs(u32),
+    /// Bit-perfect mode and device. A local file playing now switches over
+    /// at once, from where it is.
+    SetBitPerfect {
+        mode: BitPerfect,
+        device: Option<String>,
+    },
+    /// Output backend, device and buffer. The output reopens at once.
+    SetOutput {
+        backend: Backend,
+        device: Option<String>,
+        buffer_ms: u32,
+    },
     /// Podcast speed (0.5 to 3, pitch kept) and silence trimming. Takes
     /// effect at once on a playing episode.
     SetPodcastPlayback {
@@ -132,6 +145,13 @@ pub struct Snapshot {
     /// Podcast playback speed and trimming, as currently set.
     pub podcast_tempo: f64,
     pub podcast_trim: bool,
+    pub bit_perfect: BitPerfect,
+    /// Set while the exclusive output is playing.
+    pub exclusive: Option<ExclusiveInfo>,
+    /// Why bit-perfect was wanted for this track but isn't happening.
+    pub bit_perfect_refused: Option<String>,
+    /// Volume can't move: exclusive output on a DAC with no volume control.
+    pub volume_locked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +285,8 @@ struct Core {
     resume_on_segment: bool,
     last_error: Option<String>,
     probe_tx: Sender<Vec<(u64, PathBuf)>>,
+    /// The reason the last exclusive open failed, while that track plays.
+    exclusive_refused: Option<String>,
 }
 
 impl Core {
@@ -285,6 +307,9 @@ impl Core {
         shared
             .podcast_trim
             .store(cfg.podcast_trim, Ordering::Relaxed);
+        shared
+            .bit_perfect
+            .store(cfg.output.bit_perfect.to_u8(), Ordering::Relaxed);
         let (feed_tx, feed_cmd_rx) = unbounded();
         let (feed_msg_tx, feed_rx) = unbounded();
         feeder::spawn(shared.clone(), queue.clone(), feed_cmd_rx, feed_msg_tx);
@@ -319,6 +344,7 @@ impl Core {
             resume_on_segment: false,
             last_error: None,
             probe_tx,
+            exclusive_refused: None,
         }
     }
 
@@ -355,12 +381,32 @@ impl Core {
     }
 
     fn apply_volume(&self) {
-        let g = if self.muted {
-            0.0
-        } else {
-            volume_to_gain(self.volume)
-        };
-        self.shared.volume.store(g);
+        let slider = if self.muted { 0.0 } else { self.volume };
+        if let Some(o) = self.output.as_ref().filter(|o| o.exclusive().is_some()) {
+            // Bit-perfect: the samples go out at unity. The DAC's own mixer
+            // does the volume if it has one; otherwise volume stays at
+            // 100% (mute still mutes).
+            o.set_hw_volume(slider);
+            self.shared.volume.store(if self.muted { 0.0 } else { 1.0 });
+            return;
+        }
+        self.shared.volume.store(volume_to_gain(slider));
+    }
+
+    /// Start the current entry over from where it is, so a changed output
+    /// setting takes effect. Paused stays paused.
+    fn restart_here(&mut self) {
+        let Some(cur) = self.current else { return };
+        if self.state == PlayState::Stopped || self.current_is_live() {
+            return;
+        }
+        let pos = self.position();
+        let paused = self.state == PlayState::Paused;
+        self.start_entry(cur, pos);
+        if paused {
+            self.resume_on_segment = false;
+            self.set_state(PlayState::Paused);
+        }
     }
 
     /// Ramp the output down and wait for it to go quiet, so the next
@@ -660,6 +706,27 @@ impl Core {
                 self.muted = false;
                 self.apply_volume();
             }
+            Command::SetBitPerfect { mode, device } => {
+                self.cfg.output.bit_perfect = mode;
+                self.cfg.output.bit_perfect_device = device;
+                self.shared
+                    .bit_perfect
+                    .store(mode.to_u8(), Ordering::Relaxed);
+                self.exclusive_refused = None;
+                // Close whatever's open, so the next open goes the new way.
+                self.restart_here();
+            }
+            Command::SetOutput {
+                backend,
+                device,
+                buffer_ms,
+            } => {
+                self.cfg.output.backend = backend;
+                self.cfg.output.device = device;
+                self.cfg.output.buffer_ms = buffer_ms.clamp(50, 1000);
+                self.send_feed(FeedCmd::NewRing);
+                self.restart_here();
+            }
             Command::ToggleMute => {
                 self.muted = !self.muted;
                 self.apply_volume();
@@ -683,9 +750,55 @@ impl Core {
 
     fn feed_msg(&mut self, msg: FeedMsg) {
         match msg {
-            FeedMsg::Open { format, consumer } => {
+            FeedMsg::Open {
+                format,
+                consumer,
+                exclusive,
+            } => {
                 self.output = None;
-                let renderer = Renderer::new(consumer, self.shared.clone(), format);
+                if exclusive.is_some() {
+                    // Unity from the very first sample. A renderer ramps
+                    // from the volume it was made with.
+                    self.shared.volume.store(if self.muted { 0.0 } else { 1.0 });
+                }
+                let mut renderer = Renderer::new(consumer, self.shared.clone(), format);
+                if let Some(depth) = exclusive {
+                    match ExclusiveOutput::try_start(
+                        &self.cfg.output,
+                        depth,
+                        renderer,
+                        self.shared.clone(),
+                    ) {
+                        Ok(o) => {
+                            log::info!(
+                                "bit-perfect output: {} for {}",
+                                o.describe(),
+                                exclusive::describe(depth, format.rate)
+                            );
+                            self.exclusive_refused = None;
+                            self.output = Some(Box::new(o));
+                            self.apply_volume();
+                            return;
+                        }
+                        Err(refused) => {
+                            let (reason, r) = *refused;
+                            // Never quietly: say why, then play through the
+                            // shared output so the music doesn't stop.
+                            let msg = format!(
+                                "Bit-perfect unavailable for {}: {reason}",
+                                exclusive::describe(depth, format.rate)
+                            );
+                            if self.exclusive_refused.as_deref() != Some(msg.as_str()) {
+                                self.emit(Event::Error(msg.clone()));
+                            }
+                            self.exclusive_refused = Some(msg);
+                            renderer = r;
+                            let slider = if self.muted { 0.0 } else { self.volume };
+                            self.shared.volume.store(volume_to_gain(slider));
+                            renderer.sync_volume();
+                        }
+                    }
+                }
                 let res = match &self.factory {
                     Some(f) => f(&self.cfg.output, renderer),
                     None => output::open(&self.cfg.output, renderer).map_err(|e| e.to_string()),
@@ -699,6 +812,7 @@ impl Core {
                             format.channels
                         );
                         self.output = Some(o);
+                        self.apply_volume();
                     }
                     Err(e) => {
                         self.report(format!("can't open output: {e}"));
@@ -823,9 +937,11 @@ impl Core {
         if self.shared.drained.swap(false, Ordering::AcqRel) {
             self.flush_progress(true);
             self.shared.playing.store(false, Ordering::Relaxed);
+            // Close the output before clearing end-of-queue: the exclusive
+            // output plays out what's left in the device when it sees it.
+            self.output = None;
             self.shared.end_of_queue.store(false, Ordering::Release);
             self.segments.clear();
-            self.output = None;
             self.set_state(PlayState::Stopped);
             self.emit(Event::Finished);
         }
@@ -897,6 +1013,20 @@ impl Core {
         snap.reconnect = self.reconnect.clone();
         snap.podcast_tempo = self.shared.podcast_tempo.load();
         snap.podcast_trim = self.shared.podcast_trim.load(Ordering::Relaxed);
+        snap.bit_perfect = self.cfg.output.bit_perfect;
+        snap.exclusive = self.output.as_ref().and_then(|o| o.exclusive());
+        snap.volume_locked = snap.exclusive.as_ref().is_some_and(|e| !e.hw_volume);
+        snap.bit_perfect_refused = if snap.exclusive.is_none()
+            && self.cfg.output.bit_perfect != BitPerfect::Off
+            && snap
+                .track
+                .as_ref()
+                .is_some_and(|t| t.kind == crate::track::MediaKind::File)
+        {
+            self.exclusive_refused.clone()
+        } else {
+            None
+        };
     }
 }
 

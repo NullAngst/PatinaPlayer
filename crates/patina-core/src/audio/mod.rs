@@ -10,7 +10,7 @@ pub mod output;
 pub mod render;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 /// Seconds of decoded audio the ring holds ahead of the output.
 /// Big enough that opening the next local file never starves the output.
@@ -25,6 +25,16 @@ pub struct StreamFormat {
     /// FFmpeg channel mask (AV_CH_* bits) in native order. Channels in the
     /// ring appear in increasing bit order.
     pub mask: u64,
+}
+
+/// Sample depth of a source, as far as the bit-perfect output cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Depth {
+    /// Integer PCM of this many bits (16, 24, 32): FLAC, ALAC, WAV and the
+    /// like. Bit-perfect means these exact bits reach the DAC.
+    Int(u8),
+    /// Floating point out of the decoder: every lossy codec, float WAV, DSD.
+    Float,
 }
 
 impl StreamFormat {
@@ -82,6 +92,9 @@ pub struct Shared {
     /// the decoder whenever it opens a podcast episode.
     pub podcast_tempo: AtomicF64,
     pub podcast_trim: AtomicBool,
+    /// Bit-perfect mode, as [`output::BitPerfect`]. Read by the decoder
+    /// when it opens a track, to pick the output kind.
+    pub bit_perfect: AtomicU8,
 }
 
 impl Default for Shared {
@@ -100,6 +113,7 @@ impl Default for Shared {
             abort_io: Arc::new(AtomicBool::new(false)),
             podcast_tempo: AtomicF64::new(1.0),
             podcast_trim: AtomicBool::new(false),
+            bit_perfect: AtomicU8::new(0),
         }
     }
 }

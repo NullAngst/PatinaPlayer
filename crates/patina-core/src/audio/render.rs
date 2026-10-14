@@ -26,6 +26,7 @@ pub struct Renderer {
     /// Frames the last render call actually took from the ring.
     last_from_ring: usize,
     last_len: usize,
+    last_flush: bool,
 }
 
 /// Largest block a backend asks for in one go. PipeWire quanta top out at
@@ -44,7 +45,14 @@ impl Renderer {
             volume,
             last_from_ring: 0,
             last_len: 0,
+            last_flush: false,
         }
+    }
+
+    /// Take the current volume as-is, with no ramp from the old one. For a
+    /// renderer that hasn't played anything yet.
+    pub fn sync_volume(&mut self) {
+        self.volume = self.shared.volume.load();
     }
 
     /// The block the last [`render`](Self::render) call produced.
@@ -64,13 +72,45 @@ impl Renderer {
 
     /// Render `frames` frames. Returns interleaved f64 in [-1, 1].
     /// Asking for more than [`MAX_BLOCK_FRAMES`] gets you that many at most;
-    /// call again for the rest.
+    /// call again for the rest. When the ring runs short the block is
+    /// padded with silence, which is what a shared device wants.
     pub fn render(&mut self, frames: usize) -> &[f64] {
-        let frames = frames.min(MAX_BLOCK_FRAMES);
+        let n = self.render_inner(frames, false);
+        &self.buf[..n]
+    }
+
+    /// Like [`render`](Self::render), but returns only what came out of the
+    /// ring: nothing while paused, flushed or starved, and never padding.
+    /// The exclusive output uses this, since every sample it writes has to
+    /// be the music.
+    pub fn render_exact(&mut self, frames: usize) -> &[f64] {
+        let n = self.render_inner(frames, true);
+        &self.buf[..n]
+    }
+
+    /// True if the last render threw the ring away for a seek or stop.
+    pub fn last_was_flush(&self) -> bool {
+        self.last_flush
+    }
+
+    fn render_inner(&mut self, frames: usize, exact: bool) -> usize {
         let ch = self.format.channels as usize;
-        let n = frames * ch;
+        let mut frames = frames.min(MAX_BLOCK_FRAMES);
         let shared = &*self.shared;
         self.last_from_ring = 0;
+        self.last_flush = false;
+        if exact {
+            let want_sound = shared.playing.load(Ordering::Relaxed);
+            let flushing = shared.flush_req.load(Ordering::Acquire)
+                != shared.flush_ack.load(Ordering::Relaxed);
+            if !flushing && (want_sound || self.fade > 0.0) {
+                frames = frames.min(self.ring.slots() / ch);
+                if frames == 0 && shared.end_of_queue.load(Ordering::Acquire) {
+                    shared.drained.store(true, Ordering::Release);
+                }
+            }
+        }
+        let n = frames * ch;
         self.last_len = n;
 
         // A pending flush beats everything else: throw the ring away and
@@ -87,17 +127,29 @@ impl Renderer {
             shared.flush_ack.store(req, Ordering::Release);
             self.fade = 0.0;
             shared.silent.store(true, Ordering::Relaxed);
+            self.last_flush = true;
+            if exact {
+                self.last_len = 0;
+                return 0;
+            }
             self.buf[..n].fill(0.0);
-            return &self.buf[..n];
+            return n;
         }
 
         let want_sound = shared.playing.load(Ordering::Relaxed);
         if !want_sound && self.fade <= 0.0 {
             // Paused and fully faded: leave the ring alone so playback
-            // resumes at the exact sample it stopped on.
+            // resumes at the exact sample it stopped on. Volume jumps
+            // straight to its target while silent, so sound starts at the
+            // right level instead of ramping from wherever it was.
+            self.volume = shared.volume.load();
             shared.silent.store(true, Ordering::Relaxed);
+            if exact {
+                self.last_len = 0;
+                return 0;
+            }
             self.buf[..n].fill(0.0);
-            return &self.buf[..n];
+            return n;
         }
 
         // Pull whole frames only.
@@ -165,7 +217,7 @@ impl Renderer {
         }
         // 10. Dither and convert happens in the backend for its sample format.
 
-        &self.buf[..n]
+        n
     }
 }
 
@@ -222,5 +274,23 @@ mod tests {
         assert_eq!(shared.flush_ack.load(Ordering::Acquire), 1);
         assert_eq!(shared.consumed_frames.load(Ordering::Relaxed), 100);
         assert_eq!(p.slots(), 4096);
+    }
+
+    #[test]
+    fn exact_render_never_pads() {
+        let (mut p, mut r, shared) = setup();
+        shared.fade_ms.store(0, Ordering::Relaxed);
+        // Paused: nothing at all.
+        for _ in 0..20 {
+            p.push(0.25).unwrap();
+        }
+        assert!(r.render_exact(50).is_empty());
+        // Playing with 10 frames in the ring: exactly those 10, untouched.
+        shared.playing.store(true, Ordering::Relaxed);
+        let out = r.render_exact(50).to_vec();
+        assert_eq!(out.len(), 20);
+        assert!(out.iter().all(|&s| s == 0.25), "{out:?}");
+        // Starved: nothing, and no silence invented.
+        assert!(r.render_exact(50).is_empty());
     }
 }
