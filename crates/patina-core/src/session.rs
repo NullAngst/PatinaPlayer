@@ -191,12 +191,13 @@ impl Session {
             playing_files,
         })
     }
+}
 
-    /// Stop playback with a fade instead of cutting the sound.
-    pub fn shutdown(&self) {
-        self.browser.player.send(Command::Quit);
-        std::thread::sleep(Duration::from_millis(self.fade_ms.min(300) as u64 + 50));
-    }
+/// Stop the player, giving it time to fade out instead of cutting the
+/// sound. Both frontends call this on the way out.
+pub fn shutdown(player: &Player, fade_ms: u32) {
+    player.send(Command::Quit);
+    std::thread::sleep(Duration::from_millis(u64::from(fade_ms.min(300)) + 50));
 }
 
 /// Resolve a path from the command line, with `~` expanded.

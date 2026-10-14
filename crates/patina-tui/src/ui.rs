@@ -132,7 +132,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(pad(s.label(), area.width as usize - 3), style),
                 ])
             }
-            SideEntry::Source { path, tracks } => {
+            SideEntry::Source {
+                path,
+                tracks,
+                present,
+            } => {
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -141,7 +145,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     .as_ref()
                     .and_then(|s| s.scanning.as_ref())
                     .filter(|sc| sc.root == *path && sc.total > 0);
-                let (dot, dot_color) = if !path.is_dir() {
+                let (dot, dot_color) = if !present {
                     ("●", t.copper)
                 } else if scanning.is_some() {
                     ("◌", t.verdigris)
@@ -173,6 +177,20 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 // ----- Library levels -----
+
+/// What a row's columns show, which depends on the list it's in.
+#[derive(Clone, Copy, PartialEq)]
+enum RowCtx {
+    Plain,
+    /// Inside an album: track numbers instead of list positions.
+    Album,
+    /// A listening-stats list: plays in the last column.
+    Ranked,
+}
+
+fn plays(n: i64) -> String {
+    format!("{n} play{}", s(n))
+}
 
 /// What columns a level uses, from the kind of rows in it.
 #[derive(PartialEq)]
@@ -215,8 +233,8 @@ fn hints(app: &App) -> &'static str {
     let src = app.b.level().map(|l| &l.source);
     match (app.b.section, src) {
         (_, Some(Source::Search(_))) => "Enter open · a add · A play next · Esc back",
-        (Section::Albums, Some(Source::Section(_))) => "o sort · a add · p playlist",
-        (Section::Songs, _) => "o sort · O reverse · a add · p playlist",
+        (Section::Albums, Some(Source::Section(_))) => "o sort · v play all · V shuffle · a add",
+        (Section::Songs, _) => "o sort · O reverse · v play all · V shuffle · a add",
         (Section::Artists, Some(Source::Section(_))) => "t album/track artist · a add",
         (_, Some(Source::Genre { .. })) => "t albums/songs · a add · Esc back",
         (_, Some(Source::Playlist { .. })) => "d remove · J/K move · Esc back",
@@ -228,7 +246,10 @@ fn hints(app: &App) -> &'static str {
         (Section::Podcasts, _) => "Enter open · N subscribe · D unsubscribe · F5 refresh",
         (Section::Downloads, _) => "Enter play · x delete file · P played",
         (Section::Settings, _) => "",
-        _ => "Enter open · a add · A play next · p playlist",
+        (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
+            "Enter open · v play all · V shuffle · a add"
+        }
+        _ => "Enter open · v play all · V shuffle · a add · p playlist",
     }
 }
 
@@ -313,6 +334,11 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
             Source::Section(Section::Podcasts) => {
                 "No podcasts yet. Press N and paste a feed URL.".to_string()
             }
+            Source::Section(Section::MostListened | Section::TopAlbums | Section::TopArtists) => {
+                "Nothing played yet. A song counts once you've heard half of it, \
+                 or four minutes of it, whichever comes first."
+                    .to_string()
+            }
             Source::Podcast { .. } => {
                 if app.b.pod.as_ref().is_some_and(|p| p.status().refreshing) {
                     "Fetching the feed…".to_string()
@@ -340,9 +366,17 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let kind = level_kind(&level.items);
+    let ctx = match &level.source {
+        Source::Album { .. } => RowCtx::Album,
+        Source::Section(s) if Section::STATS.contains(s) => RowCtx::Ranked,
+        _ => RowCtx::Plain,
+    };
+    let ranked = ctx == RowCtx::Ranked;
     let header = match kind {
         Kind::Tracks => vec!["", "#", "Title", "Artist", "Album", "Time"],
+        Kind::Albums if ranked => vec!["", "", "Album", "Artist", "Year", "Plays"],
         Kind::Albums => vec!["", "", "Album", "Artist", "Year", "Length"],
+        Kind::Names if ranked => vec!["", "", "Name", "", "", "Plays"],
         Kind::Names => vec!["", "", "Name", "", "", ""],
         Kind::Info => vec!["", "", "", "", "", ""],
         Kind::Stations => vec!["", "", "Station", "Last test", "", ""],
@@ -360,7 +394,6 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
     offset = offset.min(n.saturating_sub(rows_h));
 
     let playing = app.snap.track.as_ref().map(|t| t.path.clone());
-    let in_album = matches!(level.source, Source::Album { .. });
     let focused = app.focus == Focus::Content;
     let rows: Vec<Row> = level
         .items
@@ -369,7 +402,7 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         .skip(offset)
         .take(rows_h)
         .map(|(i, item)| {
-            let mut row = item_row(app, item, i, in_album, playing.as_deref());
+            let mut row = item_row(app, item, i, ctx, playing.as_deref());
             if i == sel && item.selectable() {
                 row = row.style(Style::default().bg(if focused { t.raised } else { t.surface }));
             }
@@ -446,7 +479,7 @@ fn item_row<'a>(
     app: &App,
     item: &'a Item,
     i: usize,
-    in_album: bool,
+    ctx: RowCtx,
     playing: Option<&std::path::Path>,
 ) -> Row<'a> {
     let t = &app.theme;
@@ -466,7 +499,7 @@ fn item_row<'a>(
             } else {
                 (text, muted)
             };
-            let num = if in_album {
+            let num = if ctx == RowCtx::Album {
                 tr.track_no.map(|n| n.to_string()).unwrap_or_default()
             } else {
                 (i + 1).to_string()
@@ -481,7 +514,11 @@ fn item_row<'a>(
                 Cell::from(Span::styled(tr.artist.clone().unwrap_or_default(), ss)),
                 Cell::from(Span::styled(tr.album.clone().unwrap_or_default(), ss)),
                 Cell::from(Span::styled(
-                    tr.duration.map(fmt_duration).unwrap_or_default(),
+                    if ctx == RowCtx::Ranked {
+                        plays(tr.play_count)
+                    } else {
+                        tr.duration.map(fmt_duration).unwrap_or_default()
+                    },
                     muted,
                 )),
             ]
@@ -515,21 +552,31 @@ fn item_row<'a>(
                 muted,
             )),
             Cell::from(Span::styled(
-                format!("{} · {}", a.track_count, fmt_length(a.duration)),
+                if ctx == RowCtx::Ranked {
+                    plays(a.play_count)
+                } else {
+                    format!("{} · {}", a.track_count, fmt_length(a.duration))
+                },
                 muted,
             )),
         ],
-        Item::Artist {
-            name,
-            albums,
-            tracks,
-        } => vec![
+        Item::Artist(a) => vec![
             Cell::from(" "),
             Cell::from(""),
-            Cell::from(Span::styled(name.clone(), text)),
-            Cell::from(Span::styled(format!("{albums} album{}", s(*albums)), muted)),
+            Cell::from(Span::styled(a.name.clone(), text)),
+            Cell::from(Span::styled(
+                format!("{} album{}", a.albums, s(a.albums)),
+                muted,
+            )),
             Cell::from(""),
-            Cell::from(Span::styled(format!("{tracks} track{}", s(*tracks)), muted)),
+            Cell::from(Span::styled(
+                if ctx == RowCtx::Ranked {
+                    plays(a.plays)
+                } else {
+                    format!("{} track{}", a.tracks, s(a.tracks))
+                },
+                muted,
+            )),
         ],
         Item::Dir { name, .. } => vec![
             Cell::from(Span::styled("▸", dim)),
@@ -1186,12 +1233,13 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ("+ / -   m", "Volume, mute"),
         ("s   r", "Shuffle, cycle repeat"),
         (
-            "1 to 8",
-            "Folders, Artists, Albums, Songs, Genres, Playlists, Queue, Downloads",
+            "1 to 9, 0",
+            "Folders, Artists, Albums, Songs, Genres, Playlists, Radio, Podcasts, Queue, Downloads",
         ),
         ("Tab", "Switch between sidebar and list"),
         ("/", "Search the library"),
         ("Enter", "Open, or play from here"),
+        ("v / V", "Play the whole view in order / shuffled"),
         ("Esc / Backspace", "Back up a level"),
         ("a / A", "Add to queue / play next"),
         ("p", "Add to a playlist"),
@@ -1200,11 +1248,17 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "t",
             "Artists: album or track artist. Genre: albums or songs",
         ),
+        ("[ ]   z", "Podcast speed, silence trimming"),
         ("q", "Queue panel"),
         (".", "Go to the playing track in Queue"),
         ("Queue", "d remove, J/K move, S save as playlist, C clear"),
         ("Playlists", "N new, R rename, D delete; inside: d, J/K"),
-        ("F5", "Check folders for changes"),
+        ("Radio", "N new, E edit, T test, D delete, J/K move"),
+        (
+            "Podcasts",
+            "N subscribe, D unsubscribe; episodes: w download, x delete, P played",
+        ),
+        ("F5", "Check folders and podcast feeds for changes"),
         (
             "Mouse",
             "Click, double-click to play, right-click back, drag bars",

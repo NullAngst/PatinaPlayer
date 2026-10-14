@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use crate::config::Station;
 use crate::library::podcasts::{EpisodeRow, PodcastRow};
 use crate::library::{
-    AlbumRow, AlbumSort, ArtistMode, DirEntry, GenreRow, Library, PlaylistRow, SongSort, TrackRow,
+    AlbumRow, AlbumSort, ArtistMode, ArtistRow, DirEntry, GenreRow, Library, PlaylistRow, SongSort,
+    TrackRow,
 };
 use crate::track::{MediaKind, TrackInfo};
 
@@ -27,6 +28,10 @@ pub enum Section {
     Queue,
     Downloads,
     Settings,
+    /// Your top five songs, albums and artists.
+    MostListened,
+    TopAlbums,
+    TopArtists,
 }
 
 impl Section {
@@ -54,6 +59,13 @@ impl Section {
         })
     }
 
+    /// The listening stats, which sit together in the sidebar.
+    pub const STATS: [Section; 3] = [
+        Section::MostListened,
+        Section::TopAlbums,
+        Section::TopArtists,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Section::Folders => "Folders",
@@ -67,6 +79,9 @@ impl Section {
             Section::Queue => "Queue",
             Section::Downloads => "Downloads",
             Section::Settings => "Settings",
+            Section::MostListened => "Most listened",
+            Section::TopAlbums => "Top albums",
+            Section::TopArtists => "Top artists",
         }
     }
 }
@@ -96,11 +111,7 @@ pub enum Item {
         path: PathBuf,
         tracks: i64,
     },
-    Artist {
-        name: String,
-        albums: i64,
-        tracks: i64,
-    },
+    Artist(ArtistRow),
     Album(AlbumRow),
     Track(TrackRow),
     /// A playlist item whose file isn't in the library any more.
@@ -135,7 +146,7 @@ impl Item {
     pub fn key(&self) -> String {
         match self {
             Item::Dir { path, .. } | Item::Root { path, .. } => format!("d:{}", path.display()),
-            Item::Artist { name, .. } => format!("a:{name}"),
+            Item::Artist(a) => format!("a:{}", a.name),
             Item::Album(a) => format!("al:{}", a.key),
             Item::Track(t) => format!("t:{}", t.path.display()),
             Item::Missing { uri } => format!("m:{}", String::from_utf8_lossy(uri)),
@@ -244,11 +255,13 @@ pub fn fmt_length(d: Duration) -> String {
     }
 }
 
+const NO_FOLDERS: &str = "No library folders yet. Add one with --add-folder.";
+
 /// Build the rows for a source. Queue rows come from the player, not the
 /// library, so the Queue section returns nothing here.
 pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> {
     let (lib, prefs, settings) = (ctx.lib, ctx.prefs, ctx.settings);
-    let none = || Err("No library folders yet. Add one with --add-folder.".to_string());
+    let none = || Err(NO_FOLDERS.to_string());
     let err = |e: crate::library::LibError| e.to_string();
     match source {
         Source::Section(Section::Radio) => Ok((
@@ -310,12 +323,58 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             Ok(("Downloads".into(), items))
         }
         Source::Section(Section::Queue) => Ok(("Queue".into(), Vec::new())),
-        _ if lib.is_none() => none(),
+        _ => {
+            let Some(lib) = lib else { return none() };
+            build_library(lib, prefs, source)
+        }
+    }
+}
+
+/// Rows for the views that come straight from the library index.
+fn build_library(
+    lib: &Library,
+    prefs: &ViewPrefs,
+    source: &Source,
+) -> Result<(String, Vec<Item>), String> {
+    let err = |e: crate::library::LibError| e.to_string();
+    match source {
+        Source::Section(Section::MostListened) => {
+            let mut items = Vec::new();
+            let songs = lib.top_tracks(5).map_err(err)?;
+            if !songs.is_empty() {
+                items.push(Item::Header("Songs"));
+                items.extend(songs.into_iter().map(Item::Track));
+            }
+            let albums = lib.top_albums(5).map_err(err)?;
+            if !albums.is_empty() {
+                items.push(Item::Header("Albums"));
+                items.extend(albums.into_iter().map(Item::Album));
+            }
+            let artists = lib.top_artists(prefs.artist_mode, 5).map_err(err)?;
+            if !artists.is_empty() {
+                items.push(Item::Header("Artists"));
+                items.extend(artists.into_iter().map(Item::Artist));
+            }
+            Ok(("Most listened".into(), items))
+        }
+        Source::Section(Section::TopAlbums) => {
+            let rows = lib.top_albums(10).map_err(err)?;
+            Ok((
+                "Top albums".into(),
+                rows.into_iter().map(Item::Album).collect(),
+            ))
+        }
+        Source::Section(Section::TopArtists) => {
+            let rows = lib.top_artists(prefs.artist_mode, 10).map_err(err)?;
+            Ok((
+                "Top artists".into(),
+                rows.into_iter().map(Item::Artist).collect(),
+            ))
+        }
         Source::Section(Section::Folders) => {
-            let lib = lib.unwrap();
             let roots = lib.sources().map_err(err)?;
             if roots.is_empty() {
-                return none();
+                return Err(NO_FOLDERS.into());
             }
             Ok((
                 "Folders".into(),
@@ -329,7 +388,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             ))
         }
         Source::Folder(dir) => {
-            let entries = lib.unwrap().folder(dir).map_err(err)?;
+            let entries = lib.folder(dir).map_err(err)?;
             let title = dir
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -346,36 +405,25 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             ))
         }
         Source::Section(Section::Artists) => {
-            let rows = lib.unwrap().artists(prefs.artist_mode).map_err(err)?;
+            let rows = lib.artists(prefs.artist_mode).map_err(err)?;
             let title = match prefs.artist_mode {
                 ArtistMode::AlbumArtist => "Artists (album artist)",
                 ArtistMode::TrackArtist => "Artists (track artist)",
             };
-            Ok((
-                title.into(),
-                rows.into_iter()
-                    .map(|a| Item::Artist {
-                        name: a.name,
-                        albums: a.albums,
-                        tracks: a.tracks,
-                    })
-                    .collect(),
-            ))
+            Ok((title.into(), rows.into_iter().map(Item::Artist).collect()))
         }
         Source::ArtistAlbums(name) => {
-            let lib = lib.unwrap();
             let albums = lib.artist_albums(name, prefs.artist_mode).map_err(err)?;
             Ok((name.clone(), albums.into_iter().map(Item::Album).collect()))
         }
         Source::Section(Section::Albums) => {
-            let rows = lib.unwrap().albums(prefs.album_sort).map_err(err)?;
+            let rows = lib.albums(prefs.album_sort).map_err(err)?;
             Ok((
                 format!("Albums by {}", prefs.album_sort.label()),
                 rows.into_iter().map(Item::Album).collect(),
             ))
         }
         Source::Album { key } => {
-            let lib = lib.unwrap();
             let title = lib
                 .album(key)
                 .map_err(err)?
@@ -385,10 +433,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             Ok((title, tracks.into_iter().map(Item::Track).collect()))
         }
         Source::Section(Section::Songs) => {
-            let rows = lib
-                .unwrap()
-                .songs(prefs.song_sort, prefs.song_desc)
-                .map_err(err)?;
+            let rows = lib.songs(prefs.song_sort, prefs.song_desc).map_err(err)?;
             let dir = if prefs.song_desc { ", reversed" } else { "" };
             Ok((
                 format!("Songs by {}{dir}", prefs.song_sort.label()),
@@ -396,11 +441,10 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             ))
         }
         Source::Section(Section::Genres) => {
-            let rows = lib.unwrap().genres().map_err(err)?;
+            let rows = lib.genres().map_err(err)?;
             Ok(("Genres".into(), rows.into_iter().map(Item::Genre).collect()))
         }
         Source::Genre { norm, name } => {
-            let lib = lib.unwrap();
             if prefs.genre_songs {
                 let t = lib.genre_tracks(norm).map_err(err)?;
                 Ok((
@@ -416,14 +460,14 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             }
         }
         Source::Section(Section::Playlists) => {
-            let rows = lib.unwrap().playlists().map_err(err)?;
+            let rows = lib.playlists().map_err(err)?;
             Ok((
                 "Playlists".into(),
                 rows.into_iter().map(Item::Playlist).collect(),
             ))
         }
         Source::Playlist { id, name } => {
-            let items = lib.unwrap().playlist_items(*id).map_err(err)?;
+            let items = lib.playlist_items(*id).map_err(err)?;
             Ok((
                 name.clone(),
                 items
@@ -436,15 +480,11 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             ))
         }
         Source::Search(q) => {
-            let res = lib.unwrap().search(q, 200).map_err(err)?;
+            let res = lib.search(q, 200).map_err(err)?;
             let mut items = Vec::new();
             if !res.artists.is_empty() {
                 items.push(Item::Header("Artists"));
-                items.extend(res.artists.into_iter().map(|a| Item::Artist {
-                    name: a.name,
-                    albums: a.albums,
-                    tracks: a.tracks,
-                }));
+                items.extend(res.artists.into_iter().map(Item::Artist));
             }
             if !res.albums.is_empty() {
                 items.push(Item::Header("Albums"));
@@ -456,6 +496,15 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             }
             Ok((format!("Search: {q}"), items))
         }
+        // Handled by build() before it gets here.
+        Source::Section(
+            Section::Radio
+            | Section::Podcasts
+            | Section::Settings
+            | Section::Downloads
+            | Section::Queue,
+        )
+        | Source::Podcast { .. } => Ok((String::new(), Vec::new())),
     }
 }
 
@@ -463,7 +512,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
 pub fn open(item: &Item) -> Option<Source> {
     match item {
         Item::Dir { path, .. } | Item::Root { path, .. } => Some(Source::Folder(path.clone())),
-        Item::Artist { name, .. } => Some(Source::ArtistAlbums(name.clone())),
+        Item::Artist(a) => Some(Source::ArtistAlbums(a.name.clone())),
         Item::Album(a) => Some(Source::Album { key: a.key.clone() }),
         Item::Genre(g) => Some(Source::Genre {
             norm: g.norm.clone(),
@@ -513,7 +562,7 @@ pub fn tracks_of(lib: &Library, item: &Item, prefs: &ViewPrefs) -> Vec<TrackRow>
     let r = match item {
         Item::Track(t) => Ok(vec![t.clone()]),
         Item::Dir { path, .. } | Item::Root { path, .. } => lib.tracks_under(path),
-        Item::Artist { name, .. } => lib.artist_tracks(name, prefs.artist_mode),
+        Item::Artist(a) => lib.artist_tracks(&a.name, prefs.artist_mode),
         Item::Album(a) => lib.album_tracks(&a.key),
         Item::Genre(g) => {
             if prefs.genre_songs {
@@ -539,6 +588,15 @@ pub fn tracks_of(lib: &Library, item: &Item, prefs: &ViewPrefs) -> Vec<TrackRow>
 mod tests {
     use super::*;
 
+    fn artist(name: &str) -> Item {
+        Item::Artist(ArtistRow {
+            name: name.into(),
+            albums: 1,
+            tracks: 1,
+            plays: 0,
+        })
+    }
+
     fn level(items: Vec<Item>) -> Level {
         Level {
             title: String::new(),
@@ -553,30 +611,15 @@ mod tests {
     fn selection_skips_headers() {
         let l = level(vec![
             Item::Header("Artists"),
-            Item::Artist {
-                name: "A".into(),
-                albums: 1,
-                tracks: 1,
-            },
+            artist("A"),
             Item::Header("Albums"),
-            Item::Artist {
-                name: "B".into(),
-                albums: 1,
-                tracks: 1,
-            },
+            artist("B"),
         ]);
         assert_eq!(l.snap(0, 1), 1);
         assert_eq!(l.snap(2, 1), 3);
         assert_eq!(l.snap(2, -1), 1);
         // Nothing selectable below the last header: fall back upward.
-        let l = level(vec![
-            Item::Artist {
-                name: "A".into(),
-                albums: 1,
-                tracks: 1,
-            },
-            Item::Header("Songs"),
-        ]);
+        let l = level(vec![artist("A"), Item::Header("Songs")]);
         assert_eq!(l.snap(1, 1), 0);
     }
 

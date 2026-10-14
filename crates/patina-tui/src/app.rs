@@ -197,6 +197,12 @@ impl App {
         }
     }
 
+    /// Play everything in the open view, in order or shuffled.
+    fn play_view(&mut self, shuffle: bool) {
+        self.b.play_view(shuffle);
+        self.follow = true;
+    }
+
     fn pick_playlist(&mut self) {
         if self.b.lib.is_none() {
             return self.b.error("Playlists need the library");
@@ -413,6 +419,8 @@ impl App {
             KeyCode::Backspace | KeyCode::Esc => {
                 self.b.pop();
             }
+            KeyCode::Char('v') if !queue => self.play_view(false),
+            KeyCode::Char('V') if !queue => self.play_view(true),
             KeyCode::Char('a') if !queue => self.b.add_selected_to_queue(false),
             KeyCode::Char('A') if !queue => self.b.add_selected_to_queue(true),
             KeyCode::Char('p') => self.pick_playlist(),

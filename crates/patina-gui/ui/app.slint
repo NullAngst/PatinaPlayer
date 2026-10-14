@@ -137,6 +137,9 @@ export global Icons {
     out property <string> plus: "M12 5v14M5 12h14";
     out property <string> close: "M6 6l12 12M18 6L6 18";
     out property <string> disc: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0";
+    out property <string> most-listened: "M5 20V11M12 20V4M19 20v-6";
+    out property <string> top-albums: "M8 4h8v5a4 4 0 0 1 -8 0zM8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1 -3 4M12 13v4M8 20h8M10 17h4";
+    out property <string> top-artists: "M12 3l2.7 5.6 6.1 .9 -4.4 4.3 1 6.1 -5.4 -2.9 -5.4 2.9 1 -6.1 -4.4 -4.3 6.1 -.9z";
     out property <string> output: "M6 3h12v18H6zM9 14a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M12 7h0";
 }
 
@@ -434,7 +437,7 @@ component ListRow inherits Rectangle {
             font-weight: item.playing ? 600 : 400;
             color: item.warn ? P.copper : (item.playing ? P.verdigris : (item.dim ? P.muted : P.text));
         }
-        if item.sub != "" || item.kind == 0: Text {
+        if item.sub != "" || item.kind <= 2: Text {
             horizontal-stretch: item.kind == 10 ? 5 : 2.5;
             preferred-width: 0px;
             min-width: 80px;
@@ -444,7 +447,7 @@ component ListRow inherits Rectangle {
             font-size: 12.5px;
             color: item.warn ? P.copper : (item.playing ? P.verdigris : P.muted);
         }
-        if item.meta != "" || item.kind == 0: Text {
+        if item.meta != "" || item.kind <= 2: Text {
             horizontal-stretch: 2.5;
             preferred-width: 0px;
             min-width: 60px;
@@ -638,6 +641,17 @@ export component AppWindow inherits Window {
 
     // Queue (as a view and as the side panel)
     in property <[QueueRow]> queue;
+    // What's scrolled into view, so Rust loads covers only for those rows.
+    out property <int> list-first: floor(-list.content-y / 40px);
+    out property <int> list-count: ceil(list.visible-height / 34px) + 1;
+    out property <int> grid-cols: grid.cols;
+    out property <int> grid-first: floor(-grid.content-y / (grid.cell + 44px)) * grid.cols;
+    out property <int> grid-count: (ceil(grid.height / (grid.cell + 44px)) + 1) * grid.cols;
+    out property <int> qlist-first: floor(-qlist.content-y / 52px);
+    out property <int> qlist-count: ceil(qlist.visible-height / 52px) + 1;
+    in-out property <length> panel-scroll;
+    out property <int> panel-first: floor(-panel-scroll / 54px);
+    out property <int> panel-count: ceil(root.height / 54px) + 1;
     in property <int> queue-sel: -1;
     in property <int> queue-current: -1;
     in property <string> queue-summary;
@@ -1039,7 +1053,7 @@ export component AppWindow inherits Window {
                                     for a[i] in root.actions: Chip {
                                         y: parent.height - self.height;
                                         text: root.action-labels[i];
-                                        icon: a == "new" || a == "subscribe" ? Icons.plus : (a == "play" ? Icons.play : "");
+                                        icon: a == "new" || a == "subscribe" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : ""));
                                         primary: a == "play";
                                         clicked => { root.view-action(a); keys.focus(); }
                                     }
@@ -1133,6 +1147,8 @@ export component AppWindow inherits Window {
                                     for a[i] in root.actions: Chip {
                                         y: parent.height - self.height;
                                         text: root.action-labels[i];
+                                        icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : "");
+                                        primary: a == "play";
                                         clicked => { root.view-action(a); keys.focus(); }
                                     }
                                 }
@@ -1244,14 +1260,17 @@ export component AppWindow inherits Window {
                             Rectangle { horizontal-stretch: 1; }
                             Text { text: root.queue-summary; font-size: 11.5px; color: P.muted; vertical-alignment: center; }
                         }
-                        Flickable {
+                        // A ListView, so only the rows in view exist, however
+                        // long the queue gets.
+                        ListView {
                             vertical-stretch: 1;
-                            VerticalLayout {
-                                alignment: start;
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                spacing: 2px;
-                                for q[i] in root.queue: Rectangle {
+                            content-y <=> root.panel-scroll;
+                            for q[i] in root.queue: Rectangle {
+                                height: 54px;
+                                Rectangle {
+                                    x: 8px;
+                                    y: 1px;
+                                    width: parent.width - 16px;
                                     height: 52px;
                                     border-radius: 6px;
                                     border-width: q.playing ? 1px : 0px;

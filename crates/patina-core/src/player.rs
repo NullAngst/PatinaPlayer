@@ -45,6 +45,13 @@ pub enum Command {
         pos: Duration,
     },
     AppendTracks(Vec<TrackInfo>),
+    /// Replace the queue and play it from the top, either in the given
+    /// order (shuffle off) or shuffled (shuffle on). Leaves shuffle set that
+    /// way, so toggling it later flips between the two.
+    PlayAll {
+        tracks: Vec<TrackInfo>,
+        shuffle: bool,
+    },
     /// Insert right after the current track.
     PlayNext(Vec<TrackInfo>),
     /// Play this queue entry from the start.
@@ -93,6 +100,8 @@ pub enum Event {
     Finished,
     /// A live stream's now-playing title changed.
     NowPlaying(String),
+    /// A track was listened to long enough to count as a play.
+    Played(PathBuf),
 }
 
 /// What the frontends draw. Cloned out on every read; it's small.
@@ -484,6 +493,20 @@ impl Core {
                     self.start_entry(id, Duration::ZERO);
                 }
             }
+            Command::PlayAll { tracks, shuffle } => {
+                self.stop();
+                let first = {
+                    let mut q = self.queue.lock().unwrap();
+                    q.clear();
+                    q.set_shuffle(shuffle);
+                    q.append_tracks(tracks);
+                    q.at(0).map(|e| e.id)
+                };
+                self.emit(Event::QueueChanged);
+                if let Some(id) = first {
+                    self.start_entry(id, Duration::ZERO);
+                }
+            }
             Command::SetQueueTracks { tracks, start, pos } => {
                 self.stop();
                 let ids = {
@@ -758,6 +781,9 @@ impl Core {
             if let Some(h) = &self.played_hook {
                 h(info);
             }
+            // After the hook, so anything that reloads on this event sees
+            // the new count.
+            self.emit(Event::Played(info.path.clone()));
         }
     }
 

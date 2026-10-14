@@ -143,10 +143,6 @@ fn main() -> Result<()> {
         ratatui::crossterm::event::DisableMouseCapture
     );
     ratatui::restore();
-    player.send(patina_core::Command::Quit);
-    // Give the core a moment to fade out instead of cutting the sound.
-    std::thread::sleep(std::time::Duration::from_millis(
-        fade_ms.min(300) as u64 + 50,
-    ));
+    patina_core::session::shutdown(&player, fade_ms);
     result
 }

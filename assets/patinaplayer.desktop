@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=PatinaPlayer
+GenericName=Music Player
+Comment=Play your music folders, internet radio and podcasts
+Exec=patinaplayer %F
+Icon=patinaplayer
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;audio;player;radio;podcast;flac;
+MimeType=audio/flac;audio/x-flac;audio/mpeg;audio/mp4;audio/x-m4a;audio/aac;audio/ogg;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/opus;audio/x-wav;audio/wav;audio/x-aiff;audio/x-ape;audio/x-wavpack;audio/x-musepack;audio/x-dsf;
+StartupWMClass=patinaplayer

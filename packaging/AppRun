@@ -1,0 +1,16 @@
+#!/bin/sh
+# Entry point inside the AppImage. Starts the desktop app, or the terminal
+# app when asked for it:
+#   ./PatinaPlayer-x86_64.AppImage --tui [args]
+#   or a symlink to the AppImage named patinaplayer-tui
+HERE="$(dirname "$(readlink -f "$0")")"
+
+# The AppImage runtime puts the name it was started as in ARGV0.
+case "$(basename "${ARGV0:-$0}")" in
+    patinaplayer-tui*) exec "$HERE/usr/bin/patinaplayer-tui" "$@" ;;
+esac
+if [ "${1:-}" = "--tui" ]; then
+    shift
+    exec "$HERE/usr/bin/patinaplayer-tui" "$@"
+fi
+exec "$HERE/usr/bin/patinaplayer" "$@"

@@ -4,12 +4,13 @@
 //! the library or queue; that's patina-core's job, shared with the TUI.
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use patina_core::browse::{
-    Activated, Browser, Item, Note, Section, SideEntry, Source, fmt_duration, fmt_length, infos_of,
+    Activated, Browser, Item, Note, Section, SideEntry, Source, fmt_duration, fmt_length,
 };
 use patina_core::library::PlaylistRow;
 use patina_core::track::MediaKind;
@@ -59,7 +60,14 @@ pub struct State {
     follow: bool,
     dlg: Dlg,
     toast_until: Option<Instant>,
-    art_dirty: bool,
+    /// Art each row and queue entry would show. Only the rows on screen,
+    /// plus a margin, actually get theirs, so a 5000-track queue or a
+    /// 2000-album grid doesn't load (and keep reloading) every cover.
+    row_art: Vec<Option<Req>>,
+    queue_art: Vec<Option<Req>>,
+    /// Row ranges that have art set right now.
+    row_shown: Vec<Range<usize>>,
+    queue_shown: Vec<Range<usize>>,
 }
 
 const HELP: &str = "Space        play / pause
@@ -71,6 +79,7 @@ s  r         shuffle, cycle repeat
              Playlists, Radio, Podcasts, Queue, Downloads
 /  Ctrl+F    search
 Enter        open, or play from here
+v / V        play this whole view in order / shuffled
 Backspace    back a level (Alt+Left / Alt+Right: back, forward)
 a / A        add to queue / play next
 p            add to a playlist
@@ -81,6 +90,20 @@ F5           check folders and feeds for changes
 Ctrl+Q       quit
 
 Right-click anything for everything else you can do with it.";
+
+/// What a row's columns show, which depends on the list it's in.
+#[derive(Clone, Copy, PartialEq)]
+enum RowCtx {
+    Plain,
+    /// Inside an album: track numbers, and plays instead of the album.
+    Album,
+    /// A listening-stats list: plays on the right.
+    Ranked,
+}
+
+fn plays(n: i64) -> String {
+    format!("{n} play{}", s_(n))
+}
 
 fn ss(s: impl AsRef<str>) -> SharedString {
     SharedString::from(s.as_ref())
@@ -129,7 +152,10 @@ impl State {
             follow: true,
             dlg: Dlg::None,
             toast_until: None,
-            art_dirty: false,
+            row_art: Vec::new(),
+            queue_art: Vec::new(),
+            row_shown: Vec::new(),
+            queue_shown: Vec::new(),
         }
     }
 
@@ -150,36 +176,32 @@ impl State {
             .map(|t| t.path.clone())
     }
 
-    fn row(&mut self, item: &Item, i: usize, in_album: bool) -> Row {
+    fn row(&mut self, item: &Item, i: usize, ctx: RowCtx) -> Row {
         let mut r = Row {
             selectable: item.selectable(),
             num: ss((i + 1).to_string()),
             ..Default::default()
         };
-        let want_art = !matches!(item, Item::Track(_));
-        if want_art
-            && let Some(req) = Self::art_req(item)
-            && let Some(img) = self.art.get(req, THUMB)
-        {
-            r.art = img;
-            r.has_art = true;
-        }
         let playing = self.playing_path();
         match item {
             Item::Track(t) => {
                 r.kind = 0;
-                if in_album {
+                if ctx == RowCtx::Album {
                     r.num = ss(t.track_no.map(|n| n.to_string()).unwrap_or_default());
                     r.meta = ss(match t.play_count {
                         0 => String::new(),
-                        n => format!("{n} play{}", s_(n)),
+                        n => plays(n),
                     });
                 } else {
                     r.meta = ss(t.album.clone().unwrap_or_default());
                 }
                 r.title = ss(&t.title);
                 r.sub = ss(t.artist.clone().unwrap_or_default());
-                r.right = ss(t.duration.map(fmt_duration).unwrap_or_default());
+                r.right = ss(if ctx == RowCtx::Ranked {
+                    plays(t.play_count)
+                } else {
+                    t.duration.map(fmt_duration).unwrap_or_default()
+                });
                 r.playing = playing.as_deref() == Some(t.path.as_path());
             }
             Item::Missing { uri } => {
@@ -197,17 +219,21 @@ impl State {
                 r.title = ss(&a.name);
                 r.sub = ss(&a.artist);
                 r.meta = ss(a.year.map(|y| y.to_string()).unwrap_or_default());
-                r.right = ss(format!("{} · {}", a.track_count, fmt_length(a.duration)));
+                r.right = ss(if ctx == RowCtx::Ranked {
+                    plays(a.play_count)
+                } else {
+                    format!("{} · {}", a.track_count, fmt_length(a.duration))
+                });
             }
-            Item::Artist {
-                name,
-                albums,
-                tracks,
-            } => {
+            Item::Artist(a) => {
                 r.kind = 2;
-                r.title = ss(name);
-                r.sub = ss(format!("{albums} album{}", s_(*albums)));
-                r.right = ss(format!("{tracks} track{}", s_(*tracks)));
+                r.title = ss(&a.name);
+                r.sub = ss(format!("{} album{}", a.albums, s_(a.albums)));
+                r.right = ss(if ctx == RowCtx::Ranked {
+                    plays(a.plays)
+                } else {
+                    format!("{} track{}", a.tracks, s_(a.tracks))
+                });
             }
             Item::Dir { name, .. } => {
                 r.kind = 3;
@@ -305,8 +331,20 @@ impl State {
         r
     }
 
-    /// Columns, title actions and layout for the open level.
+    /// Columns, title actions and layout for the open level. Every view
+    /// that can be played as a whole gets Play and Shuffle up front.
     fn chrome(&self) -> (i32, Vec<&'static str>, Vec<(&'static str, String)>) {
+        let (layout, cols, mut acts) = self.chrome_base();
+        if self.b.can_play_view() && !acts.iter().any(|(a, _)| *a == "play") {
+            acts.splice(
+                0..0,
+                [("play", "Play".into()), ("shuffle", "Shuffle".into())],
+            );
+        }
+        (layout, cols, acts)
+    }
+
+    fn chrome_base(&self) -> (i32, Vec<&'static str>, Vec<(&'static str, String)>) {
         let src = self.b.level().map(|l| l.source.clone());
         let prefs = &self.b.prefs;
         let tracks_cols = vec!["#", "Title", "Artist", "Album", "Time"];
@@ -327,17 +365,20 @@ impl State {
                 vec![],
                 vec![("sort", format!("Sort: {}", prefs.album_sort.label()))],
             ),
-            (_, Some(Source::ArtistAlbums(_))) => (1, vec![], vec![("play", "Play all".into())]),
-            (_, Some(Source::Genre { .. })) if !prefs.genre_songs => (
-                1,
-                vec![],
-                vec![("play", "Play all".into()), ("mode", "Show songs".into())],
-            ),
-            (_, Some(Source::Genre { .. })) => (
-                0,
-                tracks_cols,
-                vec![("play", "Play all".into()), ("mode", "Show albums".into())],
-            ),
+            (_, Some(Source::ArtistAlbums(_))) => (1, vec![], vec![]),
+            (_, Some(Source::Genre { .. })) if !prefs.genre_songs => {
+                (1, vec![], vec![("mode", "Show songs".into())])
+            }
+            (_, Some(Source::Genre { .. })) => {
+                (0, tracks_cols, vec![("mode", "Show albums".into())])
+            }
+            (Section::MostListened, Some(Source::Section(_))) => (0, vec![], vec![]),
+            (Section::TopAlbums, Some(Source::Section(_))) => {
+                (0, vec!["#", "Album", "Artist", "Year", "Plays"], vec![])
+            }
+            (Section::TopArtists, Some(Source::Section(_))) => {
+                (0, vec!["#", "Artist", "Albums", "", "Plays"], vec![])
+            }
             (Section::Songs, Some(Source::Section(_))) => (
                 0,
                 tracks_cols,
@@ -369,7 +410,7 @@ impl State {
                 vec!["", "Playlist", "", "", "Tracks"],
                 vec![("new", "New playlist".into())],
             ),
-            (_, Some(Source::Playlist { .. })) => (0, tracks_cols, vec![("play", "Play".into())]),
+            (_, Some(Source::Playlist { .. })) => (0, tracks_cols, vec![]),
             (Section::Radio, _) => (
                 0,
                 vec!["", "Station", "Last test", "", ""],
@@ -396,7 +437,7 @@ impl State {
             (Section::Settings, _) => (0, vec![], vec![]),
             // Mixed artists, albums and songs: the group headings label them.
             (_, Some(Source::Search(_))) => (0, vec![], vec![]),
-            (_, Some(Source::Folder(_))) => (0, tracks_cols, vec![("play", "Play all".into())]),
+            (_, Some(Source::Folder(_))) => (0, tracks_cols, vec![]),
             (Section::Folders, Some(Source::Section(_))) => {
                 (0, vec!["", "Folder", "", "", "Tracks"], vec![])
             }
@@ -415,6 +456,9 @@ impl State {
             Some(Source::Playlist { .. }) => "Empty. Right-click anything and choose Add to playlist.".into(),
             Some(Source::Section(Section::Radio)) => "No stations yet. Add one with New station: a name, then its stream or playlist URL.".into(),
             Some(Source::Section(Section::Podcasts)) => "No podcasts yet. Subscribe with a feed URL.".into(),
+            Some(Source::Section(Section::MostListened | Section::TopAlbums | Section::TopArtists)) => {
+                "Nothing played yet. A song counts once you've heard half of it, or four minutes of it, whichever comes first.".into()
+            }
             Some(Source::Podcast { .. }) => {
                 if self.b.pod.as_ref().is_some_and(|p| p.status().refreshing) {
                     "Fetching the feed…".into()
@@ -457,10 +501,11 @@ impl State {
             Some(l) => (l.items.clone(), l.selected as i32, l.title.clone()),
             None => (Vec::new(), -1, self.b.section.label().to_string()),
         };
-        let in_album = matches!(
-            self.b.level().map(|l| &l.source),
-            Some(Source::Album { .. })
-        );
+        let ctx = match self.b.level().map(|l| &l.source) {
+            Some(Source::Album { .. }) => RowCtx::Album,
+            Some(Source::Section(s)) if Section::STATS.contains(s) => RowCtx::Ranked,
+            _ => RowCtx::Plain,
+        };
         // Numbers count within each headed group, so search results read
         // 1, 2, 3 under Songs instead of carrying on from Albums.
         let mut n = 0;
@@ -472,10 +517,17 @@ impl State {
                 } else {
                     n += 1;
                 }
-                self.row(it, n.max(1) - 1, in_album)
+                self.row(it, n.max(1) - 1, ctx)
             })
             .collect();
-        let n_tracks = items.iter().filter(|i| matches!(i, Item::Track(_))).count();
+        // Songs in a list don't show covers; everything else that has one does.
+        self.row_art = items
+            .iter()
+            .map(|it| match it {
+                Item::Track(_) => None,
+                other => Self::art_req(other),
+            })
+            .collect();
         ui.set_view_title(ss(match self.b.level().map(|l| &l.source) {
             Some(Source::Search(_)) => "Search".to_string(),
             // Top levels are named after their section; the sort and mode
@@ -483,7 +535,6 @@ impl State {
             Some(Source::Section(s)) => s.label().to_string(),
             _ => title.split(" · ").next().unwrap_or(&title).to_string(),
         }));
-        let _ = n_tracks;
         ui.set_view_sub(ss(match self.b.level().map(|l| &l.source) {
             Some(Source::Section(Section::Settings)) => "Read from your config file".to_string(),
             _ if items.is_empty() => String::new(),
@@ -494,6 +545,19 @@ impl State {
                 .iter()
                 .any(|i| matches!(i, Item::Album(_) | Item::Dir { .. } | Item::Root { .. })),
         );
+        let mut rows = rows;
+        let shown = self.row_ranges(ui, rows.len());
+        for r in &shown {
+            for i in r.clone() {
+                if let Some(req) = self.row_art[i].clone()
+                    && let Some(img) = self.art.get(req, THUMB)
+                {
+                    rows[i].art = img;
+                    rows[i].has_art = true;
+                }
+            }
+        }
+        self.row_shown = shown;
         update_rows(&self.rows, rows);
         let sel_ok = items
             .get(selected.max(0) as usize)
@@ -569,6 +633,9 @@ impl State {
                         Section::Queue => icons.get_queue(),
                         Section::Downloads => icons.get_downloads(),
                         Section::Settings => icons.get_settings(),
+                        Section::MostListened => icons.get_most_listened(),
+                        Section::TopAlbums => icons.get_top_albums(),
+                        Section::TopArtists => icons.get_top_artists(),
                     },
                     active: *s == self.b.section,
                     count: ss(if *s == Section::Queue {
@@ -579,7 +646,11 @@ impl State {
                     }),
                     dot: 0,
                 },
-                SideEntry::Source { path, tracks } => {
+                SideEntry::Source {
+                    path,
+                    tracks,
+                    present,
+                } => {
                     let scanning = status
                         .as_ref()
                         .and_then(|s| s.scanning.as_ref())
@@ -592,12 +663,12 @@ impl State {
                             .unwrap_or_else(|| path.display().to_string())),
                         count: ss(match scanning {
                             Some(sc) => format!("{}/{}", sc.done, sc.total),
-                            None if !path.is_dir() => "missing".into(),
+                            None if !present => "missing".into(),
                             None => tracks.to_string(),
                         }),
                         icon: SharedString::new(),
                         active: open_folder.as_ref() == Some(path),
-                        dot: if !path.is_dir() {
+                        dot: if !present {
                             2
                         } else if scanning.is_some() {
                             1
@@ -647,23 +718,38 @@ impl State {
             }
             (infos, current, total)
         };
+        let rows_art: Vec<Option<Req>> = rows
+            .iter()
+            .map(|(info, _, _)| {
+                (info.kind == MediaKind::File && !info.path.as_os_str().is_empty())
+                    .then(|| Req::Track(info.path.clone()))
+            })
+            .collect();
         let n = rows.len();
         let models: Vec<QueueRow> = rows
             .into_iter()
-            .map(|(info, playing, failed)| {
-                let art = (!info.path.as_os_str().is_empty() && info.kind == MediaKind::File)
-                    .then(|| self.art.get(Req::Track(info.path.clone()), THUMB))
-                    .flatten();
-                QueueRow {
-                    title: ss(info.display_title()),
-                    sub: ss(sub_line(&info)),
-                    playing,
-                    failed,
-                    has_art: art.is_some(),
-                    art: art.unwrap_or_default(),
-                }
+            .map(|(info, playing, failed)| QueueRow {
+                title: ss(info.display_title()),
+                sub: ss(sub_line(&info)),
+                playing,
+                failed,
+                ..Default::default()
             })
             .collect();
+        self.queue_art = rows_art;
+        let mut models = models;
+        let shown = self.queue_ranges(ui, models.len());
+        for r in &shown {
+            for i in r.clone() {
+                if let Some(req) = self.queue_art[i].clone()
+                    && let Some(img) = self.art.get(req, THUMB)
+                {
+                    models[i].art = img;
+                    models[i].has_art = true;
+                }
+            }
+        }
+        self.queue_shown = shown;
         if self.queue.row_count() == models.len() {
             for (i, m) in models.into_iter().enumerate() {
                 if self.queue.row_data(i).as_ref() != Some(&m) {
@@ -800,21 +886,22 @@ impl State {
             }
         }
         self.snap = self.b.player.snapshot();
-        if self.art.collect() {
-            self.art_dirty = true;
-        }
+        let art_arrived = self.art.collect();
         let qv = self.b.player.queue().version;
         let gen_changed = self.b.generation() != self.last_gen;
-        if gen_changed || self.art_dirty || qv != self.last_queue_ver {
+        if gen_changed || qv != self.last_queue_ver {
             self.last_gen = self.b.generation();
             self.sync_side(ui);
             self.sync_view(ui);
         }
-        if qv != self.last_queue_ver || self.art_dirty || gen_changed {
+        if qv != self.last_queue_ver || gen_changed {
             self.last_queue_ver = qv;
             self.sync_queue(ui);
         }
-        self.art_dirty = false;
+        // Scrolling, or covers finishing loading: touch only the rows that
+        // come into view or leave it.
+        self.update_row_art(ui, art_arrived);
+        self.update_queue_art(ui, art_arrived);
         self.sync_playback(ui);
         self.notes(ui);
         // The queue panel needs room; fold it away on a narrow window.
@@ -826,6 +913,80 @@ impl State {
         let compact = w < 1180.0;
         if ui.get_compact() != compact {
             ui.set_compact(compact);
+        }
+    }
+
+    // ----- Cover art on screen -----
+
+    /// Rows of the main view on screen now, with a margin either side so
+    /// covers are ready a little before they scroll in.
+    fn row_ranges(&self, ui: &AppWindow, n: usize) -> Vec<Range<usize>> {
+        let (first, count, margin) = match ui.get_layout() {
+            0 => (ui.get_list_first(), ui.get_list_count(), 20),
+            1 => {
+                let cols = ui.get_grid_cols().max(1);
+                (ui.get_grid_first(), ui.get_grid_count(), cols * 2)
+            }
+            _ => return Vec::new(),
+        };
+        vec![window(first, count, margin, n)]
+    }
+
+    /// Queue entries on screen: the Queue view, the queue panel, or both.
+    fn queue_ranges(&self, ui: &AppWindow, n: usize) -> Vec<Range<usize>> {
+        let mut v = Vec::new();
+        if ui.get_layout() == 2 {
+            v.push(window(ui.get_qlist_first(), ui.get_qlist_count(), 10, n));
+        }
+        if ui.get_queue_panel() {
+            v.push(window(ui.get_panel_first(), ui.get_panel_count(), 10, n));
+        }
+        v
+    }
+
+    fn update_row_art(&mut self, ui: &AppWindow, arrived: bool) {
+        let shown = self.row_ranges(ui, self.row_art.len());
+        if !arrived && shown == self.row_shown {
+            return;
+        }
+        let old = std::mem::replace(&mut self.row_shown, shown.clone());
+        for i in touched(&old, &shown) {
+            let want = shown.iter().any(|r| r.contains(&i));
+            let img = match (want, self.row_art.get(i).cloned().flatten()) {
+                (true, Some(req)) => self.art.get(req, THUMB),
+                _ => None,
+            };
+            let Some(mut row) = self.rows.row_data(i) else {
+                continue;
+            };
+            if row.has_art != img.is_some() || (img.is_some() && img.as_ref() != Some(&row.art)) {
+                row.has_art = img.is_some();
+                row.art = img.unwrap_or_default();
+                self.rows.set_row_data(i, row);
+            }
+        }
+    }
+
+    fn update_queue_art(&mut self, ui: &AppWindow, arrived: bool) {
+        let shown = self.queue_ranges(ui, self.queue_art.len());
+        if !arrived && shown == self.queue_shown {
+            return;
+        }
+        let old = std::mem::replace(&mut self.queue_shown, shown.clone());
+        for i in touched(&old, &shown) {
+            let want = shown.iter().any(|r| r.contains(&i));
+            let img = match (want, self.queue_art.get(i).cloned().flatten()) {
+                (true, Some(req)) => self.art.get(req, THUMB),
+                _ => None,
+            };
+            let Some(mut row) = self.queue.row_data(i) else {
+                continue;
+            };
+            if row.has_art != img.is_some() || (img.is_some() && img.as_ref() != Some(&row.art)) {
+                row.has_art = img.is_some();
+                row.art = img.unwrap_or_default();
+                self.queue.set_row_data(i, row);
+            }
         }
     }
 
@@ -867,75 +1028,24 @@ impl State {
     /// Play the item itself (from a context menu), even ones Enter would
     /// open, like an album or a folder.
     fn play_selected(&mut self) {
-        let Some(item) = self.b.selected_item() else {
-            return;
-        };
-        match item {
-            Item::Track(_) | Item::Station { .. } | Item::Episode(_) => {
-                self.activate();
-            }
-            other => {
-                let infos = infos_of(self.b.lib.as_ref(), &other, &self.b.prefs);
-                if !infos.is_empty() {
-                    self.b.player.send(Command::SetQueueTracks {
-                        tracks: infos,
-                        start: 0,
-                        pos: Duration::ZERO,
-                    });
-                    self.follow = true;
-                }
-            }
+        if self.b.play_selection() == Activated::Played {
+            self.follow = true;
         }
     }
 
-    /// Everything in the open level, as queue entries.
-    fn level_infos(&self) -> Vec<TrackInfo> {
-        self.b
-            .level()
-            .map(|l| {
-                l.items
-                    .iter()
-                    .flat_map(|i| infos_of(self.b.lib.as_ref(), i, &self.b.prefs))
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn play_view(&mut self, shuffle: bool) {
+        self.b.play_view(shuffle);
+        self.follow = true;
     }
 
     fn view_action(&mut self, ui: &AppWindow, a: &str) {
         match a {
-            "play" | "shuffle" => {
-                let mut infos = self.level_infos();
-                if infos.is_empty() {
-                    return;
-                }
-                if a == "shuffle" {
-                    shuffle(&mut infos);
-                }
-                self.b.player.send(Command::SetQueueTracks {
-                    tracks: infos,
-                    start: 0,
-                    pos: Duration::ZERO,
-                });
-                self.follow = true;
-            }
-            "queue" => {
-                let infos = self.level_infos();
-                let n = infos.len();
-                if n > 0 {
-                    self.b.player.send(Command::AppendTracks(infos));
-                    self.b.note(format!(
-                        "Added {} to the queue",
-                        patina_core::browse::count(n)
-                    ));
-                }
-            }
+            "play" => self.play_view(false),
+            "shuffle" => self.play_view(true),
+            "queue" => self.b.queue_view(),
             "playlist" => {
-                let paths: Vec<PathBuf> = self
-                    .level_infos()
-                    .into_iter()
-                    .filter(|i| i.kind == MediaKind::File)
-                    .map(|i| i.path)
-                    .collect();
+                let paths: Vec<PathBuf> =
+                    self.b.view_tracks().into_iter().map(|t| t.path).collect();
                 self.open_pick(ui, paths);
             }
             "sort" => self.b.cycle_sort(),
@@ -1246,6 +1356,8 @@ impl State {
                 "[" => self.b.nudge_tempo(-0.1),
                 "]" => self.b.nudge_tempo(0.1),
                 "z" => self.b.toggle_trim(),
+                "v" if !queue => self.play_view(false),
+                "V" if !queue => self.play_view(true),
                 "a" if !queue => self.b.add_selected_to_queue(false),
                 "A" if !queue => self.b.add_selected_to_queue(true),
                 "p" => {
@@ -1284,19 +1396,19 @@ fn sub_line(t: &TrackInfo) -> String {
     out.join(" · ")
 }
 
-fn shuffle<T>(v: &mut [T]) {
-    let mut x = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(1)
-        | 1;
-    for i in (1..v.len()).rev() {
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        let j = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) % (i as u64 + 1)) as usize;
-        v.swap(i, j);
-    }
+/// `count` rows from `first`, widened by `margin` each way, kept inside `n`.
+fn window(first: i32, count: i32, margin: i32, n: usize) -> Range<usize> {
+    let start = (first - margin).max(0) as usize;
+    let end = (first.max(0) + count.max(0) + margin).max(0) as usize;
+    start.min(n)..end.min(n)
+}
+
+/// Every index in any of the old or new ranges, once each.
+fn touched(old: &[Range<usize>], new: &[Range<usize>]) -> Vec<usize> {
+    let mut v: Vec<usize> = old.iter().chain(new).flat_map(Clone::clone).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 fn set_strings(model: &VecModel<SharedString>, items: impl Iterator<Item = SharedString>) {

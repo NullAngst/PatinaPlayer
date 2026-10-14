@@ -193,6 +193,19 @@ pub struct ArtistRow {
     pub name: String,
     pub albums: i64,
     pub tracks: i64,
+    /// Plays across all their tracks.
+    pub plays: i64,
+}
+
+impl ArtistRow {
+    fn from_row(r: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            name: r.get(0)?,
+            albums: r.get(1)?,
+            tracks: r.get(2)?,
+            plays: r.get(3)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -507,22 +520,16 @@ impl Library {
     pub fn artists(&self, mode: ArtistMode) -> Result<Vec<ArtistRow>> {
         let sql = match mode {
             ArtistMode::AlbumArtist => {
-                "SELECT artist, COUNT(*), SUM(track_count) FROM albums \
+                "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM albums \
                  GROUP BY artist COLLATE NOCASE ORDER BY artist COLLATE NOCASE"
             }
             ArtistMode::TrackArtist => {
-                "SELECT artist, COUNT(DISTINCT album_key), COUNT(*) FROM tracks \
+                "SELECT artist, COUNT(DISTINCT album_key), COUNT(*), SUM(play_count) FROM tracks \
                  WHERE artist IS NOT NULL GROUP BY artist COLLATE NOCASE ORDER BY artist COLLATE NOCASE"
             }
         };
         let mut st = self.conn.prepare_cached(sql)?;
-        let rows = st.query_map([], |r| {
-            Ok(ArtistRow {
-                name: r.get(0)?,
-                albums: r.get(1)?,
-                tracks: r.get(2)?,
-            })
-        })?;
+        let rows = st.query_map([], ArtistRow::from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -687,19 +694,13 @@ impl Library {
         let args = rusqlite::params_from_iter(words.iter());
 
         let artist_sql = format!(
-            "SELECT artist, COUNT(*), SUM(track_count) FROM albums WHERE {} \
+            "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM albums WHERE {} \
              GROUP BY artist COLLATE NOCASE ORDER BY artist COLLATE NOCASE LIMIT {limit}",
             build(&["artist"])
         );
         let mut st = self.conn.prepare(&artist_sql)?;
         let artists = st
-            .query_map(args, |r| {
-                Ok(ArtistRow {
-                    name: r.get(0)?,
-                    albums: r.get(1)?,
-                    tracks: r.get(2)?,
-                })
-            })?
+            .query_map(args, ArtistRow::from_row)?
             .collect::<rusqlite::Result<_>>()?;
 
         let album_sql = format!(
@@ -741,6 +742,52 @@ impl Library {
             )?;
         }
         Ok(())
+    }
+
+    // ----- Listening stats -----
+
+    /// The most played tracks, most first. Tracks never played are left
+    /// out, so a fresh library gives an empty list.
+    pub fn top_tracks(&self, limit: usize) -> Result<Vec<TrackRow>> {
+        self.tracks_where(
+            &format!(
+                "WHERE play_count > 0 \
+                 ORDER BY play_count DESC, last_played DESC, COALESCE(title, filename) LIMIT {limit}"
+            ),
+            [],
+        )
+    }
+
+    /// Albums by the plays of all their songs added up.
+    pub fn top_albums(&self, limit: usize) -> Result<Vec<AlbumRow>> {
+        let sql = format!(
+            "SELECT {} FROM albums WHERE play_count > 0 \
+             ORDER BY play_count DESC, name COLLATE NOCASE LIMIT {limit}",
+            AlbumRow::COLS
+        );
+        let mut st = self.conn.prepare_cached(&sql)?;
+        let rows = st.query_map([], AlbumRow::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Artists by the plays of all their songs added up, counted the same
+    /// way the Artists view groups them.
+    pub fn top_artists(&self, mode: ArtistMode, limit: usize) -> Result<Vec<ArtistRow>> {
+        let sql = match mode {
+            ArtistMode::AlbumArtist => format!(
+                "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM albums \
+                 GROUP BY artist COLLATE NOCASE HAVING SUM(play_count) > 0 \
+                 ORDER BY SUM(play_count) DESC, artist COLLATE NOCASE LIMIT {limit}"
+            ),
+            ArtistMode::TrackArtist => format!(
+                "SELECT artist, COUNT(DISTINCT album_key), COUNT(*), SUM(play_count) FROM tracks \
+                 WHERE artist IS NOT NULL GROUP BY artist COLLATE NOCASE HAVING SUM(play_count) > 0 \
+                 ORDER BY SUM(play_count) DESC, artist COLLATE NOCASE LIMIT {limit}"
+            ),
+        };
+        let mut st = self.conn.prepare_cached(&sql)?;
+        let rows = st.query_map([], ArtistRow::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // ----- Playlists -----

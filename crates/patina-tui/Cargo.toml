@@ -10,6 +10,10 @@ repository.workspace = true
 name = "patinaplayer-tui"
 path = "src/main.rs"
 
+[features]
+# See patina-core. Used by the AppImage build.
+static-ffmpeg = ["patina-core/static-ffmpeg"]
+
 [dependencies]
 patina-core = { path = "../patina-core" }
 ratatui = "0.30"

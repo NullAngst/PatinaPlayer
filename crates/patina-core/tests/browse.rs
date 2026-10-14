@@ -270,3 +270,127 @@ fn podcast_speed_is_rounded_saved_and_shown() {
     assert!(text.contains("speed = 3.0"), "{text}");
     assert!(text.contains("trim_silence = true"));
 }
+
+/// Wait until the player's queue matches `f`.
+fn wait_queue(b: &Browser, what: &str, f: impl Fn(&patina_core::queue::Queue) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !f(&b.player.queue()) {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_folder_plays_its_whole_tree_in_order_or_shuffled() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Folders);
+    b.select(0);
+    assert!(matches!(b.activate(), Activated::Opened));
+    // The library root holds two artist folders and no files of its own.
+    assert!(items(&b).iter().all(|i| matches!(i, Item::Dir { .. })));
+    assert!(b.can_play_view());
+
+    let mut expected: Vec<PathBuf> = b.view_tracks().into_iter().map(|t| t.path).collect();
+    assert_eq!(expected.len(), 3);
+    let mut sorted = expected.clone();
+    sorted.sort();
+    assert_eq!(expected, sorted, "folder order");
+
+    b.play_view(false);
+    wait_queue(&b, "the folder in order", |q| {
+        q.paths_in_order() == expected && !q.shuffle()
+    });
+
+    b.play_view(true);
+    wait_queue(&b, "the folder shuffled", |q| q.shuffle() && q.len() == 3);
+    let mut got = b.player.queue().paths_in_order();
+    got.sort();
+    expected.sort();
+    assert_eq!(got, expected, "same songs, any order");
+
+    // Turning shuffle off afterwards goes back to folder order.
+    b.player.send(patina_core::Command::ToggleShuffle);
+    wait_queue(&b, "folder order again", |q| {
+        !q.shuffle() && q.paths_in_order() == sorted
+    });
+}
+
+#[test]
+fn only_library_views_play_as_a_whole() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    for s in [
+        Section::Radio,
+        Section::Genres,
+        Section::Playlists,
+        Section::Settings,
+    ] {
+        b.switch(s);
+        assert!(!b.can_play_view(), "{s:?}");
+    }
+    for s in [Section::Albums, Section::Artists, Section::Songs] {
+        b.switch(s);
+        assert!(b.can_play_view(), "{s:?}");
+        assert_eq!(b.view_tracks().len(), 3, "{s:?}");
+    }
+}
+
+#[test]
+fn listening_stats_rank_by_plays() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::MostListened);
+    assert!(items(&b).is_empty(), "nothing played yet");
+    assert!(!b.can_play_view());
+
+    let path = |rel: &str| fx.root.join(rel);
+    {
+        let lib = b.lib.as_ref().unwrap();
+        for _ in 0..3 {
+            lib.record_play(&path("Nirvana/Bleach/02.flac")).unwrap();
+        }
+        lib.record_play(&path("Nirvana/Bleach/01.flac")).unwrap();
+        for _ in 0..2 {
+            lib.record_play(&path("Other/Thing/01.flac")).unwrap();
+        }
+    }
+    b.refresh_all();
+
+    let names: Vec<String> = items(&b)
+        .iter()
+        .map(|i| match i {
+            Item::Header(h) => format!("[{h}]"),
+            Item::Track(t) => format!("{} {}", t.title, t.play_count),
+            Item::Album(a) => format!("{} {}", a.name, a.play_count),
+            Item::Artist(a) => format!("{} {}", a.name, a.plays),
+            _ => "?".into(),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "[Songs]",
+            "Bleach Song 2 3",
+            "Other Thing 2",
+            "Bleach Song 1 1",
+            "[Albums]",
+            "Bleach 4",
+            "Thing 2",
+            "[Artists]",
+            "Nirvana 4",
+            "Someone 2",
+        ]
+    );
+    // Grouped, so playing it all plays the songs once each.
+    assert_eq!(b.view_tracks().len(), 3);
+
+    b.switch(Section::TopAlbums);
+    assert!(matches!(&items(&b)[0], Item::Album(a) if a.name == "Bleach"));
+    b.switch(Section::TopArtists);
+    assert!(matches!(&items(&b)[0], Item::Artist(a) if a.name == "Nirvana" && a.plays == 4));
+    // Open the top artist and their albums are there.
+    b.select(0);
+    assert!(matches!(b.activate(), Activated::Opened));
+    assert!(matches!(&items(&b)[0], Item::Album(a) if a.name == "Bleach"));
+}

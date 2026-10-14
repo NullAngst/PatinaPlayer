@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 4 of the build plan: the audio engine, the library, internet radio and podcasts from milestones 1 to 3, plus the desktop app and cover art. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Bit-perfect comes next, then Subsonic and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 4.5 of the build plan: the audio engine, the library, internet radio, podcasts, the desktop app and cover art from milestones 1 to 4, plus play-the-whole-view, listening stats, and an AppImage that GitHub builds for you. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Bit-perfect comes next, then Subsonic and the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -16,9 +16,23 @@ This is milestone 4 of the build plan: the audio engine, the library, internet r
 - On a narrow window the queue panel folds away and the bottom bar drops the format badge and output chip, so nothing gets cut off.
 - Inter, Noto Serif and JetBrains Mono are bundled, so it looks the same on any system.
 
+**Play or shuffle wherever you are**
+- Every library view has Play and Shuffle at the top (`v` and `V` from the keyboard, in both apps). They play the whole view: a folder plays everything under it, subfolders and all, an artist plays all their albums, Albums or Songs plays the library.
+- Go into a folder of a few hundred albums, hit Shuffle, and it plays through all of them in random order. Hit Play and it plays them in folder order.
+- Shuffle leaves the shuffle button on and Play turns it off, so the button flips between the two afterwards without losing your place.
+- In a grouped list (search results, Most listened) only the songs play, since the albums and artists there would repeat them.
+- Radio, Podcasts, Genres and Playlists don't get the buttons, since they're lists of lists. Open one and it does.
+
+**Listening stats**
+- Three views under Listening in the sidebar, built from your play counts.
+- Most listened: your top five songs, top five albums and top five artists.
+- Top albums: the ten albums whose songs you've played most, added up.
+- Top artists: the ten artists whose songs you've played most, added up. They group the same way the Artists view does, so `t` in Artists switches these too.
+- They update as you listen, and open like any other album or artist.
+
 **Cover art**
 - Embedded art first, then a cover image in the folder (`cover`, `folder`, `front`, `album` and the like, as jpg, png or webp). Disc folders look in their parent too.
-- The desktop app loads it on background threads, so scrolling a big grid doesn't stall.
+- The desktop app loads it on background threads, and only for the rows on screen, so a 3000-album grid or a 5000-track queue doesn't load every cover at once.
 - The TUI draws it at the top of the queue panel, with kitty graphics, sixel or iTerm2 images where the terminal supports them and half blocks everywhere else. `--art` picks one by hand.
 
 **Library**
@@ -64,6 +78,33 @@ This is milestone 4 of the build plan: the audio engine, the library, internet r
 - Short fades on pause, resume, seek, next and stop. PipeWire output with ALSA fallback.
 - Play counts. A track counts once you've actually listened to half of it or four minutes, whichever comes first. Seeking past the middle doesn't count.
 
+## The AppImage
+
+GitHub builds it. Push a tag and you get a release with the AppImage on it:
+
+1. Push the repo to GitHub, with `.github/workflows/appimage.yml` in it.
+2. Tag a version and push the tag: `git tag v0.2.0 && git push origin v0.2.0`
+3. Wait for the AppImage workflow under the Actions tab. It takes about 15 minutes the first time and less after, since FFmpeg and the Rust build are cached.
+4. The release shows up under Releases with `PatinaPlayer-0.2.0-x86_64.AppImage` and its `.zsync` file.
+
+For a test build without a release, run the workflow by hand from the Actions tab (Run workflow). The AppImage lands as a downloadable artifact on that run.
+
+Using it:
+
+1. Make it executable: `chmod +x PatinaPlayer-*-x86_64.AppImage`
+2. Run it: `./PatinaPlayer-0.2.0-x86_64.AppImage` for the desktop app.
+3. For the terminal app: `./PatinaPlayer-0.2.0-x86_64.AppImage --tui`, or symlink it as `patinaplayer-tui` and run that, like `ln -s ~/Applications/PatinaPlayer-0.2.0-x86_64.AppImage ~/.local/bin/patinaplayer-tui`.
+4. For a menu entry, use Gear Lever or AppImageLauncher (or whichever AppImage manager you like). The desktop file and icon are inside. They can also update it from the `.zsync`, since the update info points at your repo's latest release.
+
+What's in it, and what isn't:
+
+- FFmpeg is built from source, audio only, and linked into the binaries. Every audio decoder, every demuxer, HTTPS through GnuTLS. No video codecs, no encoders. That keeps the AppImage small and independent of whatever FFmpeg your distro has.
+- The FFmpeg version follows the Rust bindings in `Cargo.lock`, so a `cargo update` that moves them to a newer FFmpeg moves the AppImage to it too. Nothing is pinned. linuxdeploy is the newest build on every run.
+- PipeWire's client library, GnuTLS, ALSA, OpenGL, fontconfig, freetype and glibc come from your system, since bundled copies of those break against the host. Every desktop distro new enough to run it has them.
+- IT NEEDS GLIBC 2.39 OR NEWER, since it's built on Ubuntu 24.04: Kubuntu 24.04, Fedora 40, Debian 13 and later are fine. Older systems get a glibc error and nothing else.
+
+To build one locally instead: `bash packaging/build-appimage.sh`. You need everything from Prerequisites plus `nasm`, `libgnutls28-dev` and `zlib1g-dev` (or whichever names your distro uses). The result is in `target/appimage/`.
+
 A note on how albums are grouped. Tracks with an album artist tag group by album artist plus album name, wherever the files sit. Tracks without one group by album name plus folder, which keeps two unrelated "Greatest Hits" apart and keeps a compilation together even when every track has a different artist. Disc folders (`CD1`, `Disc 2`) are folded into their parent, so multi-disc albums come out as one.
 
 ## Prerequisites
@@ -72,6 +113,7 @@ A note on how albums are grouped. Tracks with an album artist tag group by album
 - FFmpeg 5.1 or newer, with dev headers
 - PipeWire and ALSA dev headers
 - clang and pkg-config, since the FFmpeg and PipeWire bindings are generated at build time
+- For the AppImage only: nasm, GnuTLS and zlib headers, since it builds its own FFmpeg
 - For the desktop app: xkbcommon, Wayland, fontconfig, freetype, the X11 cursor, randr and input libraries, and OpenGL headers
 
 SQLite is built into the binary, so there's nothing to install for it.
@@ -96,7 +138,7 @@ The tests also need the `ffmpeg` command itself, since they generate their own a
 3. Copy the binaries somewhere on your PATH: `cp target/release/patinaplayer target/release/patinaplayer-tui ~/.local/bin/`, since that's where user binaries usually live.
 4. Optionally run the tests: `cargo test --workspace`
 
-There's no `.desktop` file or AppImage yet, so start the desktop app from a terminal or KRunner (or whichever launcher you use) by name. Packaging is milestone 14.
+Built this way there's no menu entry. Start it from a terminal or KRunner (or whichever launcher you use) by name, or copy `assets/patinaplayer.desktop` to `~/.local/share/applications/` and `assets/patinaplayer.png` to `~/.local/share/icons/hicolor/256x256/apps/`. The AppImage below carries both.
 
 ## First run
 
@@ -170,6 +212,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | [ / ] | Podcast speed down / up |
 | z | Podcast silence trimming |
 | Enter | Open, or play from the selected track |
+| v / V | Play the whole view in order / shuffled |
 | Esc / Backspace | Back up a level |
 | a / A | Add to the queue / play next |
 | p | Add to a playlist |
@@ -213,7 +256,9 @@ crates/
     ui/app.slint        the whole window
     ui/fonts/           bundled fonts and their license
     src/bridge.rs       turns the shared browser into Slint models and back
-assets/                 app icon
+assets/                 app icon and desktop file
+packaging/              AppImage: FFmpeg build, AppDir, entry point
+.github/workflows/      CI on every push, AppImage on every tag
 ```
 
 The core owns all the state. The views and what each action does live in `patina-core/src/browse`, so the TUI and the desktop app are only drawing and input. A fix to how a view behaves lands in both at once.
@@ -230,16 +275,17 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 
 - Podcasts and stations have no art yet. Podcast feed images and station logos come later, cover art for tracks works now.
 - There's no settings screen. Edit the config file and restart. The Settings view shows what's in effect.
-- No tray icon, no MPRIS media keys, no `.desktop` file and no AppImage yet. Those are milestone 14.
+- No tray icon and no MPRIS media keys yet. Those are milestone 14.
+- The AppImage build was run end to end on Ubuntu 24.04 here, the same system as the GitHub runner, but the workflow itself hasn't run on GitHub yet. The first tagged run is the real test.
 - The desktop app was checked under X11 (Xvfb) here, not on a real Plasma Wayland session. Slint supports Wayland natively, so it should be fine, but that's untested from this box.
 - When the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 12.
-- Both binaries link FFmpeg, PipeWire and ALSA dynamically. The static TUI build is packaging work for milestone 14.
+- Built from source the normal way, both binaries link your system's FFmpeg, PipeWire and ALSA. The AppImage links its own FFmpeg in.
 - 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
 - Radio has no loudness leveling yet. The live normalizer for radio comes with leveling in milestone 9.
 - Stations and podcasts from a Subsonic server come with the Subsonic client in milestone 6. For now it's only the ones you add.
 - Scrobbling radio titles comes with Last.fm in milestone 11, off by default since station metadata is often junk.
 - Podcast position at a sped-up or trimmed speed is tracked from markers the decoder sends a few times a second, so the saved spot can be off by a fraction of a second. Resume backs up five seconds anyway.
-- The radio and podcast code was tested against local servers, including a real HLS stream made by FFmpeg. It hasn't been run against live stations from here, since this build box has no general internet access. HTTPS streams go through FFmpeg's own TLS, so your FFmpeg needs to be built with it (distro packages are).
+- The radio and podcast code was tested against local servers, including a real HLS stream made by FFmpeg. It hasn't been run against live stations from here, since this build box has no general internet access. HTTPS streams go through FFmpeg's own TLS, so a source build needs an FFmpeg built with it (distro packages are). The AppImage's FFmpeg has GnuTLS.
 - inotify needs one watch per folder. A very large library can run past `fs.inotify.max_user_watches`. If it does, you'll see an error saying so, and raising the limit with `sysctl` fixes it.
 
 ## License
@@ -248,4 +294,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/OFL.txt`.
 
-Now PatinaPlayer is running as a desktop app and in the terminal, both on the same library, with your covers showing in each.
+Now PatinaPlayer is building itself on GitHub, shuffling whole folders on command, and keeping score of what you play most.

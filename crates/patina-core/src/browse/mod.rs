@@ -7,7 +7,7 @@ pub mod model;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -30,7 +30,14 @@ pub enum Note {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SideEntry {
     Section(Section),
-    Source { path: PathBuf, tracks: i64 },
+    /// A library folder root. `present` is false while it's missing (an
+    /// unmounted drive), checked every few seconds rather than on every
+    /// draw, since a stat on a dead network mount can hang.
+    Source {
+        path: PathBuf,
+        tracks: i64,
+        present: bool,
+    },
     Label(&'static str),
     Gap,
 }
@@ -88,6 +95,8 @@ pub struct Browser {
     /// Bumped whenever anything a view draws changes, so a frontend that
     /// keeps its own models (the GUI) knows when to rebuild them.
     generation: u64,
+    /// When the library roots were last checked for being there.
+    roots_checked: Instant,
 }
 
 fn plural(n: usize) -> &'static str {
@@ -124,6 +133,7 @@ impl Browser {
             check_rx,
             notes: Vec::new(),
             generation: 0,
+            roots_checked: Instant::now(),
         };
         b.rebuild_sidebar();
         b
@@ -160,6 +170,11 @@ impl Browser {
             }
             if matches!(ev, Event::QueueChanged | Event::TrackChanged(_)) {
                 self.touch();
+            }
+        }
+        if events.iter().any(|e| matches!(e, Event::Played(_))) {
+            for s in Section::STATS {
+                self.refresh_section(s);
             }
         }
         let mut changed = false;
@@ -200,6 +215,20 @@ impl Browser {
             self.note(summary);
             self.refresh_section(Section::Radio);
         }
+        if self.roots_checked.elapsed() >= Duration::from_secs(5) {
+            self.roots_checked = Instant::now();
+            let mut flipped = false;
+            for e in &mut self.sidebar {
+                if let SideEntry::Source { path, present, .. } = e {
+                    let now = path.is_dir();
+                    flipped |= now != *present;
+                    *present = now;
+                }
+            }
+            if flipped {
+                self.touch();
+            }
+        }
         if changed {
             self.refresh_all();
             self.rebuild_sidebar();
@@ -217,6 +246,11 @@ impl Browser {
             .iter()
             .map(|&x| SideEntry::Section(x))
             .collect();
+        if self.lib.is_some() {
+            s.push(SideEntry::Gap);
+            s.push(SideEntry::Label("Listening"));
+            s.extend(Section::STATS.iter().map(|&x| SideEntry::Section(x)));
+        }
         if let Some(lib) = &self.lib
             && let Ok(sources) = lib.sources()
             && !sources.is_empty()
@@ -225,6 +259,7 @@ impl Browser {
             s.push(SideEntry::Label("Sources"));
             for src in sources {
                 s.push(SideEntry::Source {
+                    present: src.root.is_dir(),
                     path: src.root,
                     tracks: src.tracks,
                 });
@@ -558,6 +593,107 @@ impl Browser {
         }
     }
 
+    // ----- Whole view -----
+
+    /// Whether the open view has a "play all": anything built from the
+    /// library, but not stations, podcasts, or lists of lists (genres,
+    /// playlists) where the same song would come up more than once.
+    pub fn can_play_view(&self) -> bool {
+        let Some(level) = self.level() else {
+            return false;
+        };
+        let playable = !matches!(
+            level.source,
+            Source::Section(
+                Section::Radio
+                    | Section::Podcasts
+                    | Section::Queue
+                    | Section::Downloads
+                    | Section::Settings
+                    | Section::Genres
+                    | Section::Playlists
+            ) | Source::Podcast { .. }
+        );
+        playable && self.lib.is_some() && level.items.iter().any(Item::selectable)
+    }
+
+    /// Everything the open view stands for, in view order: a folder's
+    /// whole tree, every album in a list, an artist's albums one after
+    /// another. In a grouped list (search, Most listened) only the songs
+    /// count, since the albums and artists there overlap them.
+    pub fn view_tracks(&self) -> Vec<TrackRow> {
+        let (Some(lib), Some(level)) = (&self.lib, self.level()) else {
+            return Vec::new();
+        };
+        if !self.can_play_view() {
+            return Vec::new();
+        }
+        // One query for a folder, however many subfolders it has.
+        if let Source::Folder(dir) = &level.source {
+            return lib.tracks_under(dir).unwrap_or_default();
+        }
+        let grouped = level.items.iter().any(|i| matches!(i, Item::Header(_)));
+        level
+            .items
+            .iter()
+            .filter(|i| !grouped || matches!(i, Item::Track(_)))
+            .flat_map(|i| tracks_of(lib, i, &self.prefs))
+            .collect()
+    }
+
+    /// Play the whole view from the top, in order or shuffled. Shuffle is
+    /// left on or off to match, so the shuffle button flips between the two
+    /// afterwards.
+    pub fn play_view(&mut self, shuffle: bool) {
+        let tracks: Vec<TrackInfo> = self.view_tracks().iter().map(TrackRow::to_info).collect();
+        if tracks.is_empty() {
+            return self.note("Nothing here to play");
+        }
+        let n = tracks.len();
+        self.player.send(Command::PlayAll { tracks, shuffle });
+        self.note(format!(
+            "{} {}",
+            if shuffle { "Shuffling" } else { "Playing" },
+            count(n)
+        ));
+    }
+
+    /// Add the whole view to the end of the queue.
+    pub fn queue_view(&mut self) {
+        let tracks: Vec<TrackInfo> = self.view_tracks().iter().map(TrackRow::to_info).collect();
+        if tracks.is_empty() {
+            return;
+        }
+        let n = tracks.len();
+        self.player.send(Command::AppendTracks(tracks));
+        self.note(format!("Added {} to the queue", count(n)));
+    }
+
+    /// Play the selected item by itself, even one Enter would open (an
+    /// album, a folder, an artist). Songs, stations and episodes play the
+    /// way Enter plays them.
+    pub fn play_selection(&mut self) -> Activated {
+        let Some(item) = self.selected_item() else {
+            return Activated::Nothing;
+        };
+        if matches!(
+            item,
+            Item::Track(_) | Item::Station { .. } | Item::Episode(_)
+        ) {
+            return self.activate();
+        }
+        let tracks = infos_of(self.lib.as_ref(), &item, &self.prefs);
+        if tracks.is_empty() {
+            return Activated::Nothing;
+        }
+        self.player.send(Command::SetQueueTracks {
+            tracks,
+            start: 0,
+            pos: Duration::ZERO,
+        });
+        Activated::Played
+    }
+
     /// Add the selection to the queue, at the end or right after the
     /// current track.
     pub fn add_selected_to_queue(&mut self, next: bool) {
@@ -784,6 +920,10 @@ impl Browser {
                     ArtistMode::TrackArtist => ArtistMode::AlbumArtist,
                 };
                 self.refresh_current();
+                // The stats group artists the same way.
+                for s in Section::STATS {
+                    self.refresh_section(s);
+                }
             }
             Some(Source::Genre { .. }) => {
                 self.prefs.genre_songs = !self.prefs.genre_songs;
@@ -808,6 +948,9 @@ impl Browser {
                 | Section::Downloads
                 | Section::Radio
                 | Section::Podcasts
+                | Section::MostListened
+                | Section::TopAlbums
+                | Section::TopArtists
         ) {
             self.switch(Section::Songs);
         }
