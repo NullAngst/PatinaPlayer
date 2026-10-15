@@ -62,6 +62,22 @@ jobs:
           sudo chmod a+rw /dev/snd/*
           cargo test -p patina-core --test bitperfect -- --ignored
 
+      # Per-device EQ follows PipeWire's default sink. A private PipeWire
+      # with two null sinks stands in for headphones and speakers.
+      - name: Per-device EQ on a real PipeWire
+        run: |
+          sudo apt-get install -y --no-install-recommends pipewire pipewire-bin wireplumber
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          dbus-daemon --session --address="unix:path=$XDG_RUNTIME_DIR/bus" --fork
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          pipewire & sleep 1
+          wireplumber & sleep 2
+          for n in headphones speakers; do
+            pw-cli create-node adapter "{ factory.name=support.null-audio-sink node.name=$n media.class=Audio/Sink node.description=\"Test $n\" audio.position=[FL FR] object.linger=true }"
+          done
+          sleep 1
+          cargo test -p patina-core --test eq pipewire -- --ignored
+
       - name: Build TUI and GUI
         run: cargo build --release -p patina-tui -p patina-gui
 
