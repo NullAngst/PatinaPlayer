@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use super::http;
 use super::{
     Client, RemoteAlbum, RemoteError, RemotePlaylist, RemotePodcast, RemoteSong, RemoteStation,
-    Result, SavedQueue, ServerInfo, ServerKind,
+    Result, SavedQueue, ServerInfo, ServerKind, StreamFormat,
 };
 
 const CDS: &str = "urn:schemas-upnp-org:service:ContentDirectory:1";
@@ -818,9 +818,18 @@ impl Client for Dlna {
             .unwrap_or_default())
     }
 
-    fn stream_url(&self, song_id: &str) -> Result<(String, bool)> {
+    fn stream_url_as(&self, song_id: &str, _: StreamFormat, _: u32) -> Result<(String, bool)> {
         // The id is the server's own URL for the file, less its address.
+        // DLNA has no conversion to ask for; it's always the original.
         Ok((self.full_url(song_id), true))
+    }
+
+    fn stream_setting(&self) -> (StreamFormat, u32) {
+        (StreamFormat::Raw, 0)
+    }
+
+    fn ping(&self) -> Result<()> {
+        self.update_id().map(|_| ())
     }
 
     fn episode_url(&self, _: &str) -> Result<String> {

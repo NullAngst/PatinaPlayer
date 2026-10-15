@@ -184,6 +184,7 @@ fn nothing_is_read_again_until_the_server_changes() {
             artist: "My Bloody Valentine".into(),
             path: String::new(),
             plays: 0,
+            size: 1000,
         });
         st.update_id += 1;
     }
@@ -299,6 +300,7 @@ fn the_browser_finds_adds_renames_and_removes_one() {
         service: None,
         pod: None,
         remote: Some(RemoteService::start(&db, Vec::new(), secrets)),
+        cache: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),

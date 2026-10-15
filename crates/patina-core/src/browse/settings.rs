@@ -35,6 +35,15 @@ pub enum Key {
     AddServer,
     /// Look for DLNA servers on the network.
     FindDlna,
+    /// The cache's size cap.
+    CacheSize,
+    /// Prefetch by size or by song count.
+    Prefetch,
+    /// How far ahead prefetch goes, in the unit `Prefetch` picks.
+    PrefetchAmount,
+    PauseMetered,
+    /// What songs are kept as: the original, or a conversion.
+    CacheFormat,
     /// Read-only facts: where files are.
     Info(&'static str),
 }
@@ -134,6 +143,9 @@ pub struct SettingsInfo {
     pub config_path: PathBuf,
     pub db_path: PathBuf,
     pub offline_dir: PathBuf,
+    /// Where cached songs go, and pinned ones.
+    pub cache_dir: PathBuf,
+    pub pinned_dir: PathBuf,
     pub no_library: bool,
 }
 
@@ -282,6 +294,98 @@ pub fn rows(
                 label: "Find DLNA servers".into(),
                 help: "MiniDLNA, Gerbera, Jellyfin, Plex, Serviio or a NAS on your network. No login needed.",
                 control: Control::Action("Find servers"),
+            },
+        );
+    }
+
+    // Cache and offline
+    if !info.no_library {
+        let c = &cfg.cache;
+        push(
+            "Cache and offline",
+            Setting {
+                key: Key::CacheSize,
+                label: "Cache size".into(),
+                help: "Room for recently played and prefetched songs from your servers. 0 turns it off; pinned songs don't count.",
+                control: Control::Number {
+                    value: ((c.size_mb * 10 + 512) / 1024) as i64,
+                    min: 0,
+                    max: (crate::config::MAX_CACHE_MB / 1024 * 10) as i64,
+                    step: 10,
+                    scale: 10,
+                    unit: " GB",
+                },
+            },
+        );
+        push(
+            "Cache and offline",
+            Setting {
+                key: Key::Prefetch,
+                label: "Prefetch".into(),
+                help: "Download songs coming up in the queue, nearest first. By size suits a mix of hi-res and MP3.",
+                control: Control::Choice {
+                    options: vec![
+                        ("size".into(), "By size".into()),
+                        ("tracks".into(), "By number of songs".into()),
+                    ],
+                    index: usize::from(c.prefetch == crate::cache::PrefetchMode::Tracks),
+                },
+            },
+        );
+        push(
+            "Cache and offline",
+            Setting {
+                key: Key::PrefetchAmount,
+                label: "Prefetch ahead".into(),
+                help: "How far ahead to download. 0 turns prefetch off. It comes out of the cache size.",
+                control: match c.prefetch {
+                    crate::cache::PrefetchMode::Size => Control::Number {
+                        value: c.prefetch_mb as i64,
+                        min: 0,
+                        max: crate::config::MAX_CACHE_MB as i64,
+                        step: 256,
+                        scale: 1,
+                        unit: " MB",
+                    },
+                    crate::cache::PrefetchMode::Tracks => Control::Number {
+                        value: i64::from(c.prefetch_tracks),
+                        min: 0,
+                        max: crate::cache::LOOKAHEAD as i64,
+                        step: 5,
+                        scale: 1,
+                        unit: " songs",
+                    },
+                },
+            },
+        );
+        push(
+            "Cache and offline",
+            Setting {
+                key: Key::PauseMetered,
+                label: "Hold on metered connections".into(),
+                help: "Hold prefetch and offline downloads while NetworkManager says the connection is metered (a phone hotspot).",
+                control: Control::Toggle(c.pause_on_metered),
+            },
+        );
+        let current = c.format_label();
+        let mut options: Vec<(String, String)> = STREAM_CHOICES
+            .iter()
+            .map(|(v, l)| (v.to_string(), l.to_string()))
+            .collect();
+        if !options.iter().any(|o| o.0 == current) {
+            options.push((
+                current.clone(),
+                format!("{} {} kbps", c.format.as_str(), c.bitrate),
+            ));
+        }
+        let index = options.iter().position(|o| o.0 == current).unwrap_or(0);
+        push(
+            "Cache and offline",
+            Setting {
+                key: Key::CacheFormat,
+                label: "Keep songs as".into(),
+                help: "The original file, or a conversion the server makes to save space. Converted songs can't play bit-perfect.",
+                control: Control::Choice { options, index },
             },
         );
     }
@@ -482,6 +586,8 @@ pub fn rows(
     if !info.no_library {
         push("Files", file("Library index", &info.db_path));
         push("Files", file("Downloaded episodes", &info.offline_dir));
+        push("Files", file("Song cache", &info.cache_dir));
+        push("Files", file("Pinned songs", &info.pinned_dir));
     }
     v
 }

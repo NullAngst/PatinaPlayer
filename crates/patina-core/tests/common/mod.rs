@@ -186,6 +186,8 @@ pub struct MSong {
     pub artist: String,
     pub path: String,
     pub plays: i64,
+    /// What the server says the file's size is.
+    pub size: u64,
 }
 
 #[derive(Clone)]
@@ -220,6 +222,10 @@ pub struct State {
     pub session_life: u32,
     pub session_calls: u32,
     pub sessions: Vec<String>,
+    /// Sent for every song in place of the second of sine, when set.
+    pub stream_body: Option<Arc<Vec<u8>>>,
+    /// The format each stream call asked for: "raw", "opus:128".
+    pub streams: Vec<String>,
 }
 
 impl State {
@@ -277,6 +283,7 @@ pub fn library(gonic: bool) -> State {
         artist: artist.into(),
         path: path.into(),
         plays: 0,
+        size: 1000,
     };
     State {
         albums: vec![
@@ -337,6 +344,8 @@ pub fn library(gonic: bool) -> State {
         session_life: 0,
         session_calls: 0,
         sessions: Vec::new(),
+        stream_body: None,
+        streams: Vec::new(),
     }
 }
 
@@ -387,7 +396,7 @@ fn child(flavor: Flavor, a: &MAlbum, s: &MSong) -> Value {
         Flavor::Navidrome => json!({
             "id": s.id, "parent": a.id, "isDir": false, "title": s.title, "album": a.name,
             "artist": s.artist, "track": s.track, "year": a.year, "genre": a.genre,
-            "coverArt": format!("al-{}", a.id), "size": 1000, "contentType": "audio/flac",
+            "coverArt": format!("al-{}", a.id), "size": s.size, "contentType": "audio/flac",
             "suffix": "flac", "duration": 1, "bitRate": 900,
             // Navidrome's default: a path made up from the tags.
             "path": format!("{}/{}/{:02} - {}.flac", a.artist, a.name, s.track, s.title),
@@ -401,7 +410,7 @@ fn child(flavor: Flavor, a: &MAlbum, s: &MSong) -> Value {
         Flavor::Gonic => json!({
             "id": s.id, "parent": a.id, "isDir": false, "title": s.title, "album": a.name,
             "albumId": a.id, "artist": s.artist, "coverArt": a.id, "duration": 1,
-            "genre": a.genre, "path": s.path, "size": 1000, "suffix": "flac",
+            "genre": a.genre, "path": s.path, "size": s.size, "suffix": "flac",
             "track": s.track, "discNumber": 1, "type": "music", "year": a.year
         }),
     }
@@ -506,8 +515,16 @@ fn subsonic(
         },
         "stream" => match r.get("id").and_then(|id| s.song(id)) {
             Some(_) => {
-                assert_eq!(r.get("format"), Some("raw"), "originals by default");
-                Response::bytes("audio/flac", audio().to_vec())
+                let f = r.get("format").unwrap_or("").to_string();
+                let rec = match r.get("maxBitRate") {
+                    Some(k) => format!("{f}:{k}"),
+                    None => f,
+                };
+                s.streams.push(rec);
+                let id = r.get("id").unwrap_or("").to_string();
+                s.calls.push(format!("stream {id}"));
+                let body = s.stream_body.clone().unwrap_or_else(audio);
+                Response::bytes("audio/flac", body.to_vec())
             }
             None if r.get("id").is_some_and(|i| i.starts_with("ep")) => {
                 Response::bytes("audio/flac", audio().to_vec())

@@ -303,11 +303,28 @@ pub struct SavedQueue {
 /// off the UI thread.
 pub trait Client: Send + Sync {
     fn info(&self) -> &ServerInfo;
+    /// A cheap call to check the server still answers. An `Http` error
+    /// means it doesn't; anything else means it answered.
+    fn ping(&self) -> Result<()>;
     /// Every album, paged through behind the scenes.
     fn albums(&self) -> Result<Vec<RemoteAlbum>>;
     fn album_songs(&self, album_id: &str) -> Result<Vec<RemoteSong>>;
     /// A URL to play `song_id` from, and whether it's the original file.
-    fn stream_url(&self, song_id: &str) -> Result<(String, bool)>;
+    /// Uses the server's own streaming setting.
+    fn stream_url(&self, song_id: &str) -> Result<(String, bool)> {
+        let (f, kbps) = self.stream_setting();
+        self.stream_url_as(song_id, f, kbps)
+    }
+    /// The same, in a format of your choosing. A server that can't convert
+    /// sends the original.
+    fn stream_url_as(
+        &self,
+        song_id: &str,
+        format: StreamFormat,
+        kbps: u32,
+    ) -> Result<(String, bool)>;
+    /// What this server is set to stream: the original, or a conversion.
+    fn stream_setting(&self) -> (StreamFormat, u32);
     /// A podcast episode's stream.
     fn episode_url(&self, stream_id: &str) -> Result<String>;
     fn cover(&self, cover_id: &str, size: u32) -> Result<Vec<u8>>;

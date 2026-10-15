@@ -76,6 +76,8 @@ impl Browser {
                 .as_ref()
                 .map(|r| r.statuses())
                 .unwrap_or_default();
+            // A server that went away or came back changes what greys out.
+            self.avail_dirty = true;
             // Stations and status lines show in Radio and Settings.
             self.refresh_section(Section::Radio);
             self.refresh_section(Section::Settings);
@@ -339,6 +341,14 @@ impl Browser {
             return self.error(format!("couldn't save the server: {e}"));
         }
         self.config.servers = list;
+        if let Some(c) = &self.cache {
+            // Kept songs and pins follow a renamed server, before the old
+            // name is forgotten.
+            if let Some(old) = replaces.as_ref().filter(|o| **o != cfg.name) {
+                c.rename_server(old, &cfg.name);
+            }
+            c.set_servers(self.config.servers.iter().map(|s| s.name.clone()).collect());
+        }
         if let Some(r) = &self.remote {
             r.set_servers(self.config.servers.clone());
         }
@@ -377,6 +387,10 @@ impl Browser {
             return self.error(format!("couldn't save: {e}"));
         }
         self.config.servers = list;
+        if let Some(c) = &self.cache {
+            // Its kept songs go with it.
+            c.set_servers(self.config.servers.iter().map(|s| s.name.clone()).collect());
+        }
         if let Some(r) = &self.remote {
             r.set_servers(self.config.servers.clone());
             let shared = self

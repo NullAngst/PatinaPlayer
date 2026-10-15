@@ -366,14 +366,32 @@ impl Feeder {
         let opened = if info.is_live() {
             self.open_station(&info)
         } else if let Some(r) = &info.remote {
-            // A server song: the URL carries a login, so it's made now.
-            crate::remote::registry()
-                .stream(r)
-                .map_err(|e| e.to_string())
-                .and_then(|(url, raw)| {
-                    original &= raw;
-                    Source::open_with(&url, self.open_options(&info)).map_err(|e| e.to_string())
-                })
+            // A server song: from the cache if it's kept or can be (it
+            // plays from its download as that runs), else straight from
+            // the server. The URL carries a login, so it's made now.
+            let opts = self.open_options(&info);
+            match crate::cache::open(r, opts.abort.clone()) {
+                Some(Ok(crate::cache::Opening::File { path, original: o })) => {
+                    original &= o;
+                    Source::open_with(&path.to_string_lossy(), opts).map_err(|e| e.to_string())
+                }
+                Some(Ok(crate::cache::Opening::Growing {
+                    reader,
+                    name,
+                    original: o,
+                })) => {
+                    original &= o;
+                    Source::open_reader(reader, &name, opts).map_err(|e| e.to_string())
+                }
+                Some(Err(e)) => Err(e),
+                None => crate::remote::registry()
+                    .stream(r)
+                    .map_err(|e| e.to_string())
+                    .and_then(|(url, raw)| {
+                        original &= raw;
+                        Source::open_with(&url, opts).map_err(|e| e.to_string())
+                    }),
+            }
         } else {
             match info.location() {
                 Some(loc) => {

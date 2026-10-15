@@ -113,11 +113,7 @@ impl Session {
         let pod = if opts.no_library {
             None
         } else {
-            match PodcastService::start(
-                &db_path,
-                config::offline_dir().join("podcasts"),
-                cfg.podcasts.feeds.clone(),
-            ) {
+            match PodcastService::start(&db_path, cfg.podcasts.feeds.clone()) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     log::warn!("podcasts unavailable: {e}");
@@ -171,17 +167,37 @@ impl Session {
                 Arc::new(crate::secrets::Secrets::open()),
             )
         });
+        // The cache: every server song plays through it, and prefetch,
+        // pinned songs and podcast downloads share its queue.
+        let cache = if opts.no_library {
+            None
+        } else {
+            match crate::cache::CacheService::start(
+                &db_path,
+                cfg.cache.clone(),
+                cfg.servers.iter().map(|s| s.name.clone()).collect(),
+            ) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    log::warn!("the song cache is unavailable: {e}");
+                    None
+                }
+            }
+        };
         let browser = Browser::new(Startup {
             player,
             lib,
             service,
             pod,
             remote,
+            cache,
             config: cfg.clone(),
             settings_info: SettingsInfo {
                 config_path: config_path.clone(),
                 db_path: db_path.clone(),
                 offline_dir: config::offline_dir().join("podcasts"),
+                cache_dir: crate::cache::cache_root(),
+                pinned_dir: crate::cache::offline_root(),
                 no_library: opts.no_library,
             },
         });

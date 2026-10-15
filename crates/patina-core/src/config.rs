@@ -9,7 +9,11 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::audio::output::{Backend, BitPerfect, OutputConfig};
+use crate::cache::{CacheConfig, PrefetchMode};
 use crate::remote::{ServerConfig, ServerKind, StreamFormat};
+
+/// The biggest cache Settings offers: a terabyte.
+pub const MAX_CACHE_MB: u64 = 1024 * 1024;
 
 pub const APP_DIR: &str = "patinaplayer";
 
@@ -86,6 +90,8 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     /// Music servers, in the order they show. Passwords are in the keyring.
     pub servers: Vec<ServerConfig>,
+    /// The track cache, prefetch and offline downloads.
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -230,6 +236,7 @@ impl Default for Config {
             },
             appearance: AppearanceConfig::default(),
             servers: Vec::new(),
+            cache: CacheConfig::default(),
         }
     }
 }
@@ -246,6 +253,19 @@ struct RawConfig {
     podcasts: Option<RawPodcasts>,
     appearance: Option<RawAppearance>,
     server: Option<Vec<RawServer>>,
+    cache: Option<RawCache>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawCache {
+    size_mb: Option<u64>,
+    prefetch: Option<String>,
+    prefetch_mb: Option<u64>,
+    prefetch_tracks: Option<u32>,
+    pause_on_metered: Option<bool>,
+    format: Option<String>,
+    bitrate: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -337,6 +357,7 @@ impl Config {
         let radio = raw.radio.unwrap_or_default();
         let pods = raw.podcasts.unwrap_or_default();
         let look = raw.appearance.unwrap_or_default();
+        let rc = raw.cache.unwrap_or_default();
         let parse_err = |msg: String| ConfigError::Parse {
             path: path.to_path_buf(),
             msg,
@@ -379,6 +400,29 @@ impl Config {
                 udn: s.udn.unwrap_or_default().trim().to_string(),
             });
         }
+        let dc = CacheConfig::default();
+        let cache = CacheConfig {
+            size_mb: rc.size_mb.unwrap_or(dc.size_mb).min(MAX_CACHE_MB),
+            prefetch: match rc.prefetch {
+                Some(m) => m
+                    .parse::<PrefetchMode>()
+                    .map_err(|m| parse_err(format!("cache.prefetch: {m}")))?,
+                None => dc.prefetch,
+            },
+            prefetch_mb: rc.prefetch_mb.unwrap_or(dc.prefetch_mb).min(MAX_CACHE_MB),
+            prefetch_tracks: rc
+                .prefetch_tracks
+                .unwrap_or(dc.prefetch_tracks)
+                .min(crate::cache::LOOKAHEAD as u32),
+            pause_on_metered: rc.pause_on_metered.unwrap_or(dc.pause_on_metered),
+            format: match rc.format {
+                Some(f) => f
+                    .parse::<StreamFormat>()
+                    .map_err(|m| parse_err(format!("cache.format: {m}")))?,
+                None => dc.format,
+            },
+            bitrate: rc.bitrate.unwrap_or(dc.bitrate).clamp(32, 512),
+        };
         let theme = match look.theme {
             Some(t) => t.parse::<Theme>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -444,6 +488,7 @@ impl Config {
             },
             appearance: AppearanceConfig { theme },
             servers,
+            cache,
         })
     }
 
@@ -526,6 +571,26 @@ feeds = []
 speed = 1.0
 # Cut long silences down. Applies to podcasts only.
 trim_silence = false
+
+[cache]
+# Room for songs from your servers: recently played ones, so a replay
+# doesn't hit the server, and prefetched ones. In MB; 0 turns it off, and
+# songs then stream without being kept. Songs you pin for offline live
+# apart from this and don't count.
+size_mb = 10240
+# Download ahead in the queue, by "size" (prefetch_mb) or by "tracks"
+# (prefetch_tracks). 0 turns prefetch off. It counts against size_mb.
+prefetch = "size"
+prefetch_mb = 1024
+prefetch_tracks = 20
+# Hold prefetch and offline downloads on a metered connection (a phone
+# hotspot, as NetworkManager sees it).
+pause_on_metered = true
+# Keep songs as the original file (raw), or as opus or mp3 the server
+# converts to, at bitrate kbps, to save space. Converted songs can't play
+# bit-perfect.
+format = "raw"
+bitrate = 192
 
 # Music servers: Subsonic (Navidrome, Gonic and the like) or Ampache. Add
 # them in Settings, which checks the login and keeps the password in your
@@ -758,6 +823,29 @@ mod tests {
         assert_eq!(c.playback.volume, 80);
         assert!(c.library.watch);
         assert_eq!(c.appearance.theme, Theme::Runout);
+        assert_eq!(
+            c.cache,
+            CacheConfig::default(),
+            "the file says the defaults"
+        );
+    }
+
+    #[test]
+    fn cache_section() {
+        let c = Config::parse(
+            "[cache]\nsize_mb = 2048\nprefetch = \"tracks\"\nprefetch_tracks = 50\n\
+             format = \"opus\"\nbitrate = 128\npause_on_metered = false\n",
+            Path::new("x"),
+        )
+        .unwrap();
+        assert_eq!(c.cache.size_mb, 2048);
+        assert_eq!(c.cache.prefetch, PrefetchMode::Tracks);
+        assert_eq!(c.cache.prefetch_tracks, 50);
+        assert_eq!(c.cache.format, StreamFormat::Opus);
+        assert_eq!(c.cache.bitrate, 128);
+        assert!(!c.cache.pause_on_metered);
+        assert!(Config::parse("[cache]\nprefetch = \"soon\"\n", Path::new("x")).is_err());
+        assert!(Config::parse("[cache]\nsize = 3\n", Path::new("x")).is_err());
     }
 
     #[test]

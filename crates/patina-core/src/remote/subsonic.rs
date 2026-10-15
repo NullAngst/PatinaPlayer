@@ -575,16 +575,30 @@ impl Client for Subsonic {
             .collect())
     }
 
-    fn stream_url(&self, song_id: &str) -> Result<(String, bool)> {
+    fn stream_url_as(
+        &self,
+        song_id: &str,
+        format: StreamFormat,
+        kbps: u32,
+    ) -> Result<(String, bool)> {
         let mut q = vec![("id", song_id.to_string())];
-        match self.stream {
+        match format {
             StreamFormat::Raw => q.push(("format", "raw".into())),
             f => {
                 q.push(("format", f.as_str().into()));
-                q.push(("maxBitRate", self.bitrate.max(32).to_string()));
+                q.push(("maxBitRate", kbps.max(32).to_string()));
             }
         }
-        Ok((self.signed("stream", &q)?, self.stream == StreamFormat::Raw))
+        Ok((self.signed("stream", &q)?, format == StreamFormat::Raw))
+    }
+
+    fn stream_setting(&self) -> (StreamFormat, u32) {
+        (self.stream, self.bitrate)
+    }
+
+    fn ping(&self) -> Result<()> {
+        let r = self.raw("ping", &[], true)?;
+        self.check(&r)
     }
 
     fn episode_url(&self, stream_id: &str) -> Result<String> {

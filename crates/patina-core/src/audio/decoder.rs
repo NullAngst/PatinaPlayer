@@ -163,6 +163,30 @@ impl Source {
         } else {
             Path::new(loc)
         };
+        Self::from_input(input, path, opts)
+    }
+
+    /// Open from a reader, like a song that's still downloading. `name`
+    /// (a file name) helps FFmpeg guess the format.
+    pub fn open_reader<R>(reader: R, name: &str, opts: OpenOptions) -> Result<Self, DecodeError>
+    where
+        R: std::io::Read + std::io::Seek + Send + 'static,
+    {
+        init_ffmpeg();
+        let io = ffmpeg::format::context::StreamIo::from_read_seek(reader)?;
+        let abort = opts.abort.clone();
+        let input =
+            ffmpeg::format::input_from_stream_with_interrupt(io, Some(name), None, move || {
+                abort.as_ref().is_some_and(|a| a.load(Ordering::Relaxed))
+            })?;
+        Self::from_input(input, Path::new(""), opts)
+    }
+
+    fn from_input(
+        input: ffmpeg::format::context::Input,
+        path: &Path,
+        opts: OpenOptions,
+    ) -> Result<Self, DecodeError> {
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Audio)

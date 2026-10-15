@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use patina_core::browse::{
-    Browser, Change, Control, Item, Key as SettingKey, Note, Section, SideEntry, Source,
+    Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, Section, SideEntry, Source,
 };
 use patina_core::library::PlaylistRow;
 use patina_core::remote::dlna::Found;
@@ -85,6 +85,7 @@ pub enum ConfirmAction {
     Setting(SettingKey, Change),
     RemoveFolder(PathBuf),
     RemoveServer(String),
+    ClearCache,
 }
 
 pub enum Modal {
@@ -482,6 +483,41 @@ impl App {
                 }
                 _ => return false,
             },
+            (Some(Source::Section(Section::Downloads)), KeyCode::Char('W')) => {
+                self.b.list_action(if self.b.cache_status.paused {
+                    ListAction::ResumeDownloads
+                } else {
+                    ListAction::PauseDownloads
+                });
+            }
+            (Some(Source::Section(Section::Downloads)), KeyCode::Char('C')) => {
+                self.ask_clear_cache()
+            }
+            (Some(Source::Section(Section::Downloads)), KeyCode::Enter)
+                if matches!(
+                    item,
+                    Some(Item::Action {
+                        action: ListAction::ClearCache,
+                        ..
+                    })
+                ) =>
+            {
+                self.ask_clear_cache();
+            }
+            (Some(Source::Section(Section::Downloads)), code)
+                if matches!(item, Some(Item::Job(_) | Item::Pinned(_))) =>
+            {
+                match (item, code) {
+                    (Some(Item::Job(j)), KeyCode::Char('w')) => self.b.toggle_job_pause(&j),
+                    (Some(Item::Job(j)), KeyCode::Char('x') | KeyCode::Delete) => {
+                        self.b.cancel_job(&j)
+                    }
+                    (Some(Item::Pinned(p)), KeyCode::Char('x' | 'd') | KeyCode::Delete) => {
+                        self.b.unpin(p.pin.id)
+                    }
+                    _ => return false,
+                }
+            }
             (Some(Source::Podcast { .. } | Source::Section(Section::Downloads)), code) => {
                 let Some(Item::Episode(e)) = item else {
                     return false;
@@ -529,6 +565,16 @@ impl App {
             KeyCode::Char('a') if !queue => self.b.add_selected_to_queue(false),
             KeyCode::Char('A') if !queue => self.b.add_selected_to_queue(true),
             KeyCode::Char('p') => self.pick_playlist(),
+            KeyCode::Char('f') if !queue => self.b.toggle_pin_selected(),
+            KeyCode::Char('F') if !queue => {
+                if self.b.view_pin_state().is_some() {
+                    self.b.toggle_pin_view();
+                } else {
+                    self.b.note(
+                        "Open an album, artist, playlist or server folder to keep it offline",
+                    );
+                }
+            }
             KeyCode::Char('o') => self.b.cycle_sort(),
             KeyCode::Char('O') => self.b.reverse_songs(),
             KeyCode::Char('t') => self.b.toggle_mode(),
@@ -890,7 +936,15 @@ impl App {
             ConfirmAction::Setting(key, change) => self.b.change_setting(&key, change),
             ConfirmAction::RemoveFolder(p) => self.b.remove_folder(&p),
             ConfirmAction::RemoveServer(n) => self.b.remove_server(&n),
+            ConfirmAction::ClearCache => self.b.list_action(ListAction::ClearCache),
         }
+    }
+
+    fn ask_clear_cache(&mut self) {
+        self.modal = Modal::Confirm {
+            msg: "Clear the song cache? Pinned songs stay.".into(),
+            action: ConfirmAction::ClearCache,
+        };
     }
 
     fn nudge_volume(&self, d: f64) {

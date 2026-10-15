@@ -94,12 +94,14 @@ pub struct TrackRow {
     pub play_count: i64,
     /// The server's id for a server song.
     pub remote_id: Option<String>,
+    /// File size in bytes, as the folder or the server reported it.
+    pub size: u64,
 }
 
 impl TrackRow {
     const COLS: &'static str = "id, path, title, filename, artist, album_artist, album, album_key, \
         track_no, disc_no, year, genre, duration_ms, codec, sample_rate, bits, channels, kbps, \
-        lossless, added_at, play_count, remote_id";
+        lossless, added_at, play_count, remote_id, size";
 
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
         let title: Option<String> = r.get(2)?;
@@ -133,6 +135,7 @@ impl TrackRow {
             added_at: r.get(19)?,
             play_count: r.get(20)?,
             remote_id: r.get(21)?,
+            size: r.get::<_, Option<i64>>(22)?.unwrap_or(0).max(0) as u64,
         })
     }
 

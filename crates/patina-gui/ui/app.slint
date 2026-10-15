@@ -127,7 +127,8 @@ export struct SideItem {
 
 export struct Row {
     // 0 track, 1 album, 2 artist, 3 folder, 4 genre, 5 playlist, 6 station,
-    // 7 podcast, 8 episode, 9 header, 10 info, 11 missing file, 12 setting
+    // 7 podcast, 8 episode, 9 header, 10 info, 11 missing file, 12 setting,
+    // 13 pinned for offline, 14 a download, 15 a button in the list
     kind: int,
     num: string,
     title: string,
@@ -145,6 +146,11 @@ export struct Row {
     // 5 library folder, 6 add folder, 7 read-only.
     ctl: int,
     on: bool,
+    // Its server can't be reached and none of it is kept here.
+    off: bool,
+    // Pinned for offline, and whether it could be.
+    pinned: bool,
+    can-pin: bool,
 }
 
 export struct QueueRow {
@@ -152,6 +158,7 @@ export struct QueueRow {
     sub: string,
     playing: bool,
     failed: bool,
+    off: bool,
     art: image,
     has-art: bool,
 }
@@ -540,9 +547,18 @@ component ListRow inherits Rectangle {
         padding-left: 8px;
         padding-right: 12px;
         spacing: 12px;
-        // Number, play marker or kind glyph.
+        // Number, play marker or kind glyph, with a dot for pinned.
         Rectangle {
             width: 32px;
+            if item.pinned && !item.playing: Text {
+                x: 0px;
+                height: parent.height;
+                text: "↓";
+                vertical-alignment: center;
+                font-size: 12px;
+                font-weight: 700;
+                color: P.verdigris;
+            }
             Text {
                 width: parent.width;
                 height: parent.height;
@@ -575,8 +591,8 @@ component ListRow inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             font-size: 13px;
-            font-weight: item.playing ? (P.kawaii ? 800 : 600) : 400;
-            color: item.warn ? P.copper : (item.playing ? P.accent-text : (item.dim ? P.muted : P.text));
+            font-weight: item.playing || item.kind == 15 ? (P.kawaii ? 800 : 600) : 400;
+            color: item.warn ? P.copper : (item.playing || item.kind == 15 ? P.accent-text : (item.off ? P.wave : (item.dim ? P.muted : P.text)));
         }
         if item.sub != "" || item.kind <= 2: Text {
             horizontal-stretch: item.kind == 10 ? 5 : 2.5;
@@ -586,7 +602,7 @@ component ListRow inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             font-size: 12.5px;
-            color: item.warn ? P.copper : (item.playing ? P.accent-text : P.muted);
+            color: item.warn ? P.copper : (item.playing ? P.accent-text : (item.off ? P.wave : P.muted));
         }
         if item.meta != "" || item.kind <= 2: Text {
             horizontal-stretch: 2.5;
@@ -596,7 +612,7 @@ component ListRow inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             font-size: 12.5px;
-            color: item.playing ? P.accent-text : P.muted;
+            color: item.warn ? P.copper : (item.playing ? P.accent-text : (item.off ? P.wave : P.muted));
         }
         Text {
             min-width: 64px;
@@ -613,15 +629,15 @@ component ListRow inherits Rectangle {
         enabled: item.selectable;
         Menu {
             // Things that play.
-            if item.kind == 0 || item.kind == 1 || item.kind == 2 || item.kind == 3 || item.kind == 4 || item.kind == 5 || item.kind == 6 || item.kind == 7 || item.kind == 8: MenuItem {
+            if item.kind <= 8 || item.kind == 13: MenuItem {
                 title: item.kind == 8 ? "Play (resume)" : "Play";
                 activated => { root.act("play"); }
             }
-            if item.kind <= 8: MenuItem {
+            if item.kind <= 8 || item.kind == 13: MenuItem {
                 title: "Play next";
                 activated => { root.act("next"); }
             }
-            if item.kind <= 8: MenuItem {
+            if item.kind <= 8 || item.kind == 13: MenuItem {
                 title: "Add to queue";
                 activated => { root.act("queue"); }
             }
@@ -654,6 +670,20 @@ component ListRow inherits Rectangle {
                 title: item.dim ? "Mark as not played" : "Mark as played";
                 activated => { root.act("played"); }
             }
+            // Offline.
+            if item.can-pin: MenuSeparator {}
+            if item.can-pin: MenuItem {
+                title: item.pinned ? "Stop keeping offline" : "Keep offline";
+                activated => { root.act("pin"); }
+            }
+            if item.kind == 13: MenuSeparator {}
+            if item.kind == 13: MenuItem { title: "Unpin"; activated => { root.act("unpin"); } }
+            // Downloads.
+            if item.kind == 14: MenuItem {
+                title: item.on ? "Resume" : "Pause";
+                activated => { root.act("job-pause"); }
+            }
+            if item.kind == 14: MenuItem { title: "Cancel"; activated => { root.act("job-cancel"); } }
             // Playlists.
             if item.kind == 5: MenuSeparator {}
             if item.kind == 5: MenuItem { title: "Rename…"; activated => { root.act("pl-rename"); } }
@@ -842,24 +872,47 @@ component AlbumTile inherits Rectangle {
     VerticalLayout {
         padding: 8px;
         spacing: 6px;
-        Cover {
+        Rectangle {
             height: self.width;
-            art: item.art;
-            has-art: item.has-art;
-            radius: 6px;
+            Cover {
+                width: parent.width;
+                height: parent.height;
+                art: item.art;
+                has-art: item.has-art;
+                radius: 6px;
+                // Its server is away and none of it is kept: faded.
+                opacity: item.off ? 0.35 : 1.0;
+            }
+            // Pinned for offline: a badge in the corner.
+            if item.pinned: Rectangle {
+                x: parent.width - self.width - 6px;
+                y: parent.height - self.height - 6px;
+                width: 22px;
+                height: 22px;
+                border-radius: 11px;
+                background: P.verdigris;
+                Text {
+                    text: "↓";
+                    color: P.on-accent;
+                    font-size: 13px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
         Text {
             text: item.title;
             overflow: elide;
             font-size: 13px;
             font-weight: P.kawaii ? 700 : 600;
-            color: item.playing ? P.accent-text : P.text;
+            color: item.playing ? P.accent-text : (item.off ? P.wave : P.text);
         }
         Text {
             text: item.sub;
             overflow: elide;
             font-size: 12px;
-            color: P.muted;
+            color: item.off ? P.wave : P.muted;
         }
     }
     tcm := ContextMenuArea {
@@ -868,6 +921,11 @@ component AlbumTile inherits Rectangle {
             MenuItem { title: "Play next"; activated => { root.act("next"); } }
             MenuItem { title: "Add to queue"; activated => { root.act("queue"); } }
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
+            if item.can-pin: MenuSeparator {}
+            if item.can-pin: MenuItem {
+                title: item.pinned ? "Stop keeping offline" : "Keep offline";
+                activated => { root.act("pin"); }
+            }
         }
         ta := TouchArea {
             mouse-cursor: pointer;
@@ -1661,7 +1719,7 @@ export component AppWindow inherits Window {
                                         Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; }
                                         VerticalLayout {
                                             alignment: center;
-                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : P.text); }
+                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : (q.off ? P.wave : P.text)); }
                                             Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
                                         }
                                     }

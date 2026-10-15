@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use patina_core::browse::{
-    Activated, Browser, Change, Control, Item, Key as SettingKey, Note, Section, SideEntry, Source,
-    fmt_duration, fmt_length,
+    Activated, Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, Section,
+    SideEntry, Source, fmt_duration, fmt_length,
 };
 use patina_core::config::Theme;
 use patina_core::library::PlaylistRow;
@@ -58,6 +58,7 @@ enum Confirm {
     DeleteStation(usize),
     Unsubscribe(String),
     RemoveServer(String),
+    ClearCache,
 }
 
 pub struct State {
@@ -109,7 +110,9 @@ v / V        play this whole view in order / shuffled
 Backspace    back a level (Alt+Left / Alt+Right: back, forward)
 a / A        add to queue / play next
 p            add to a playlist
-Delete       remove from the queue, the open playlist, or Settings
+f / F        keep the selection / this whole view offline, or stop
+Delete       remove from the queue, the open playlist, or Settings;
+             in Downloads: cancel a download or unpin
 Enter        in Settings: flip, pick or edit the option
 [ ]  z       podcast speed, silence trimming
 q            queue panel
@@ -355,33 +358,33 @@ impl State {
                 r.kind = 8;
                 r.title = ss(&e.title);
                 r.sub = ss(e.published.map(date).unwrap_or_default());
-                let pod = self.b.pod.as_ref().map(|p| p.status());
-                let dl = pod
-                    .as_ref()
-                    .and_then(|d| d.downloading)
-                    .filter(|d| d.0 == e.id);
-                let queued = pod.as_ref().is_some_and(|d| d.queued.contains(&e.id));
-                r.meta = ss(if let Some((_, done, total)) = dl {
-                    match total {
-                        Some(t) if t > 0 => format!("downloading {}%", done * 100 / t),
-                        _ => format!("downloading {} MB", done / 1_000_000),
-                    }
-                } else if queued {
-                    "waiting to download".into()
-                } else if e.played {
-                    "played".into()
-                } else if e.position > Duration::from_secs(10) {
-                    match e.duration {
-                        Some(d) if d > e.position => {
-                            format!("{} left", fmt_duration(d - e.position))
+                use patina_core::cache::EpisodeState;
+                let dl = self.b.episode_download(e.id);
+                r.meta = ss(
+                    if let Some(EpisodeState::Downloading { done, total }) = dl {
+                        match total {
+                            Some(t) if t > 0 => format!("downloading {}%", done * 100 / t),
+                            _ => format!("downloading {} MB", done / 1_000_000),
                         }
-                        _ => format!("at {}", fmt_duration(e.position)),
-                    }
-                } else if e.download.is_some() {
-                    "new · downloaded".into()
-                } else {
-                    "new".into()
-                });
+                    } else if dl == Some(EpisodeState::Paused) {
+                        "download paused".into()
+                    } else if dl.is_some() {
+                        "waiting to download".into()
+                    } else if e.played {
+                        "played".into()
+                    } else if e.position > Duration::from_secs(10) {
+                        match e.duration {
+                            Some(d) if d > e.position => {
+                                format!("{} left", fmt_duration(d - e.position))
+                            }
+                            _ => format!("at {}", fmt_duration(e.position)),
+                        }
+                    } else if e.download.is_some() {
+                        "new · downloaded".into()
+                    } else {
+                        "new".into()
+                    },
+                );
                 r.right = ss(e.duration.map(fmt_duration).unwrap_or_default());
                 r.dim = e.played;
                 r.downloaded = e.download.is_some();
@@ -423,7 +426,39 @@ impl State {
                     r.meta = r.sub.clone();
                 }
             }
+            Item::Pinned(p) => {
+                r.kind = 13;
+                r.num = SharedString::new();
+                r.title = ss(&p.pin.name);
+                r.sub = ss(p.pin.kind.label());
+                r.meta = ss(format!(
+                    "{} of {} song{}",
+                    p.stored,
+                    p.songs,
+                    s_(p.songs as i64)
+                ));
+                r.right = ss(patina_core::browse::fmt_bytes(p.bytes));
+                r.downloaded = p.stored >= p.songs;
+            }
+            Item::Job(j) => {
+                r.kind = 14;
+                r.num = SharedString::new();
+                r.title = ss(&j.label);
+                r.sub = ss(j.kind.label());
+                r.meta = ss(j.state());
+                r.playing = j.active;
+                r.warn = j.error.is_some();
+                r.on = j.paused;
+            }
+            Item::Action { label, .. } => {
+                r.kind = 15;
+                r.num = SharedString::new();
+                r.title = ss(label);
+            }
         }
+        r.off = !self.b.plays(item);
+        r.can_pin = self.b.can_pin(item);
+        r.pinned = r.can_pin && self.b.pinned(item).is_some();
         r
     }
 
@@ -431,6 +466,18 @@ impl State {
     /// that can be played as a whole gets Play and Shuffle up front.
     fn chrome(&self) -> (i32, Vec<&'static str>, Vec<(&'static str, String)>) {
         let (layout, cols, mut acts) = self.chrome_base();
+        // An album, artist, playlist or folder with server songs in it can
+        // be kept offline whole.
+        if let Some(pinned) = self.b.view_pin_state() {
+            acts.push((
+                "pin",
+                if pinned {
+                    "Kept offline".into()
+                } else {
+                    "Keep offline".into()
+                },
+            ));
+        }
         if self.b.can_play_view() && !acts.iter().any(|(a, _)| *a == "play") {
             acts.splice(
                 0..0,
@@ -530,11 +577,7 @@ impl State {
                 vec!["", "Episode", "Published", "Progress", "Length"],
                 vec![("refresh", "Refresh".into())],
             ),
-            (Section::Downloads, _) => (
-                0,
-                vec!["", "Episode", "Published", "Progress", "Length"],
-                vec![],
-            ),
+            (Section::Downloads, _) => (0, vec![], vec![]),
             (Section::Settings, _) => (0, vec![], vec![]),
             // Mixed artists, albums and songs: the group headings label them.
             (_, Some(Source::Search(_))) => (0, vec![], vec![]),
@@ -870,6 +913,7 @@ impl State {
         let models: Vec<QueueRow> = rows
             .into_iter()
             .map(|(info, playing, failed)| QueueRow {
+                off: !self.b.avail.info_plays(&info),
                 title: ss(info.display_title()),
                 sub: ss(sub_line(&info)),
                 playing,
@@ -1199,6 +1243,27 @@ impl State {
         }
     }
 
+    /// Enter or a double-click. Clearing the cache asks first.
+    fn activate_in(&mut self, ui: &AppWindow) {
+        if let Some(Item::Action {
+            action: ListAction::ClearCache,
+            ..
+        }) = self.b.selected_item()
+        {
+            return self.ask_clear_cache(ui);
+        }
+        self.activate();
+    }
+
+    fn ask_clear_cache(&mut self, ui: &AppWindow) {
+        self.confirm(
+            ui,
+            "Clear the song cache? Pinned songs stay, and songs come back as you play them.".into(),
+            "Clear",
+            Confirm::ClearCache,
+        );
+    }
+
     fn activate(&mut self) {
         if self.b.section == Section::Queue {
             self.b.play_queue_position(self.queue_sel);
@@ -1255,6 +1320,7 @@ impl State {
                 );
             }
             "refresh" => self.b.rescan(),
+            "pin" => self.b.toggle_pin_view(),
             _ => {}
         }
     }
@@ -1617,6 +1683,22 @@ impl State {
                     self.b.toggle_played(&e);
                 }
             }
+            "pin" => self.b.toggle_pin_selected(),
+            "unpin" => {
+                if let Some(Item::Pinned(p)) = item {
+                    self.b.unpin(p.pin.id);
+                }
+            }
+            "job-pause" => {
+                if let Some(Item::Job(j)) = item {
+                    self.b.toggle_job_pause(&j);
+                }
+            }
+            "job-cancel" => {
+                if let Some(Item::Job(j)) = item {
+                    self.b.cancel_job(&j);
+                }
+            }
             "pl-rename" => {
                 if let Some(Item::Playlist(p)) = item {
                     self.dlg = Dlg::RenamePlaylist(p.id);
@@ -1708,6 +1790,7 @@ impl State {
                 Confirm::DeleteStation(i) => self.b.delete_station(i),
                 Confirm::Unsubscribe(url) => self.b.unsubscribe(&url),
                 Confirm::RemoveServer(n) => self.b.remove_server(&n),
+                Confirm::ClearCache => self.b.list_action(ListAction::ClearCache),
             },
             Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Dlna(_) | Dlg::Help | Dlg::None => {}
         }
@@ -1799,7 +1882,7 @@ impl State {
             if self.b.selected_setting().is_some() {
                 self.setting_default(ui);
             } else {
-                self.activate();
+                self.activate_in(ui);
             }
         } else if is(Key::Backspace) {
             self.b.pop();
@@ -1818,7 +1901,11 @@ impl State {
             } else if self.b.in_playlist().is_some() {
                 self.b.edit_playlist(true, 0);
             } else {
-                return false;
+                match self.b.selected_item() {
+                    Some(Item::Job(j)) => self.b.cancel_job(&j),
+                    Some(Item::Pinned(p)) => self.b.unpin(p.pin.id),
+                    _ => return false,
+                }
             }
         } else if is(Key::F5) {
             self.b.rescan();
@@ -1849,6 +1936,8 @@ impl State {
                 "z" => self.b.toggle_trim(),
                 "v" if !queue => self.play_view(false),
                 "V" if !queue => self.play_view(true),
+                "f" if !queue => self.b.toggle_pin_selected(),
+                "F" if !queue => self.b.toggle_pin_view(),
                 "a" if !queue => self.b.add_selected_to_queue(false),
                 "A" if !queue => self.b.add_selected_to_queue(true),
                 "p" => {
@@ -2025,7 +2114,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
     });
     on!(on_row_activate, |s, u, i| {
         if s.b.select(i as usize) {
-            s.activate();
+            s.activate_in(&u);
         }
     });
     on!(on_bp_clicked, |s, u| {
@@ -2155,7 +2244,11 @@ fn count_label(items: &[Item]) -> String {
             Item::Station { .. } => "station",
             Item::Podcast(_) => "podcast",
             Item::Episode(_) => "episode",
-            Item::Header(_) | Item::Info { .. } | Item::Setting(_) => continue,
+            Item::Pinned(_) => "pin",
+            Item::Job(_) => "download",
+            Item::Header(_) | Item::Info { .. } | Item::Setting(_) | Item::Action { .. } => {
+                continue;
+            }
         };
         match counts.iter_mut().find(|(n, _)| *n == noun) {
             Some((_, c)) => *c += 1,

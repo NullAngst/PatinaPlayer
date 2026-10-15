@@ -473,12 +473,17 @@ fn feed_download_resumes_and_progress_is_saved() {
     let ep = &eps[0];
 
     // First attempt breaks halfway; the second picks up with a Range.
+    use patina_core::cache::fetch;
     let dest = srv.dir.join("dl").join("ep1.mp3");
     let cancel = AtomicBool::new(false);
-    let first = patina_core::podcast::download(&ep.audio_url, &dest, &cancel, &|_, _| {});
-    assert!(first.is_err(), "the server cut the first download");
-    assert!(!dest.exists(), "a half file never takes the real name");
-    patina_core::podcast::download(&ep.audio_url, &dest, &cancel, &|_, _| {}).unwrap();
+    let http = fetch::client();
+    // The server cuts the first try halfway. The retry built into fetch
+    // asks for the rest with a range, and a half file never takes the
+    // real name in between.
+    let progress = fetch::Progress::new();
+    let first = fetch::fetch(&http, &ep.audio_url, &dest, true, &progress, &cancel);
+    assert!(first.is_ok(), "{first:?}");
+    assert_eq!(progress.state(), fetch::State::Done);
     let reqs = srv.episode_requests.lock().unwrap().clone();
     assert_eq!(reqs[0], None);
     assert!(
@@ -541,13 +546,14 @@ fn feed_download_resumes_and_progress_is_saved() {
 }
 
 #[test]
-fn podcast_service_refreshes_and_downloads() {
-    use patina_core::podcast::{PodEvent, PodcastService};
+fn podcast_service_refreshes_and_the_cache_downloads() {
+    use patina_core::cache::{CacheConfig, CacheEvent, CacheService, Roots};
+    use patina_core::podcast::PodcastService;
     let srv = start_server();
     let db = srv.dir.join("lib.db");
     let offline = srv.dir.join("offline");
     let feed = srv.url("/feed.xml");
-    let svc = PodcastService::start(&db, offline.clone(), vec![feed.clone()]).unwrap();
+    let svc = PodcastService::start(&db, vec![feed.clone()]).unwrap();
     let lib = Library::open(&db).unwrap();
     let ep = wait(10, || {
         let _ = svc.events().try_recv();
@@ -556,17 +562,23 @@ fn podcast_service_refreshes_and_downloads() {
         (p.title == "Local Show").then(|| lib.episodes(p.id).ok()?.into_iter().next())?
     });
     assert_eq!(ep.title, "First");
-    // The server breaks the first download of this file; the service
-    // reports the failure and a second try resumes it.
-    svc.download(ep.id);
-    let mut failed = false;
-    wait(20, || match svc.events().try_recv() {
-        Ok(PodEvent::Downloaded(id)) if id == ep.id => Some(()),
-        Ok(PodEvent::Error(_)) if !failed => {
-            failed = true;
-            svc.download(ep.id);
-            None
-        }
+    // Episodes download through the cache's queue. The server breaks the
+    // first download of this file halfway; the download picks it up again
+    // with a range on its own.
+    let cache = CacheService::start_at(
+        &db,
+        CacheConfig::default(),
+        Vec::new(),
+        Roots {
+            cache: srv.dir.join("cache"),
+            offline: srv.dir.join("pinned"),
+            podcasts: offline.clone(),
+        },
+    )
+    .unwrap();
+    cache.download_episode(ep.id);
+    wait(20, || match cache.events().try_recv() {
+        Ok(CacheEvent::EpisodeDone(id)) if id == ep.id => Some(()),
         _ => None,
     });
     let ep = lib.episode(ep.id).unwrap().unwrap();

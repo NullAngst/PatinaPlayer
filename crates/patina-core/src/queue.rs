@@ -285,6 +285,30 @@ impl Queue {
         }
     }
 
+    /// Up to `n` entries after the current one, in the order they'll
+    /// play: wrapping around with Repeat All, the current one over and
+    /// over with Repeat One. From the top when nothing is current.
+    pub fn ahead(&self, n: usize) -> Vec<EntryId> {
+        let len = self.order.len();
+        if len == 0 || n == 0 {
+            return Vec::new();
+        }
+        let start = match self.current.and_then(|c| self.position(c)) {
+            Some(p) if self.repeat == Repeat::One => return vec![self.order[p]],
+            Some(p) => p + 1,
+            None => 0,
+        };
+        let take = if self.repeat == Repeat::All {
+            // Everything but the current one, once round.
+            len.saturating_sub(usize::from(start > 0))
+        } else {
+            len.saturating_sub(start)
+        };
+        (0..take.min(n))
+            .map(|i| self.order[(start + i) % len])
+            .collect()
+    }
+
     pub fn first(&self) -> Option<EntryId> {
         self.order.first().copied()
     }
@@ -430,6 +454,22 @@ mod tests {
         q.set_shuffle(true);
         q.set_shuffle(false);
         assert_eq!(q.play_order(), &[ids[4], ids[0], ids[1], ids[2]]);
+    }
+
+    #[test]
+    fn ahead_follows_play_order_and_repeat() {
+        let (mut q, ids) = q(4);
+        assert_eq!(
+            q.ahead(2),
+            vec![ids[0], ids[1]],
+            "nothing playing: from the top"
+        );
+        q.set_current(Some(ids[2]));
+        assert_eq!(q.ahead(10), vec![ids[3]]);
+        q.repeat = Repeat::All;
+        assert_eq!(q.ahead(10), vec![ids[3], ids[0], ids[1]]);
+        q.repeat = Repeat::One;
+        assert_eq!(q.ahead(10), vec![ids[2]]);
     }
 
     #[test]

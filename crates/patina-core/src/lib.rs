@@ -4,6 +4,7 @@
 pub mod art;
 pub mod audio;
 pub mod browse;
+pub mod cache;
 pub mod config;
 pub mod library;
 pub mod player;

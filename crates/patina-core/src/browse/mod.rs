@@ -3,7 +3,9 @@
 //! and draw what it holds; neither one decides what a key does to the
 //! library, the queue or the config. That's how the two stay identical.
 
+mod downloads;
 pub mod model;
+pub mod offline;
 mod servers;
 pub mod settings;
 
@@ -66,6 +68,8 @@ pub struct Startup {
     pub pod: Option<PodcastService>,
     /// Music servers. None without the library.
     pub remote: Option<RemoteService>,
+    /// The song cache and download queue. None without the library.
+    pub cache: Option<crate::cache::CacheService>,
     /// The config as loaded. Settings edits it, and the file, together.
     pub config: Config,
     pub settings_info: SettingsInfo,
@@ -77,6 +81,16 @@ pub struct Browser {
     pub service: Option<LibraryService>,
     pub pod: Option<PodcastService>,
     pub remote: Option<RemoteService>,
+    pub cache: Option<crate::cache::CacheService>,
+    /// The cache as of the last poll, for Downloads.
+    pub cache_status: crate::cache::Status,
+    /// The songs last handed to prefetch, so the same list isn't sent
+    /// again on every queue event.
+    sent_upcoming: Vec<crate::cache::SongKey>,
+    /// What can play while a server is unreachable.
+    pub avail: offline::Availability,
+    /// Something changed that may change what greys out.
+    avail_dirty: bool,
     /// The servers' status as of the last poll.
     pub servers: Vec<ServerStatus>,
     /// Server changes waiting to be redrawn, at most a couple a second
@@ -138,6 +152,10 @@ pub fn added_note(added: usize, asked: usize, name: &str) -> String {
     }
 }
 
+/// Said when you try to play something whose server is away and that
+/// isn't kept here.
+const UNREACHABLE: &str = "Its server can't be reached right now, and it isn't kept here. Keep offline saves it for times like this.";
+
 pub fn count(n: usize) -> String {
     format!("{n} track{}", plural(n))
 }
@@ -151,6 +169,11 @@ impl Browser {
             service: s.service,
             pod: s.pod,
             remote: s.remote,
+            cache_status: s.cache.as_ref().map(|c| c.status()).unwrap_or_default(),
+            cache: s.cache,
+            sent_upcoming: Vec::new(),
+            avail: offline::Availability::default(),
+            avail_dirty: false,
             servers: Vec::new(),
             servers_changed: None,
             queue_sync: servers::QueueSync::default(),
@@ -207,14 +230,20 @@ impl Browser {
     /// player's events, which frontends may want too (track changes).
     pub fn poll(&mut self) -> Vec<Event> {
         let events: Vec<Event> = self.player.events().try_iter().collect();
+        let mut queue_moved = false;
         for ev in &events {
             if let Event::Error(e) = ev {
                 self.error(e.clone());
             }
             if matches!(ev, Event::QueueChanged | Event::TrackChanged(_)) {
                 self.touch();
+                queue_moved = true;
             }
         }
+        if queue_moved {
+            self.feed_prefetch();
+        }
+        self.poll_cache();
         if events.iter().any(|e| matches!(e, Event::Played(_))) {
             for s in Section::STATS {
                 self.refresh_section(s);
@@ -237,19 +266,7 @@ impl Browser {
             for ev in evs {
                 match ev {
                     PodEvent::Updated => pods_changed = true,
-                    PodEvent::Downloaded(id) => {
-                        pods_changed = true;
-                        let title = self
-                            .lib
-                            .as_ref()
-                            .and_then(|l| l.episode(id).ok().flatten())
-                            .map(|e| e.title)
-                            .unwrap_or_default();
-                        self.notes
-                            .push(Note::Info(format!("Downloaded \"{title}\"")));
-                    }
                     PodEvent::Error(e) => self.notes.push(Note::Error(e)),
-                    PodEvent::Download { .. } => self.generation += 1,
                 }
             }
         }
@@ -278,13 +295,23 @@ impl Browser {
                 self.touch();
             }
         }
-        changed |= self.poll_servers();
+        let synced = self.poll_servers();
+        if synced && let Some(c) = &self.cache {
+            // Pins may stand for more songs now.
+            c.resync();
+        }
+        changed |= synced;
         if changed {
+            self.avail_dirty = true;
             self.refresh_all();
             self.rebuild_sidebar();
         } else if pods_changed {
             self.refresh_section(Section::Podcasts);
             self.refresh_section(Section::Downloads);
+        }
+        if self.avail_dirty {
+            self.avail_dirty = false;
+            self.update_availability();
         }
         events
     }
@@ -428,6 +455,7 @@ impl Browser {
             stations: &self.stations,
             checks: &self.checks,
             servers: &self.servers,
+            cache: self.cache.as_ref().map(|_| &self.cache_status),
         }
     }
 
@@ -441,7 +469,13 @@ impl Browser {
                     selected: 0,
                     offset: 0,
                 };
-                l.selected = l.snap(0, 1);
+                // Start on content, not on a button like "Pause downloads"
+                // that Enter would press by accident.
+                l.selected = l
+                    .items
+                    .iter()
+                    .position(|i| i.selectable() && !matches!(i, Item::Action { .. }))
+                    .unwrap_or_else(|| l.snap(0, 1));
                 Some(l)
             }
             Err(e) => {
@@ -657,14 +691,21 @@ impl Browser {
                 Activated::Played
             }
             Item::Track(t) => {
+                if !self.avail.plays(&item, self.prefs.artist_mode) {
+                    self.note(UNREACHABLE);
+                    return Activated::Nothing;
+                }
                 // Play the whole list this track sits in, starting here, the
                 // way picking a song in an album plays the album from there.
+                // Songs that can't play right now (a server away, not kept)
+                // are left out.
                 let Some(level) = self.level() else {
                     return Activated::Nothing;
                 };
                 let tracks: Vec<TrackRow> = level
                     .items
                     .iter()
+                    .filter(|i| self.avail.plays(i, self.prefs.artist_mode))
                     .filter_map(|i| match i {
                         Item::Track(t) => Some(t.clone()),
                         _ => None,
@@ -678,6 +719,10 @@ impl Browser {
                     Duration::ZERO,
                 );
                 Activated::Played
+            }
+            Item::Action { action, .. } => {
+                self.list_action(*action);
+                Activated::Nothing
             }
             _ => Activated::Nothing,
         }
@@ -735,7 +780,7 @@ impl Browser {
     /// left on or off to match, so the shuffle button flips between the two
     /// afterwards.
     pub fn play_view(&mut self, shuffle: bool) {
-        let tracks: Vec<TrackInfo> = self.view_tracks().iter().map(TrackRow::to_info).collect();
+        let tracks = self.playable(self.view_tracks().iter().map(TrackRow::to_info).collect());
         if tracks.is_empty() {
             return self.note("Nothing here to play");
         }
@@ -750,7 +795,7 @@ impl Browser {
 
     /// Add the whole view to the end of the queue.
     pub fn queue_view(&mut self) {
-        let tracks: Vec<TrackInfo> = self.view_tracks().iter().map(TrackRow::to_info).collect();
+        let tracks = self.playable(self.view_tracks().iter().map(TrackRow::to_info).collect());
         if tracks.is_empty() {
             return self.note("Nothing here to add");
         }
@@ -772,8 +817,11 @@ impl Browser {
         ) {
             return self.activate();
         }
-        let tracks = infos_of(self.lib.as_ref(), &item, &self.prefs);
+        let tracks = self.playable(infos_of(self.lib.as_ref(), &item, &self.prefs));
         if tracks.is_empty() {
+            if self.avail.any_offline() {
+                self.note(UNREACHABLE);
+            }
             return Activated::Nothing;
         }
         self.player.send(Command::SetQueueTracks {
@@ -790,8 +838,11 @@ impl Browser {
         let Some(item) = self.selected_item() else {
             return;
         };
-        let infos = infos_of(self.lib.as_ref(), &item, &self.prefs);
+        let infos = self.playable(infos_of(self.lib.as_ref(), &item, &self.prefs));
         if infos.is_empty() {
+            if self.avail.any_offline() {
+                self.note(UNREACHABLE);
+            }
             return;
         }
         let n = infos.len();
@@ -1250,6 +1301,14 @@ impl Browser {
                 (Key::PodcastTrim, Control::Toggle(on)) => {
                     self.set_podcast_playback(self.podcast_tempo, *on);
                 }
+                (
+                    Key::CacheSize
+                    | Key::Prefetch
+                    | Key::PrefetchAmount
+                    | Key::PauseMetered
+                    | Key::CacheFormat,
+                    _,
+                ) => self.change_cache_setting(key, &new)?,
                 _ => {}
             }
             Ok(())
@@ -1452,18 +1511,28 @@ impl Browser {
 
     /// Start a download, or cancel the one running or queued.
     pub fn toggle_download(&mut self, e: &EpisodeRow) {
-        let Some(pod) = &self.pod else { return };
-        let busy = pod.status();
-        if busy.downloading.is_some_and(|d| d.0 == e.id) || busy.queued.contains(&e.id) {
-            pod.cancel_download(e.id);
+        let Some(cache) = &self.cache else {
+            return self.error("Downloads need the library");
+        };
+        if self.cache_status.episodes.remove(&e.id).is_some() {
+            cache.cancel_episode(e.id);
             self.note("Download cancelled");
         } else if e.download.is_some() {
             self.note("Already downloaded");
         } else {
-            pod.download(e.id);
+            cache.download_episode(e.id);
+            self.cache_status
+                .episodes
+                .insert(e.id, crate::cache::EpisodeState::Queued);
             self.note(format!("Downloading \"{}\"", e.title));
         }
+        self.refresh_section(Section::Downloads);
         self.touch();
+    }
+
+    /// Where an episode's download stands, if it's queued or running.
+    pub fn episode_download(&self, id: i64) -> Option<crate::cache::EpisodeState> {
+        self.cache_status.episodes.get(&id).copied()
     }
 
     pub fn delete_download(&mut self, id: i64) {

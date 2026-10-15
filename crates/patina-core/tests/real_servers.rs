@@ -271,3 +271,125 @@ fn dlna() {
     player.send(Command::Quit);
     remote::registry().remove("NAS");
 }
+
+/// The cache against a real DLNA server: prefetch keeps songs byte for
+/// byte as the server has them, and a song that isn't kept yet plays from
+/// its download as that runs.
+#[test]
+#[ignore = "needs a DLNA server (CI starts MiniDLNA)"]
+fn dlna_through_the_cache() {
+    use patina_core::cache::{CacheConfig, CacheService, Roots, SongKey};
+    let Some(url) = env("PATINA_DLNA") else {
+        return;
+    };
+    let dev = remote::dlna::describe(&url).expect("its description");
+    let cfg = ServerConfig {
+        name: "NASCache".into(),
+        url: url.clone(),
+        kind: ServerKind::Dlna,
+        udn: dev.udn.clone(),
+        ..Default::default()
+    };
+    let c = remote::connect(&cfg, "").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.db");
+    let mut lib = Library::open(&db).unwrap();
+    sync::sync_library(
+        &mut lib,
+        "NASCache",
+        ServerKind::Dlna,
+        c.as_ref(),
+        false,
+        &|_, _| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    remote::registry().set_client("NASCache", Some(c.clone()));
+    let songs = lib.songs(Default::default(), false).unwrap();
+    assert!(songs.len() >= 2, "needs a couple of songs");
+    let roots = Roots {
+        cache: dir.path().join("cache"),
+        offline: dir.path().join("offline"),
+        podcasts: dir.path().join("podcasts"),
+    };
+    let cache = CacheService::start_at(&db, CacheConfig::default(), vec!["NASCache".into()], roots)
+        .unwrap();
+    let (last, rest) = songs.split_last().unwrap();
+    let keys: Vec<SongKey> = rest
+        .iter()
+        .map(|t| SongKey::new("NASCache", t.remote_id.clone().unwrap()))
+        .collect();
+    cache.upcoming(keys.clone());
+    let end = Instant::now() + Duration::from_secs(60);
+    while cache.status().cache_files < keys.len() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let st = cache.status();
+    eprintln!(
+        "DLNA cache: {} songs, {} bytes",
+        st.cache_files, st.cache_bytes
+    );
+    assert_eq!(st.cache_files, keys.len(), "every song prefetched");
+    let http = reqwest::blocking::Client::new();
+    for (t, k) in rest.iter().zip(&keys) {
+        let r = remote::RemoteRef {
+            server: k.server.clone(),
+            id: k.id.clone(),
+            episode: false,
+        };
+        let path = match patina_core::cache::open(&r, None) {
+            Some(Ok(patina_core::cache::Opening::File { path, original })) => {
+                assert!(original);
+                path
+            }
+            _ => panic!("{} is kept", t.title),
+        };
+        let (url, _) = c.stream_url(&k.id).unwrap();
+        let direct = http.get(&url).send().unwrap().bytes().unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            direct.to_vec(),
+            "{} kept as the server has it",
+            t.title
+        );
+        eprintln!("  kept {} as {}", t.title, path.display());
+    }
+
+    // The last song isn't kept: it plays from its download.
+    let p = Player::spawn(PlayerConfig {
+        output: OutputConfig {
+            backend: Backend::Null,
+            ..Default::default()
+        },
+        fade_ms: 0,
+        ..Default::default()
+    });
+    p.send(Command::SetQueueTracks {
+        tracks: vec![last.to_info()],
+        start: 0,
+        pos: Duration::ZERO,
+    });
+    let end = Instant::now() + Duration::from_secs(30);
+    let mut playing = false;
+    while Instant::now() < end && !playing {
+        if let Ok(Event::Error(e)) = p.events().recv_timeout(Duration::from_millis(100)) {
+            panic!("{e}");
+        }
+        let s = p.snapshot();
+        playing = s.track.as_ref().is_some_and(|t| !t.codec.is_empty())
+            && s.position > Duration::from_secs(2);
+    }
+    assert!(playing, "{} plays", last.title);
+    let badge = p.snapshot().track.map(|t| t.badge()).unwrap_or_default();
+    eprintln!("  played {} from its download ({badge})", last.title);
+    let end = Instant::now() + Duration::from_secs(10);
+    while cache.status().cache_files <= keys.len() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        cache.status().cache_files,
+        keys.len() + 1,
+        "and it's kept now"
+    );
+    p.send(Command::Quit);
+}

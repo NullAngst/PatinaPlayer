@@ -139,11 +139,121 @@ pub enum Item {
         label: String,
         value: String,
     },
+    /// Something pinned for offline, in Downloads.
+    Pinned(crate::cache::PinRow),
+    /// A download, running or waiting, in Downloads.
+    Job(JobRow),
+    /// A button that sits in a list, in Downloads.
+    Action {
+        action: ListAction,
+        label: String,
+    },
+}
+
+/// Buttons in the Downloads list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListAction {
+    PauseDownloads,
+    ResumeDownloads,
+    ClearCache,
+}
+
+/// One download, as Downloads shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobRow {
+    pub key: crate::cache::JobKey,
+    pub kind: crate::cache::JobKind,
+    pub label: String,
+    /// Downloading right now, rather than waiting.
+    pub active: bool,
+    pub done: u64,
+    pub total: Option<u64>,
+    pub paused: bool,
+    pub error: Option<String>,
+}
+
+impl JobRow {
+    /// "41% of 34 MB", "waiting · 34 MB", "paused", "failed: ...".
+    pub fn state(&self) -> String {
+        if self.active {
+            return match self.total {
+                Some(t) if t > 0 => {
+                    format!("{}% of {}", (self.done * 100 / t).min(100), fmt_bytes(t))
+                }
+                _ => format!("{} so far", fmt_bytes(self.done)),
+            };
+        }
+        if let Some(e) = &self.error {
+            return format!("failed, trying again later: {e}");
+        }
+        let size = self.total.map(|t| format!(" · {}", fmt_bytes(t)));
+        format!(
+            "{}{}",
+            if self.paused { "paused" } else { "waiting" },
+            size.unwrap_or_default()
+        )
+    }
+}
+
+/// "512 KB", "34 MB", "3.2 GB".
+pub fn fmt_bytes(b: u64) -> String {
+    const K: f64 = 1024.0;
+    let f = b as f64;
+    if f >= K * K * K {
+        format!("{:.1} GB", f / (K * K * K))
+    } else if f >= K * K {
+        format!("{:.0} MB", f / (K * K))
+    } else if b > 0 {
+        format!("{:.0} KB", (f / K).max(1.0))
+    } else {
+        "0 MB".into()
+    }
+}
+
+fn songs(n: usize) -> String {
+    format!("{n} song{}", if n == 1 { "" } else { "s" })
 }
 
 impl Item {
     pub fn selectable(&self) -> bool {
         !matches!(self, Item::Header(_) | Item::Info { .. })
+    }
+
+    /// The server songs it stands for, as a pin would keep them.
+    pub fn pin(&self, mode: ArtistMode) -> Option<crate::cache::Pin> {
+        use crate::cache::{Pin, PinKind};
+        use std::os::unix::ffi::OsStrExt;
+        let path = |p: &std::path::Path| p.as_os_str().as_bytes().to_vec();
+        Some(match self {
+            Item::Album(a) => Pin::new(PinKind::Album, a.key.clone(), a.name.clone()),
+            Item::Artist(a) => Pin::new(
+                match mode {
+                    ArtistMode::AlbumArtist => PinKind::Artist,
+                    ArtistMode::TrackArtist => PinKind::TrackArtist,
+                },
+                a.name.clone(),
+                a.name.clone(),
+            ),
+            Item::Playlist(p) => Pin::new(PinKind::Playlist, p.id.to_string(), p.name.clone()),
+            Item::Dir { path: p, name } => Pin::new(PinKind::Folder, path(p), name.clone()),
+            Item::Root { path: p, .. } => Pin::new(
+                PinKind::Folder,
+                path(p),
+                crate::remote::server_of(p)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| p.display().to_string()),
+            ),
+            Item::Track(t) => Pin::new(
+                PinKind::Song,
+                path(&t.path),
+                match &t.artist {
+                    Some(a) => format!("{} · {a}", t.title),
+                    None => t.title.clone(),
+                },
+            ),
+            Item::Pinned(p) => p.pin.clone(),
+            _ => return None,
+        })
     }
 
     /// Identity used to keep the selection on the same row after a refresh.
@@ -162,6 +272,9 @@ impl Item {
             Item::Header(h) => format!("h:{h}"),
             Item::Info { label, .. } => format!("i:{label}"),
             Item::Setting(s) => format!("s:{:?}", s.key),
+            Item::Pinned(p) => format!("pin:{}", p.pin.id),
+            Item::Job(j) => format!("job:{:?}", j.key),
+            Item::Action { action, .. } => format!("act:{action:?}"),
         }
     }
 }
@@ -233,6 +346,8 @@ pub struct Ctx<'a> {
     pub checks: &'a HashMap<String, String>,
     /// Music servers as they stand: their stations, their status.
     pub servers: &'a [crate::remote::ServerStatus],
+    /// The cache, for Downloads.
+    pub cache: Option<&'a crate::cache::Status>,
 }
 
 /// Queue entry for one of your stations.
@@ -356,18 +471,17 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 .and_then(|l| l.downloaded_episodes().ok())
                 .unwrap_or_default();
             let mut items = Vec::new();
-            if eps.is_empty() {
+            if let Some(st) = ctx.cache {
+                downloads(st, &mut items);
+            }
+            if !eps.is_empty() {
+                items.push(Item::Header("Downloaded episodes"));
+                items.extend(eps.into_iter().map(Item::Episode));
+            } else if ctx.cache.is_none() {
                 items.push(Item::Info {
                     label: "Podcast episodes".into(),
                     value: "none downloaded. Press w on an episode to keep it.".into(),
                 });
-                items.push(Item::Info {
-                    label: "Track cache".into(),
-                    value: "arrives with Subsonic streaming".into(),
-                });
-            } else {
-                items.push(Item::Header("Downloaded episodes"));
-                items.extend(eps.into_iter().map(Item::Episode));
             }
             Ok(("Downloads".into(), items))
         }
@@ -376,6 +490,94 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             let Some(lib) = lib else { return none() };
             build_library(lib, prefs, source)
         }
+    }
+}
+
+/// The cache's part of Downloads: how full it is, what's downloading,
+/// and what's pinned.
+fn downloads(st: &crate::cache::Status, items: &mut Vec<Item>) {
+    items.push(Item::Header("Storage"));
+    items.push(Item::Info {
+        label: "Cache".into(),
+        value: if st.cap == 0 {
+            "off: songs stream and aren't kept".into()
+        } else {
+            format!(
+                "{} of {} · {}",
+                fmt_bytes(st.cache_bytes),
+                fmt_bytes(st.cap),
+                songs(st.cache_files)
+            )
+        },
+    });
+    items.push(Item::Info {
+        label: "Pinned".into(),
+        value: format!(
+            "{} · {}",
+            fmt_bytes(st.offline_bytes),
+            songs(st.offline_files)
+        ),
+    });
+    if st.metered_hold {
+        items.push(Item::Info {
+            label: "Metered".into(),
+            value: "prefetch and pinned songs wait for a connection that isn't metered".into(),
+        });
+    }
+    items.push(if st.paused {
+        Item::Action {
+            action: ListAction::ResumeDownloads,
+            label: "Resume downloads".into(),
+        }
+    } else {
+        Item::Action {
+            action: ListAction::PauseDownloads,
+            label: "Pause downloads".into(),
+        }
+    });
+    if st.cache_files > 0 {
+        items.push(Item::Action {
+            action: ListAction::ClearCache,
+            label: "Clear the cache".into(),
+        });
+    }
+    let mut jobs: Vec<JobRow> = Vec::new();
+    if let Some(a) = &st.active {
+        jobs.push(JobRow {
+            key: a.key.clone(),
+            kind: a.kind,
+            label: a.label.clone(),
+            active: true,
+            done: a.done,
+            total: a.total,
+            paused: false,
+            error: None,
+        });
+    }
+    jobs.extend(st.queue.iter().map(|q| JobRow {
+        key: q.key.clone(),
+        kind: q.kind,
+        label: q.label.clone(),
+        active: false,
+        done: 0,
+        total: q.size,
+        paused: q.paused,
+        error: q.error.clone(),
+    }));
+    if !jobs.is_empty() {
+        items.push(Item::Header("Downloading"));
+        let shown = st.queue.len();
+        items.extend(jobs.into_iter().map(Item::Job));
+        if st.waiting > shown {
+            items.push(Item::Info {
+                label: "More".into(),
+                value: format!("{} more waiting", st.waiting - shown),
+            });
+        }
+    }
+    if !st.pins.is_empty() {
+        items.push(Item::Header("Pinned for offline"));
+        items.extend(st.pins.iter().cloned().map(Item::Pinned));
     }
 }
 
@@ -575,6 +777,25 @@ pub fn open(item: &Item) -> Option<Source> {
             id: p.id,
             title: p.title.clone(),
         }),
+        Item::Pinned(p) => {
+            use crate::cache::PinKind;
+            use std::os::unix::ffi::OsStrExt;
+            let path = || PathBuf::from(std::ffi::OsStr::from_bytes(&p.pin.key));
+            match p.pin.kind {
+                PinKind::Album => Some(Source::Album {
+                    key: p.pin.key_str(),
+                }),
+                PinKind::Artist | PinKind::TrackArtist => {
+                    Some(Source::ArtistAlbums(p.pin.key_str()))
+                }
+                PinKind::Playlist => p.pin.key_str().parse().ok().map(|id| Source::Playlist {
+                    id,
+                    name: p.pin.name.clone(),
+                }),
+                PinKind::Folder => Some(Source::Folder(path())),
+                PinKind::Song => path().parent().map(|d| Source::Folder(d.to_path_buf())),
+            }
+        }
         _ => None,
     }
 }
@@ -628,6 +849,7 @@ pub fn tracks_of(lib: &Library, item: &Item, prefs: &ViewPrefs) -> Vec<TrackRow>
         Item::Playlist(p) => lib
             .playlist_items(p.id)
             .map(|v| v.into_iter().filter_map(|(_, t)| t).collect()),
+        Item::Pinned(p) => crate::cache::store::resolve(lib, &p.pin),
         _ => Ok(Vec::new()),
     };
     r.unwrap_or_default()

@@ -1,10 +1,8 @@
-//! Podcasts: fetching feeds and downloading episodes, on a thread of their
-//! own so a slow server never holds up the UI or playback.
+//! Podcasts: fetching feeds on a thread of their own, so a slow server
+//! never holds up the UI or playback. Episode downloads go through the
+//! cache's download queue, with the songs.
 
-use std::collections::HashSet;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -243,133 +241,42 @@ pub fn download_path(
     ))
 }
 
-/// Download `url` to `dest`, resuming a previous partial download. The
-/// file lands under its real name only once it's complete, so a half
-/// download never looks like a finished one.
-pub fn download(
-    url: &str,
-    dest: &Path,
-    cancel: &AtomicBool,
-    progress: &dyn Fn(u64, Option<u64>),
-) -> Result<(), PodcastError> {
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let part = dest.with_extension(format!(
-        "{}.part",
-        dest.extension().and_then(|e| e.to_str()).unwrap_or("")
-    ));
-    let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-    let mut req = client(None)?.get(url);
-    if have > 0 {
-        req = req.header(reqwest::header::RANGE, format!("bytes={have}-"));
-    }
-    let mut resp = req.send().map_err(|e| PodcastError::Http(e.to_string()))?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && have > 0 {
-        // Already have all of it.
-        std::fs::rename(&part, dest)?;
-        return Ok(());
-    }
-    if !status.is_success() {
-        return Err(PodcastError::Http(format!("HTTP {status}")));
-    }
-    // 206 means the server honoured the range; 200 means start over.
-    let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(resumed)
-        .truncate(!resumed)
-        .open(&part)?;
-    let mut done = if resumed { have } else { 0 };
-    let total = resp.content_length().map(|l| l + done);
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(PodcastError::Http("cancelled".into()));
-        }
-        let n = resp
-            .read(&mut buf)
-            .map_err(|e| PodcastError::Http(e.to_string()))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])?;
-        done += n as u64;
-        progress(done, total);
-    }
-    file.flush()?;
-    drop(file);
-    if let Some(t) = total
-        && done < t
-    {
-        return Err(PodcastError::Http(format!(
-            "connection closed at {done} of {t} bytes"
-        )));
-    }
-    std::fs::rename(&part, dest)?;
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 pub enum PodEvent {
     /// Feeds were fetched (or failed); views should re-query.
     Updated,
-    Download {
-        episode: i64,
-        done: u64,
-        total: Option<u64>,
-    },
-    Downloaded(i64),
     Error(String),
 }
 
 enum Cmd {
     SetFeeds(Vec<String>),
     Refresh,
-    Download(i64),
-    CancelDownload(i64),
     Quit,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct PodStatus {
     pub refreshing: bool,
-    /// Episode id, bytes done, total if known.
-    pub downloading: Option<(i64, u64, Option<u64>)>,
-    pub queued: Vec<i64>,
 }
-
-/// The download in progress and the flag that stops it.
-type CancelSlot = Arc<Mutex<Option<(i64, Arc<AtomicBool>)>>>;
 
 pub struct PodcastService {
     tx: Sender<Cmd>,
     events: Receiver<PodEvent>,
     status: Arc<Mutex<PodStatus>>,
-    cancel: CancelSlot,
 }
 
 impl PodcastService {
-    pub fn start(
-        db: &Path,
-        offline_root: PathBuf,
-        feeds: Vec<String>,
-    ) -> Result<Self, PodcastError> {
+    pub fn start(db: &Path, feeds: Vec<String>) -> Result<Self, PodcastError> {
         let lib = Library::open(db)?;
         lib.sync_podcasts(&feeds)?;
         let (tx, rx) = unbounded();
         let (ev_tx, ev_rx) = unbounded();
         let status = Arc::new(Mutex::new(PodStatus::default()));
-        let cancel = Arc::new(Mutex::new(None));
         let w = Worker {
             lib,
             feeds,
-            offline_root,
             events: ev_tx,
             status: status.clone(),
-            cancel: cancel.clone(),
         };
         let cmds = rx;
         std::thread::Builder::new()
@@ -381,7 +288,6 @@ impl PodcastService {
             tx,
             events: ev_rx,
             status,
-            cancel,
         })
     }
 
@@ -400,28 +306,10 @@ impl PodcastService {
     pub fn refresh(&self) {
         let _ = self.tx.send(Cmd::Refresh);
     }
-
-    pub fn download(&self, episode: i64) {
-        self.status.lock().unwrap().queued.push(episode);
-        let _ = self.tx.send(Cmd::Download(episode));
-    }
-
-    pub fn cancel_download(&self, episode: i64) {
-        if let Some((id, flag)) = &*self.cancel.lock().unwrap()
-            && *id == episode
-        {
-            flag.store(true, Ordering::Relaxed);
-        }
-        self.status.lock().unwrap().queued.retain(|&e| e != episode);
-        let _ = self.tx.send(Cmd::CancelDownload(episode));
-    }
 }
 
 impl Drop for PodcastService {
     fn drop(&mut self) {
-        if let Some((_, flag)) = &*self.cancel.lock().unwrap() {
-            flag.store(true, Ordering::Relaxed);
-        }
         let _ = self.tx.send(Cmd::Quit);
     }
 }
@@ -429,15 +317,12 @@ impl Drop for PodcastService {
 struct Worker {
     lib: Library,
     feeds: Vec<String>,
-    offline_root: PathBuf,
     events: Sender<PodEvent>,
     status: Arc<Mutex<PodStatus>>,
-    cancel: CancelSlot,
 }
 
 impl Worker {
     fn run(mut self, cmds: Receiver<Cmd>) {
-        let mut cancelled: HashSet<i64> = HashSet::new();
         for cmd in cmds {
             match cmd {
                 Cmd::Quit => return,
@@ -449,15 +334,6 @@ impl Worker {
                     self.refresh();
                 }
                 Cmd::Refresh => self.refresh(),
-                Cmd::CancelDownload(id) => {
-                    cancelled.insert(id);
-                }
-                Cmd::Download(id) => {
-                    if cancelled.remove(&id) {
-                        continue;
-                    }
-                    self.download(id);
-                }
             }
         }
     }
@@ -480,73 +356,6 @@ impl Worker {
             let _ = self.events.send(PodEvent::Updated);
         }
         self.status.lock().unwrap().refreshing = false;
-        let _ = self.events.send(PodEvent::Updated);
-    }
-
-    fn download(&mut self, id: i64) {
-        let ep = match self.lib.episode(id) {
-            Ok(Some(e)) => e,
-            _ => return,
-        };
-        {
-            let mut st = self.status.lock().unwrap();
-            st.queued.retain(|&e| e != id);
-            st.downloading = Some((id, 0, ep.size.map(|s| s as u64)));
-        }
-        let flag = Arc::new(AtomicBool::new(false));
-        *self.cancel.lock().unwrap() = Some((id, flag.clone()));
-        let dest = download_path(&self.offline_root, &ep.podcast_title, &ep);
-        let status = self.status.clone();
-        let events = self.events.clone();
-        let last_sent = std::cell::Cell::new(0u64);
-        let progress = move |done: u64, total: Option<u64>| {
-            status.lock().unwrap().downloading = Some((id, done, total));
-            // An event every half megabyte is plenty for a progress readout.
-            if done >= last_sent.get() + 512 * 1024 {
-                last_sent.set(done);
-                let _ = events.send(PodEvent::Download {
-                    episode: id,
-                    done,
-                    total,
-                });
-            }
-        };
-        // A server episode's address carries a login; ask for it now.
-        let url = match crate::remote::parse_episode_uri(&ep.audio_url) {
-            Some(r) => match crate::remote::registry().stream(&r) {
-                Ok((u, _)) => u,
-                Err(e) => {
-                    *self.cancel.lock().unwrap() = None;
-                    self.status.lock().unwrap().downloading = None;
-                    let _ = self.events.send(PodEvent::Error(format!(
-                        "download of \"{}\" failed: {e}",
-                        ep.title
-                    )));
-                    return;
-                }
-            },
-            None => ep.audio_url.clone(),
-        };
-        let res = download(&url, &dest, &flag, &progress);
-        *self.cancel.lock().unwrap() = None;
-        self.status.lock().unwrap().downloading = None;
-        match res {
-            Ok(()) => {
-                if let Err(e) = self.lib.set_episode_download(id, Some(&dest)) {
-                    let _ = self.events.send(PodEvent::Error(e.to_string()));
-                }
-                let _ = self.events.send(PodEvent::Downloaded(id));
-            }
-            Err(e) if flag.load(Ordering::Relaxed) => {
-                log::info!("download of {} cancelled: {e}", ep.title);
-            }
-            Err(e) => {
-                let _ = self.events.send(PodEvent::Error(format!(
-                    "download of \"{}\" failed: {e}",
-                    ep.title
-                )));
-            }
-        }
         let _ = self.events.send(PodEvent::Updated);
     }
 }

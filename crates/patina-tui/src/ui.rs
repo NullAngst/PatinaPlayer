@@ -265,9 +265,16 @@ enum Kind {
     Info,
     Stations,
     Episodes,
+    Downloads,
 }
 
 fn level_kind(items: &[Item]) -> Kind {
+    if items
+        .iter()
+        .any(|i| matches!(i, Item::Job(_) | Item::Pinned(_) | Item::Action { .. }))
+    {
+        return Kind::Downloads;
+    }
     if items
         .iter()
         .any(|i| matches!(i, Item::Track(_) | Item::Missing { .. }))
@@ -320,14 +327,16 @@ fn hints(app: &App) -> &'static str {
             "Enter play · w download · x delete file · P played · [ ] speed · z trim"
         }
         (Section::Podcasts, _) => "Enter open · N subscribe · D unsubscribe · F5 refresh",
-        (Section::Downloads, _) => "Enter play · x delete file · P played",
+        (Section::Downloads, _) => {
+            "Enter open · w pause · x cancel or unpin · W pause all · C clear cache"
+        }
         (Section::Settings, _) => {
             "Enter change (or sync a server) · h/l step · N add folder · E edit server · d remove"
         }
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
             "Enter open · v play all · V shuffle · e queue all · P playlist all"
         }
-        _ => "v play all · V shuffle · e queue all · P playlist all · a add · p playlist",
+        _ => "v play all · V shuffle · e queue all · a add · p playlist · f keep offline",
     }
 }
 
@@ -459,6 +468,7 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         Kind::Info => vec!["", "", "", "", "", ""],
         Kind::Stations => vec!["", "", "Station", "Last test", "", ""],
         Kind::Episodes => vec!["", "", "Episode", "Published", "Progress", "Length"],
+        Kind::Downloads => vec!["", "", "", "", "", ""],
     };
     // In Settings, the selected option's help sits under the list.
     let help = match level.items.get(level.selected) {
@@ -553,6 +563,14 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(16),
             Constraint::Length(8),
         ],
+        Kind::Downloads => [
+            Constraint::Length(1),
+            Constraint::Length(0),
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+            Constraint::Length(0),
+            Constraint::Length(0),
+        ],
     };
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(Style::default().fg(t.muted).bg(t.surface)))
@@ -577,9 +595,22 @@ fn item_row<'a>(
     playing: Option<&std::path::Path>,
 ) -> Row<'a> {
     let t = &app.theme;
-    let text = Style::default().fg(t.text);
-    let muted = Style::default().fg(t.muted);
     let dim = Style::default().fg(t.wave_raw);
+    // Its server can't be reached and none of it is kept: greyed, not gone.
+    let off = !app.b.plays(item);
+    let (text, muted) = if off {
+        (dim, dim)
+    } else {
+        (Style::default().fg(t.text), Style::default().fg(t.muted))
+    };
+    // Pinned for offline: a mark where the play arrow goes.
+    let mark = |c: &'static str| -> Cell<'static> {
+        if app.b.pinned(item).is_some() {
+            Cell::from(Span::styled("●", Style::default().fg(t.verdigris)))
+        } else {
+            Cell::from(Span::styled(c, dim))
+        }
+    };
     let cells: Vec<Cell> = match item {
         Item::Track(tr) => {
             let now = playing == Some(tr.path.as_path());
@@ -599,10 +630,11 @@ fn item_row<'a>(
                 (i + 1).to_string()
             };
             vec![
-                Cell::from(Span::styled(
-                    if now { "▶" } else { " " },
-                    Style::default().fg(t.verdigris),
-                )),
+                if now {
+                    Cell::from(Span::styled("▶", Style::default().fg(t.verdigris)))
+                } else {
+                    mark(" ")
+                },
                 Cell::from(Span::styled(num, dim)),
                 Cell::from(Span::styled(tr.title.clone(), ts)),
                 Cell::from(Span::styled(tr.artist.clone().unwrap_or_default(), ss)),
@@ -637,7 +669,7 @@ fn item_row<'a>(
             ]
         }
         Item::Album(a) => vec![
-            Cell::from(" "),
+            mark(" "),
             Cell::from(""),
             Cell::from(Span::styled(a.name.clone(), text)),
             Cell::from(Span::styled(a.artist_line(), muted)),
@@ -655,7 +687,7 @@ fn item_row<'a>(
             )),
         ],
         Item::Artist(a) => vec![
-            Cell::from(" "),
+            mark(" "),
             Cell::from(""),
             Cell::from(Span::styled(a.name.clone(), text)),
             Cell::from(Span::styled(
@@ -673,7 +705,7 @@ fn item_row<'a>(
             )),
         ],
         Item::Dir { name, .. } => vec![
-            Cell::from(Span::styled("▸", dim)),
+            mark("▸"),
             Cell::from(""),
             Cell::from(Span::styled(name.clone(), text)),
             Cell::from(""),
@@ -681,7 +713,7 @@ fn item_row<'a>(
             Cell::from(""),
         ],
         Item::Root { path, tracks } => vec![
-            Cell::from(Span::styled("▸", dim)),
+            mark("▸"),
             Cell::from(""),
             Cell::from(Span::styled(
                 match patina_core::remote::server_of(path) {
@@ -709,7 +741,7 @@ fn item_row<'a>(
             )),
         ],
         Item::Playlist(p) => vec![
-            Cell::from(" "),
+            mark(" "),
             Cell::from(""),
             Cell::from(Span::styled(p.name.clone(), text)),
             Cell::from(Span::styled(
@@ -777,19 +809,18 @@ fn item_row<'a>(
         }
         Item::Episode(e) => {
             let now = app.snap.track.as_ref().and_then(|t| t.episode) == Some(e.id);
-            let dl = app.b.pod.as_ref().map(|p| p.status());
-            let downloading = dl
-                .as_ref()
-                .and_then(|d| d.downloading)
-                .filter(|d| d.0 == e.id);
-            let queued = dl.as_ref().is_some_and(|d| d.queued.contains(&e.id));
+            use patina_core::cache::EpisodeState;
+            let dl = app.b.episode_download(e.id);
+            let downloading = matches!(dl, Some(EpisodeState::Downloading { .. }));
             let date = e.published.and_then(chrono_date).unwrap_or_default();
-            let progress = if let Some((_, done, total)) = downloading {
+            let progress = if let Some(EpisodeState::Downloading { done, total }) = dl {
                 match total {
                     Some(t) if t > 0 => format!("↓ {}%", done * 100 / t),
                     _ => format!("↓ {} MB", done / 1_000_000),
                 }
-            } else if queued {
+            } else if dl == Some(EpisodeState::Paused) {
+                "↓ paused".into()
+            } else if dl.is_some() {
                 "↓ waiting".into()
             } else if e.played {
                 "played".into()
@@ -826,7 +857,7 @@ fn item_row<'a>(
                 Cell::from(Span::styled(date, muted)),
                 Cell::from(Span::styled(
                     progress,
-                    if downloading.is_some() {
+                    if downloading {
                         Style::default().fg(t.verdigris)
                     } else {
                         muted
@@ -848,6 +879,64 @@ fn item_row<'a>(
                     .add_modifier(Modifier::BOLD),
             )),
             Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+        ],
+        Item::Pinned(p) => {
+            let all = p.stored >= p.songs;
+            vec![
+                Cell::from(Span::styled(
+                    if all { "●" } else { "◐" },
+                    Style::default().fg(t.verdigris),
+                )),
+                Cell::from(""),
+                Cell::from(Span::styled(p.pin.name.clone(), text)),
+                Cell::from(Span::styled(
+                    format!(
+                        "{} · {} of {} song{} · {}",
+                        p.pin.kind.label(),
+                        p.stored,
+                        p.songs,
+                        s(p.songs as i64),
+                        patina_core::browse::fmt_bytes(p.bytes)
+                    ),
+                    muted,
+                )),
+                Cell::from(""),
+                Cell::from(""),
+            ]
+        }
+        Item::Job(j) => {
+            let st = if j.error.is_some() {
+                Style::default().fg(t.copper)
+            } else if j.active {
+                Style::default().fg(t.verdigris)
+            } else {
+                muted
+            };
+            vec![
+                Cell::from(Span::styled(
+                    if j.active { "↓" } else { " " },
+                    Style::default().fg(t.verdigris),
+                )),
+                Cell::from(""),
+                Cell::from(Span::styled(j.label.clone(), text)),
+                Cell::from(Span::styled(
+                    format!("{} · {}", j.kind.label(), j.state()),
+                    st,
+                )),
+                Cell::from(""),
+                Cell::from(""),
+            ]
+        }
+        Item::Action { label, .. } => vec![
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(Span::styled(
+                label.clone(),
+                Style::default().fg(t.verdigris),
+            )),
+            Cell::from(Span::styled("Enter", dim)),
             Cell::from(""),
             Cell::from(""),
         ],
@@ -1000,6 +1089,10 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             if e.failed {
                 style = style.fg(t.copper);
                 sub = sub.fg(t.copper_dim);
+            } else if !app.b.avail.info_plays(info) {
+                // Its server is away and it isn't kept: it'll be skipped.
+                style = style.fg(t.wave_raw);
+                sub = sub.fg(t.wave_raw);
             } else if is_cur {
                 style = style.fg(t.verdigris).add_modifier(Modifier::BOLD);
                 sub = sub.fg(t.verdigris);
@@ -1437,6 +1530,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ("Esc / Backspace", "Back up a level"),
         ("a / A", "Add to queue / play next"),
         ("p", "Add to a playlist"),
+        (
+            "f / F",
+            "Keep the selection / the whole view offline, or stop",
+        ),
         ("o / O", "Sort Albums or Songs / reverse Songs"),
         (
             "t",
@@ -1458,6 +1555,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (
             "Podcasts",
             "N subscribe, D unsubscribe; episodes: w download, x delete, P played",
+        ),
+        (
+            "Downloads",
+            "w pause or resume, x cancel or unpin, W pause all, C clear the cache",
         ),
         ("F5", "Check folders and podcast feeds for changes"),
         (

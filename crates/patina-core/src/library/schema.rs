@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 3;
+pub const VERSION: i64 = 4;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -163,6 +163,37 @@ ALTER TABLE playlists ADD COLUMN remote_sig TEXT;
 ALTER TABLE playlists ADD COLUMN readonly INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// The track cache and pinned offline files. Server songs are kept by
+/// server name and song id, so a re-sync that rewrites paths keeps them.
+const V4: &str = r#"
+CREATE TABLE cached (
+    server      TEXT NOT NULL,
+    song_id     TEXT NOT NULL,
+    tier        TEXT NOT NULL,          -- 'cache' or 'offline'
+    file        BLOB NOT NULL,
+    size        INTEGER NOT NULL,
+    -- The file as the server has it, not converted: bit-perfect can apply.
+    original    INTEGER NOT NULL,
+    -- 'raw', or what it was converted to, like 'opus:192'.
+    format      TEXT NOT NULL,
+    added_at    INTEGER NOT NULL,
+    last_used   INTEGER NOT NULL,
+    PRIMARY KEY (server, song_id)
+);
+CREATE INDEX cached_lru ON cached(tier, last_used);
+
+-- What you pinned for offline. Resolved to songs again after every sync,
+-- so a playlist or an artist that grows gets its new songs too.
+CREATE TABLE pins (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL,          -- album, artist, track-artist, playlist, folder, song
+    key         BLOB NOT NULL,
+    name        TEXT NOT NULL,
+    added_at    INTEGER NOT NULL,
+    UNIQUE (kind, key)
+);
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -185,6 +216,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 3 {
         tx.execute_batch(V3)?;
+    }
+    if current < 4 {
+        tx.execute_batch(V4)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

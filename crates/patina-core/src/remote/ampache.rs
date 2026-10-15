@@ -525,20 +525,34 @@ impl Client for Ampache {
         Ok(list.into_iter().map(|s| self.song(s, &cats)).collect())
     }
 
-    fn stream_url(&self, song_id: &str) -> Result<(String, bool)> {
+    fn stream_url_as(
+        &self,
+        song_id: &str,
+        format: StreamFormat,
+        kbps: u32,
+    ) -> Result<(String, bool)> {
         let mut q = vec![
             ("action", "stream".to_string()),
             ("type", "song".into()),
             ("id", song_id.into()),
         ];
-        match self.stream {
+        match format {
             StreamFormat::Raw => q.push(("format", "raw".into())),
             f => {
                 q.push(("format", f.as_str().into()));
-                q.push(("bitrate", (self.bitrate.max(32) * 1000).to_string()));
+                q.push(("bitrate", (kbps.max(32) * 1000).to_string()));
             }
         }
-        Ok((self.signed(&q)?, self.stream == StreamFormat::Raw))
+        Ok((self.signed(&q)?, format == StreamFormat::Raw))
+    }
+
+    fn stream_setting(&self) -> (StreamFormat, u32) {
+        (self.stream, self.bitrate)
+    }
+
+    fn ping(&self) -> Result<()> {
+        // Ping with a session also keeps the session alive.
+        self.get("ping", &[]).map(|_| ())
     }
 
     fn episode_url(&self, stream_id: &str) -> Result<String> {

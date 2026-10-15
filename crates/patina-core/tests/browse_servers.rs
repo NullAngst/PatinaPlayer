@@ -42,6 +42,7 @@ fn setup() -> Setup {
         service: None,
         pod: None,
         remote: Some(RemoteService::start(&db, Vec::new(), secrets)),
+        cache: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),

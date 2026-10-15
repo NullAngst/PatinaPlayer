@@ -25,6 +25,9 @@ use crate::secrets::{Secrets, Stored};
 const RESYNC: Duration = Duration::from_secs(30 * 60);
 /// Waits between tries while a server can't be reached.
 const RETRY: [u64; 5] = [15, 30, 60, 120, 300];
+/// How often a connected server is checked for still being there, so a
+/// server that goes away greys out its songs in about this long.
+const PING_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerState {
@@ -139,6 +142,8 @@ enum Cmd {
         replaces: Option<String>,
     },
     Job(String, Job),
+    /// Check now that a server still answers.
+    Check(String),
     Quit,
 }
 
@@ -146,6 +151,7 @@ enum WCmd {
     /// Sync now. `true` reads every album again.
     Sync(bool),
     Job(Job),
+    Check,
     Stop,
 }
 
@@ -254,6 +260,12 @@ impl RemoteService {
     pub fn job(&self, server: &str, job: Job) {
         let _ = self.tx.send(Cmd::Job(server.to_string(), job));
     }
+
+    /// Something failed talking to `server` (a download, say): check now
+    /// whether it's still there, rather than at the next regular check.
+    pub fn check(&self, server: &str) {
+        let _ = self.tx.send(Cmd::Check(server.to_string()));
+    }
 }
 
 impl Drop for RemoteService {
@@ -319,6 +331,11 @@ fn manager(rx: Receiver<Cmd>, ctx: Arc<Ctx>, order: Arc<Mutex<Vec<String>>>) {
                 // Asked for by name, from Settings: read it all.
                 if let Some((_, w)) = workers.get(&name) {
                     let _ = w.send(WCmd::Sync(true));
+                }
+            }
+            Cmd::Check(name) => {
+                if let Some((_, w)) = workers.get(&name) {
+                    let _ = w.send(WCmd::Check);
                 }
             }
             Cmd::Job(name, job) => match workers.get(&name) {
@@ -401,6 +418,7 @@ struct Worker {
     client: Option<Arc<dyn Client>>,
     next_connect: Instant,
     next_sync: Instant,
+    next_ping: Instant,
     tries: usize,
     cancel: AtomicBool,
     /// The next sync reads every album, not only changed ones.
@@ -425,6 +443,7 @@ fn worker(cfg: ServerConfig, rx: Receiver<WCmd>, ctx: Arc<Ctx>) {
         client: None,
         next_connect: Instant::now(),
         next_sync: Instant::now(),
+        next_ping: Instant::now() + PING_EVERY,
         tries: 0,
         cancel: AtomicBool::new(false),
         full: false,
@@ -439,8 +458,11 @@ fn worker(cfg: ServerConfig, rx: Receiver<WCmd>, ctx: Arc<Ctx>) {
         if w.client.is_some() && Instant::now() >= w.next_sync {
             w.sync();
         }
+        if w.client.is_some() && Instant::now() >= w.next_ping {
+            w.ping();
+        }
         let wake = if w.client.is_some() {
-            w.next_sync
+            w.next_sync.min(w.next_ping)
         } else {
             w.next_connect
         };
@@ -455,6 +477,14 @@ fn worker(cfg: ServerConfig, rx: Receiver<WCmd>, ctx: Arc<Ctx>) {
                 }
             }
             Ok(WCmd::Job(job)) => w.job(job),
+            Ok(WCmd::Check) => {
+                if w.client.is_some() {
+                    w.next_ping = Instant::now();
+                } else {
+                    // Away already: try again now instead of after the wait.
+                    w.next_connect = Instant::now();
+                }
+            }
             Ok(WCmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -507,6 +537,18 @@ impl Worker {
                 self.next_connect = Instant::now() + Duration::from_secs(365 * 24 * 3600);
             }
             Err(e) => self.offline(e.to_string()),
+        }
+    }
+
+    /// Still there? A server that doesn't answer goes offline, and its
+    /// songs that aren't kept grey out until it's back.
+    fn ping(&mut self) {
+        self.next_ping = Instant::now() + PING_EVERY;
+        let Some(c) = self.client.clone() else { return };
+        match c.ping() {
+            Ok(()) => {}
+            Err(e @ RemoteError::Http(_)) => self.offline(e.to_string()),
+            Err(e) => log::info!("{} answered the ping with: {e}", self.name()),
         }
     }
 

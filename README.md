@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 6.5 of the build plan: everything from milestones 1 to 6 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the kawaii themes, and Subsonic and Ampache servers with their playlists, stations, podcasts and play queue), plus DLNA media servers found on your network (MiniDLNA, Gerbera, Jellyfin, Plex, Serviio, a NAS), and plain Light, Dark and OLED themes. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The cache and offline copies come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 7 of the build plan: everything from milestones 1 to 6.5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic and Ampache servers with their playlists, stations, podcasts and play queue, and DLNA media servers), plus the song cache: prefetch, a size-capped cache of what you've played, albums, artists, playlists and folders pinned for offline, and offline mode when a server goes away. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Mixes come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -18,6 +18,21 @@ This is milestone 6.5 of the build plan: everything from milestones 1 to 6 (the 
 - The server's radio stations show under your own in Radio, and its podcasts (the episodes the server has downloaded) show in Podcasts, with your place in them saved here and sent to the server as a bookmark.
 - Passwords and API keys go in the desktop keyring through the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in config.toml. With no keyring running (a TTY, the TUI over SSH), they go in `~/.config/patinaplayer/secrets.toml`, readable only by you, and the app says so when it does it.
 - Logins use a salted token, or an API key where the server offers OpenSubsonic API keys (leave the user name empty and put the key in the password box). The plain password is never put in a URL.
+
+**Cache and offline**
+- Server songs are kept on disk in three ways. Prefetch downloads the songs coming up in the queue, nearest first. The cache keeps what you've played, so a replay doesn't hit the server, and drops the least recently played songs once it's full. Pinned songs stay until you unpin them.
+- Every server song plays through the cache. One that's on disk opens as a local file. One that isn't plays from its download while the download runs, so it starts as soon as the first bytes arrive, then it's kept for next time.
+- Seeking in a song that's still downloading doesn't wait for the download to get there: the player asks the server for that spot directly with a range request, then goes back to the downloaded file once the download catches up.
+- Prefetch goes by size (1 GB by default) or by number of songs, set in Settings under Cache and offline. Size is the default, since twenty hi-res FLACs and twenty MP3s are very different amounts of disk. It comes out of the cache size (10 GB by default), and Settings won't let you set more prefetch than cache.
+- Keep offline (`f`, or right-click) pins a song, an album, an artist, a playlist or a server folder. `F`, or the Keep offline button at the top of the view, pins the whole thing you're looking at. A pinned playlist or artist that grows gets its new songs after the next sync.
+- Unpinning doesn't delete anything outright. The songs move back into the cache and leave once it needs the room.
+- A server that stops answering goes offline within half a minute, or straight away if a download from it fails. Its songs that aren't kept grey out instead of vanishing, and Play leaves them out. Pinned and cached songs play as before. When the server answers again, everything comes back.
+- Downloads shows how full the cache is, what's pinned, and the download queue. In the queue, `w` pauses or resumes a download and `x` cancels it, `W` pauses everything but the song playing, and `C` clears the cache (pinned songs stay).
+- Background downloads (prefetch and pinned songs) hold while NetworkManager says the connection is metered, like a phone hotspot. Turn that off in Settings if you'd rather they didn't.
+- Songs are kept as the original file by default. Settings, Keep songs as, switches to Opus or MP3 that the server converts, to save space. Converted songs can't play bit-perfect. A server set to stream a conversion keeps doing that for what it downloads too.
+- Downloads resume where they stopped, with a range request, after a dropped connection or a restart.
+- Podcast episodes download through the same queue and show up in it.
+- The cache lives in `~/.cache/patinaplayer/tracks` and pinned songs in `~/.local/share/patinaplayer/offline/tracks`, under readable names (`Home/Nirvana/Bleach/01 Blew.flac`). They're split because cleaners like BleachBit wipe `~/.cache`, and nobody should lose a pinned library to that. If something does wipe the cache, PatinaPlayer notices at startup and forgets what went.
 
 **DLNA servers**
 - MiniDLNA, Gerbera, Jellyfin, Plex, Serviio, Twonky and the media server on most NAS boxes, as sources in the sidebar like any other server.
@@ -111,7 +126,7 @@ This is milestone 6.5 of the build plan: everything from milestones 1 to 6 (the 
 - Queue: what's playing and next, with reorder, remove, clear and add to a playlist.
 - Radio: your stations, with add, edit, test, reorder and delete.
 - Podcasts: your subscriptions, then each show's episodes with what's new, how far you got, and what's downloaded.
-- Downloads: downloaded podcast episodes. The track cache joins it in milestone 7.
+- Downloads: how full the cache is, what's downloading, what's pinned, and downloaded podcast episodes.
 - Settings: every option, editable. See above.
 - Search: type-ahead over the index, artists, albums and songs at once. Every word has to match somewhere, so `nirv blea` finds Bleach.
 - A queue panel (`q`) that shows what's coming up beside any view.
@@ -257,6 +272,15 @@ feeds = ["https://example.com/feed.xml"]
 speed = 1.0              # 0.5 to 3, podcasts only
 trim_silence = false
 
+[cache]
+size_mb = 10240          # cached and prefetched songs; 0 turns the cache off
+prefetch = "size"        # size or tracks
+prefetch_mb = 1024       # how far ahead, by size; can't be more than size_mb
+prefetch_tracks = 20     # how far ahead, by songs
+pause_on_metered = true  # hold background downloads on a metered connection
+format = "raw"           # raw (the original), opus or mp3
+bitrate = 192            # kbps, for opus and mp3
+
 [[radio.station]]
 name = "Some Station"
 url = "https://example.com/listen.pls"
@@ -287,10 +311,12 @@ Where everything else goes:
 | Settings | `~/.config/patinaplayer/config.toml` |
 | Library index, playlists, play counts, podcast positions | `~/.local/share/patinaplayer/library.db` |
 | Downloaded podcast episodes | `~/.local/share/patinaplayer/offline/podcasts/` |
+| Songs pinned for offline | `~/.local/share/patinaplayer/offline/tracks/` |
+| Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
 | Resized cover art, local and from servers | `~/.cache/patinaplayer/art/` |
 | Server passwords | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
 
-The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists to that. The art cache is safe to wipe. It refills from your files.
+The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists to that. The art cache and the song cache are safe to wipe. They refill as you play.
 
 ## Keys
 
@@ -317,6 +343,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | p | Add to a playlist |
 | o / O | Sort Albums or Songs / reverse Songs |
 | t | Artists: album or track artist. Genres: albums or songs |
+| f / F | Keep the selection / the whole view offline, or stop |
 | q | Queue panel |
 | . | Jump to the playing track in Queue |
 | F5 | Check folders for changes and refresh podcast feeds |
@@ -325,7 +352,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
 
-In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`. In Downloads: Enter opens a pinned item, `w` pauses or resumes a download, `x` cancels it or unpins, `W` pauses all downloads, `C` clears the cache.
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
@@ -346,6 +373,7 @@ crates/
     src/radio.rs        station URL resolving: pls, m3u, HLS detection, mirror checks
     src/podcast.rs      feed fetching, episode downloads with resume
     src/remote/         music servers: the Subsonic, Ampache and DLNA clients, syncing into the index, the server threads
+    src/cache/          the song cache: downloads, reading a song while it downloads, prefetch, pins, eviction
     src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
     src/config.rs       config file and XDG paths
     src/player.rs       core thread: commands in, snapshots and events out
@@ -377,6 +405,8 @@ Server songs live in the same index as local files, under made-up paths like `se
 
 The server tests run stand-in servers inside the test itself: one that answers like Navidrome (OpenSubsonic fields, made-up paths), one like Gonic (prefixed ids, real paths, missing fields, one-item lists sent as a lone object) and an Ampache one whose sessions run out every few calls. `.github/workflows/servers.yml` then runs the same clients against real Navidrome, Gonic and Ampache containers. The keyring test runs its own small Secret Service on a private D-Bus, locked keyring and unlock prompt included.
 
+The cache tests play songs through the cache from the stand-in Navidrome, and check prefetch by size and by count, eviction least recently played first, pins moving between the cache and the offline folder, converted downloads, podcast episodes in the same queue, and what greys out with a server away. One decodes a FLAC while it's still being written and checks it comes out sample for sample the same as the finished file. Another stalls a download and checks that a read near the end goes to the server by range. The servers workflow runs the cache against real MiniDLNA and Gerbera as well.
+
 The DLNA tests run a stand-in media server that answers SSDP searches on a private address and ContentDirectory calls three ways: a folder view that titles songs by file name (like Gerbera), search only (like Jellyfin, with the media server nested in another device and a URLBase), and neither, with every song under three views. It also lists a converted MP3 before each original FLAC and hands out two items per page, so the paging and the pick of the original both get used. The servers workflow then runs the same client against real MiniDLNA and Gerbera.
 
 To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
@@ -390,7 +420,7 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - In bit-perfect mode, going between tracks of different formats (16/44.1 into 24/96) closes and reopens the card, so there's a short gap. Same-format tracks are gapless as always.
 - The Browse folder picker goes through the desktop portal (xdg-desktop-portal), which Plasma, GNOME and most desktops run. Without it, Browse says so and Type a path still works.
 - Command line flags like `--backend` still override the file for one run, but Settings shows the file's values, not the override.
-- No tray icon and no MPRIS media keys yet. Those are milestone 14.
+- No tray icon and no MPRIS media keys yet. Those are milestone 15.
 - The kawaii fonts are bundled as subsets (Latin, kana and symbols), which saves about 3 MB per weight. Kanji in your own tags still show through your system's Japanese font, so a Japanese title can mix two typefaces. With no Japanese font installed at all, kanji show as boxes in every theme, the same as before.
 - The themes were checked under X11 (Xvfb) here, at full width and narrow, like the rest of the desktop app.
 - The AppImage build was run end to end on Ubuntu 24.04 here, the same system as the GitHub runner, but the workflow itself hasn't run on GitHub yet. The first tagged run is the real test.
@@ -406,9 +436,16 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - Finding servers needs multicast on the local network. A server on another subnet or behind a VPN won't answer. Its description address (the `rootDesc.xml` or `description.xml` URL) can go in config.toml by hand as a `kind = "dlna"` server.
 - Gerbera only listens on the machine's network address, not on localhost, so on the machine it runs on it's found under that address.
 - The Light, Dark and OLED themes were checked under Xvfb like the rest. OLED was only looked at on a normal screen here, so how much power it saves on yours is your screen's business, but every background in it is #000000.
-- Server songs only play while the server can be reached. Offline copies and a cache come with milestone 7.
+- The cache was tested here against the stand-in servers and against real MiniDLNA 1.3.3: prefetched songs came out byte for byte the same as the server's files, and a song played from its download. It hasn't met a real Navidrome, Gonic or Ampache from this box. The servers workflow runs the cache against MiniDLNA and Gerbera on GitHub.
+- A song downloading as a conversion (Opus or MP3 from the server) has no size until it's done, so seeking past what's in waits for the download to get there. The original file seeks straight away.
+- One download runs at a time, so the most urgent one gets the whole line. A big pinned library on a slow line takes a while, and the queue in Downloads shows where it's at.
+- Prefetch plans with the sizes the server reports. A DLNA server that reports none gets planned at 30 MB a song, so by-size prefetch may hold more or fewer songs than the setting suggests.
+- Metered connections are only seen through NetworkManager, which Plasma and GNOME use. Without it, nothing counts as metered.
+- An album pin follows the album's name and artist. If the album is retagged on the server, the pin stops matching and its songs drop back into the cache. Pin it again.
+- Genres can't be pinned, since a genre is usually most of a library. Pinned mixes come with mixes in milestone 8.
+- Server songs that aren't kept only play while the server can be reached.
 - Play counts from server songs count here, and the server's own counts are taken in at sync, but plays aren't reported back to the server yet. That comes with Last.fm in milestone 11, along with the choice of who scrobbles (the app, the server, or both) so a play isn't counted twice.
-- Starring and ratings aren't synced yet, and neither are lyrics.
+- No ratings, lyrics or Favorites yet, and starring isn't synced. Those are milestone 14.
 - Folders for a server follow the paths the server reports. Navidrome makes those up from the tags (Artist/Album/01 - Title.flac) unless its `Subsonic.DefaultReportRealPath` option is on, so a Navidrome folder tree looks like that. Gonic reports the real paths. Ampache's are made relative to its catalog folder.
 - A tag edit on the server that leaves an album's song count, length and dates the same isn't seen by the half-hourly sync. Sync now in Settings reads every album and catches it.
 - Navidrome doesn't do podcasts, so its Podcasts view stays your own feeds. Gonic, Airsonic and Ampache share theirs. Only episodes the server has already downloaded are listed.
@@ -424,4 +461,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono, M PLUS Rounded 1c, Zen Maru Gothic) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/`.
 
-Now PatinaPlayer plays from your Navidrome, Gonic or Ampache server and whatever DLNA box is on your network, alongside your folders, in Runout, plain Light or Dark, OLED black or the kawaii pair, and everything is working as it should be.
+Now PatinaPlayer plays from your Navidrome, Gonic, Ampache or DLNA server through a cache that downloads ahead, keeps what you've played, holds what you've pinned when the server goes away, and everything is working as it should be.
