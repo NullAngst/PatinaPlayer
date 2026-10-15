@@ -75,6 +75,9 @@ struct Album {
     year: Option<f64>,
     #[serde(deserialize_with = "num")]
     songcount: Option<f64>,
+    /// Your rating.
+    #[serde(deserialize_with = "num")]
+    rating: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -119,6 +122,9 @@ struct Song {
     replaygain_album_gain: Option<f64>,
     #[serde(deserialize_with = "num")]
     replaygain_album_peak: Option<f64>,
+    /// Your rating (`rate` is the sample rate).
+    #[serde(deserialize_with = "num")]
+    rating: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -425,6 +431,7 @@ impl Ampache {
             rg_album_gain: s.replaygain_album_gain,
             rg_album_peak: s.replaygain_album_peak,
             play_count: s.playcount.unwrap_or(0.0) as i64,
+            rating: super::rating_of(s.rating),
             id: s.id,
         }
     }
@@ -514,6 +521,7 @@ impl Client for Ampache {
                 duration_s: a.time.unwrap_or(0.0) as u64,
                 year: a.year.filter(|y| *y > 0.0).map(|y| y as i32),
                 changed: None,
+                rating: super::rating_of(a.rating),
                 id: a.id,
             })
             .collect())
@@ -782,6 +790,72 @@ impl Client for Ampache {
             ],
         )
         .map(|_| ())
+    }
+
+    fn set_rating(&self, what: super::Rated, id: &str, stars: u8) -> Result<()> {
+        let kind = match what {
+            super::Rated::Song => "song",
+            super::Rated::Album => "album",
+        };
+        self.get(
+            "rate",
+            &[
+                ("type", kind.into()),
+                ("id", id.into()),
+                ("rating", stars.min(5).to_string()),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn star_album(&self, id: &str, on: bool) -> Result<()> {
+        self.get(
+            "flag",
+            &[
+                ("type", "album".into()),
+                ("id", id.into()),
+                ("flag", if on { "1" } else { "0" }.into()),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn star_artist(&self, name: &str, on: bool) -> Result<()> {
+        let v = self.get("artists", &[("filter", name.into()), ("exact", "1".into())])?;
+        let hits: Vec<super::Named> = self.items(v, "artist")?;
+        let Some(id) = hits
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .and_then(|a| a.id)
+        else {
+            return Ok(());
+        };
+        self.get(
+            "flag",
+            &[
+                ("type", "artist".into()),
+                ("id", id),
+                ("flag", if on { "1" } else { "0" }.into()),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn starred(&self) -> Result<super::Starred> {
+        let albums: Vec<Album> = self.paged(
+            "stats",
+            "album",
+            &[("type", "album".into()), ("filter", "flagged".into())],
+        )?;
+        let artists: Vec<super::Named> = self.paged(
+            "stats",
+            "artist",
+            &[("type", "artist".into()), ("filter", "flagged".into())],
+        )?;
+        Ok(super::Starred {
+            albums: albums.into_iter().map(|a| a.id).collect(),
+            artists: artists.into_iter().map(|a| a.name).collect(),
+        })
     }
 }
 

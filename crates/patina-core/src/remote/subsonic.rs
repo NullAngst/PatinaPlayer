@@ -142,6 +142,8 @@ struct Child {
     display_album_artist: Option<String>,
     #[serde(deserialize_with = "list")]
     album_artists: Vec<NameObj>,
+    #[serde(deserialize_with = "num")]
+    user_rating: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -159,6 +161,8 @@ struct AlbumId3 {
     #[serde(deserialize_with = "num")]
     year: Option<f64>,
     created: Option<String>,
+    #[serde(deserialize_with = "num")]
+    user_rating: Option<f64>,
     #[serde(deserialize_with = "list")]
     song: Vec<Child>,
 }
@@ -338,6 +342,7 @@ impl Child {
             rg_album_gain: rg.album_gain,
             rg_album_peak: rg.album_peak,
             play_count: self.play_count.unwrap_or(0.0) as i64,
+            rating: super::rating_of(self.user_rating),
         }
     }
 }
@@ -555,6 +560,7 @@ impl Client for Subsonic {
                 duration_s: a.duration.unwrap_or(0.0) as u64,
                 year: a.year.filter(|y| *y > 0.0).map(|y| y as i32),
                 changed: a.created,
+                rating: super::rating_of(a.user_rating),
                 id: a.id,
             }));
             if n < PAGE {
@@ -845,6 +851,156 @@ impl Client for Subsonic {
             "star",
         )
         .map(|_| ())
+    }
+
+    fn set_rating(&self, _what: super::Rated, id: &str, stars: u8) -> Result<()> {
+        // One call for both: Navidrome and the OpenSubsonic servers take
+        // an album's id as well as a song's.
+        self.call::<Value>(
+            "setRating",
+            &[("id", id.into()), ("rating", stars.min(5).to_string())],
+            "rating",
+        )
+        .map(|_| ())
+    }
+
+    fn star_album(&self, id: &str, on: bool) -> Result<()> {
+        self.call::<Value>(
+            if on { "star" } else { "unstar" },
+            &[("albumId", id.into())],
+            "star",
+        )
+        .map(|_| ())
+    }
+
+    fn star_artist(&self, name: &str, on: bool) -> Result<()> {
+        let Some(id) = self.artist_id(name)? else {
+            return Ok(());
+        };
+        self.call::<Value>(
+            if on { "star" } else { "unstar" },
+            &[("artistId", id)],
+            "star",
+        )
+        .map(|_| ())
+    }
+
+    fn starred(&self) -> Result<super::Starred> {
+        #[derive(Default, Deserialize)]
+        struct S {
+            #[serde(default, deserialize_with = "list")]
+            album: Vec<AlbumId3>,
+            #[serde(default, deserialize_with = "list")]
+            artist: Vec<super::Named>,
+        }
+        let s: S = self.call("getStarred2", &[], "starred2")?;
+        Ok(super::Starred {
+            albums: s.album.into_iter().map(|a| a.id).collect(),
+            artists: s.artist.into_iter().map(|a| a.name).collect(),
+        })
+    }
+
+    fn lyrics(
+        &self,
+        song_id: &str,
+        artist: &str,
+        title: &str,
+    ) -> Result<Option<super::ServerLyrics>> {
+        // OpenSubsonic: lyrics by song, synced where the server has them.
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Line {
+            #[serde(deserialize_with = "num")]
+            start: Option<f64>,
+            value: String,
+        }
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Structured {
+            synced: bool,
+            #[serde(deserialize_with = "list")]
+            line: Vec<Line>,
+        }
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase", default)]
+        struct List {
+            #[serde(deserialize_with = "list")]
+            structured_lyrics: Vec<Structured>,
+        }
+        if self.info.open_subsonic {
+            match self.call::<List>("getLyricsBySongId", &[("id", song_id.into())], "lyricsList") {
+                Ok(l) => {
+                    // Synced first, if there's both.
+                    let mut all = l.structured_lyrics;
+                    all.sort_by_key(|s| !s.synced);
+                    if let Some(s) = all.into_iter().find(|s| !s.line.is_empty()) {
+                        return Ok(Some(super::ServerLyrics {
+                            synced: s.synced,
+                            lines: s
+                                .line
+                                .into_iter()
+                                .map(|l| {
+                                    (
+                                        l.start
+                                            .filter(|_| s.synced)
+                                            .map(|ms| Duration::from_millis(ms.max(0.0) as u64)),
+                                        l.value,
+                                    )
+                                })
+                                .collect(),
+                        }));
+                    }
+                }
+                Err(RemoteError::Server { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // Plain Subsonic: by artist and title, unsynced.
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Plain {
+            value: Option<String>,
+        }
+        let p: Plain = self.call(
+            "getLyrics",
+            &[("artist", artist.into()), ("title", title.into())],
+            "lyrics",
+        )?;
+        Ok(p.value
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| super::ServerLyrics {
+                synced: false,
+                lines: v
+                    .lines()
+                    .map(|l| (None, l.trim_end().to_string()))
+                    .collect(),
+            }))
+    }
+}
+
+impl Subsonic {
+    /// An artist's id, found by name through search.
+    fn artist_id(&self, name: &str) -> Result<Option<String>> {
+        #[derive(Default, Deserialize)]
+        struct Hits {
+            #[serde(default, deserialize_with = "list")]
+            artist: Vec<super::Named>,
+        }
+        let hits: Hits = self.call(
+            "search3",
+            &[
+                ("query", name.to_string()),
+                ("artistCount", "20".into()),
+                ("albumCount", "0".into()),
+                ("songCount", "0".into()),
+            ],
+            "searchResult3",
+        )?;
+        Ok(hits
+            .artist
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .and_then(|a| a.id))
     }
 }
 

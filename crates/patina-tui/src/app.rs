@@ -122,6 +122,13 @@ pub enum Modal {
         found: Vec<Found>,
         selected: usize,
     },
+    /// A rating, 0 to 5 stars, for a row or the song playing.
+    PickRate {
+        title: String,
+        /// None: the song playing.
+        item: Option<Box<Item>>,
+        selected: usize,
+    },
     /// One of a setting's choices, picked from a list: the output device
     /// from anywhere with Ctrl+O.
     PickChoice {
@@ -317,6 +324,16 @@ impl App {
             self.focus = Focus::Content;
             return;
         }
+        if ctrl && k.code == KeyCode::Char('l') && matches!(self.modal, Modal::None) {
+            // Up: look the song playing up. Up already for this song:
+            // close it.
+            if self.b.lyrics().is_some() && !self.b.lyrics_stale() {
+                self.b.lyrics_hide();
+            } else {
+                self.b.lyrics_show();
+            }
+            return;
+        }
         if ctrl && k.code == KeyCode::Char('a') && matches!(self.modal, Modal::None) {
             self.b.switch(Section::Amp);
             self.focus = Focus::Content;
@@ -353,6 +370,41 @@ impl App {
                         self.modal = Modal::PickDlna { found, selected };
                     }
                     _ => self.modal = Modal::PickDlna { found, selected },
+                }
+                return;
+            }
+            Modal::PickRate {
+                title,
+                item,
+                mut selected,
+            } => {
+                match k.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter => self.rate(item, selected as u8),
+                    KeyCode::Char(c @ '0'..='5') => self.rate(item, c as u8 - b'0'),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        self.modal = Modal::PickRate {
+                            title,
+                            item,
+                            selected,
+                        };
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(5);
+                        self.modal = Modal::PickRate {
+                            title,
+                            item,
+                            selected,
+                        };
+                    }
+                    _ => {
+                        self.modal = Modal::PickRate {
+                            title,
+                            item,
+                            selected,
+                        }
+                    }
                 }
                 return;
             }
@@ -428,6 +480,7 @@ impl App {
             KeyCode::Char('s') => p.send(Command::ToggleShuffle),
             KeyCode::Char('r') => p.send(Command::CycleRepeat),
             KeyCode::Char('l') => self.b.toggle_love(),
+            KeyCode::Char('Y') => self.pick_rate(None),
             KeyCode::Char('q') => self.queue_panel = !self.queue_panel,
             KeyCode::Char('?') => self.modal = Modal::Help,
             KeyCode::Char('/') if self.b.lib.is_some() => {
@@ -473,6 +526,17 @@ impl App {
     }
 
     fn sidebar_key(&mut self, k: KeyEvent) {
+        // A favorite: move it along the list, or let it go.
+        if let Some(SideEntry::Favorite { id, .. }) =
+            self.b.sidebar.get(self.b.sidebar_sel).cloned()
+        {
+            match k.code {
+                KeyCode::Char('J') => return self.b.favorite_move(id, 1),
+                KeyCode::Char('K') => return self.b.favorite_move(id, -1),
+                KeyCode::Char('d') | KeyCode::Delete => return self.b.unfavorite(id),
+                _ => {}
+            }
+        }
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => self.b.sidebar_move(-1),
             KeyCode::Down | KeyCode::Char('j') => self.b.sidebar_move(1),
@@ -663,6 +727,11 @@ impl App {
                 }
             }
             KeyCode::Char('f') if !queue => self.b.toggle_pin_selected(),
+            KeyCode::Char('*') if !queue => self.b.toggle_favorite_selected(),
+            KeyCode::Char('y') if !queue => {
+                let item = self.b.selected_item();
+                self.pick_rate(item);
+            }
             KeyCode::Char('F') if !queue => {
                 if self.b.view_pin_state().is_some() {
                     self.b.toggle_pin_view();
@@ -948,6 +1017,32 @@ impl App {
         }
     }
 
+    fn rate(&mut self, item: Option<Box<Item>>, stars: u8) {
+        match item {
+            Some(i) => self.b.rate_item(&i, stars),
+            None => self.b.rate_playing(stars),
+        }
+    }
+
+    /// The rating picker, for the selected row or (None) the song playing.
+    fn pick_rate(&mut self, item: Option<Item>) {
+        let (title, cur) = match &item {
+            Some(i) => match Browser::item_rating(i) {
+                Some(r) => ("Rate it. 0 to 5, or Enter".to_string(), r),
+                None => return self.b.note("Only songs and albums take a rating"),
+            },
+            None => match self.b.playing_rating() {
+                Some(r) => ("Rate the song playing. 0 to 5, or Enter".to_string(), r),
+                None => return self.b.note("Only songs in the library take a rating"),
+            },
+        };
+        self.modal = Modal::PickRate {
+            title,
+            item: item.map(Box::new),
+            selected: cur as usize,
+        };
+    }
+
     fn change_setting(&mut self, key: SettingKey, change: Change) {
         match self.b.setting_warning(&key, &change) {
             Some(w) => {
@@ -1192,7 +1287,10 @@ impl App {
                 if let Some(e) = self.b.sidebar.get(row)
                     && matches!(
                         e,
-                        SideEntry::Section(_) | SideEntry::Source { .. } | SideEntry::Mix { .. }
+                        SideEntry::Section(_)
+                            | SideEntry::Source { .. }
+                            | SideEntry::Mix { .. }
+                            | SideEntry::Favorite { .. }
                     )
                 {
                     self.b.activate_sidebar(row);

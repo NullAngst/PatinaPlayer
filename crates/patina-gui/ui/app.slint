@@ -113,7 +113,7 @@ export global P {
 // ----- Data from Rust -----
 
 export struct SideItem {
-    // 0 section, 1 source, 2 label, 3 gap
+    // 0 section, 1 source, 2 label, 3 gap, 4 a favorite
     kind: int,
     label: string,
     // A second line under the label: the kawaii themes' Japanese names.
@@ -154,6 +154,12 @@ export struct Row {
     can-pin: bool,
     // A mix can start from it.
     can-mix: bool,
+    // Songs and albums: your rating, 0 to 5. -1 where it doesn't apply.
+    rating: int,
+    // "★★★" after the title, for a rated row.
+    stars: string,
+    // Folders, albums and artists: 1 in Favorites, 0 not. -1 elsewhere.
+    fav: int,
 }
 
 export struct QueueRow {
@@ -196,6 +202,10 @@ export struct AmpUnit {
 
 export struct Hero {
     show: bool,
+    // An album's rating, 0 to 5; -1 for other headers.
+    rating: int,
+    // In Favorites: 1, 0, or -1 where it can't be.
+    fav: int,
     kicker: string,
     title: string,
     sub: string,
@@ -259,6 +269,9 @@ export global Icons {
     out property <string> volume: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11";
     out property <string> muted: "M4 9h4l5-4v14l-5-4H4zM17 9l5 6M22 9l-5 6";
     out property <string> queue-panel: "M3 6h13M3 11h13M3 16h8M18 14v6l4-3z";
+    // A speech bubble with lines: lyrics.
+    out property <string> lyrics: "M4 5h16v11H9l-5 4zM8 9h8M8 12h5";
+    out property <string> star: "M12 3l2.7 5.6 6.1 .9 -4.4 4.3 1 6.1 -5.4 -2.9 -5.4 2.9 1 -6.1 -4.4 -4.3 6.1 -.9z";
     out property <string> plus: "M12 5v14M5 12h14";
     out property <string> close: "M6 6l12 12M18 6L6 18";
     out property <string> disc: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0";
@@ -628,6 +641,12 @@ component ListRow inherits Rectangle {
             font-weight: item.playing || item.kind == 15 ? (P.kawaii ? 800 : 600) : 400;
             color: item.warn ? P.copper : (item.playing || item.kind == 15 ? P.accent-text : (item.off ? P.wave : (item.dim ? P.muted : P.text)));
         }
+        if item.stars != "": Text {
+            text: item.stars;
+            vertical-alignment: center;
+            font-size: 11px;
+            color: P.copper;
+        }
         if item.sub != "" || item.kind <= 2: Text {
             horizontal-stretch: item.kind == 10 ? 5 : 2.5;
             preferred-width: 0px;
@@ -687,6 +706,22 @@ component ListRow inherits Rectangle {
                 title: "Add to playlist…";
                 activated => { root.act("playlist"); }
             }
+            // Ratings and favorites.
+            if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
+            if item.rating >= 0: Menu {
+                title: item.rating > 0 ? "Rated " + item.stars : "Rate";
+                MenuItem { title: "★★★★★"; activated => { root.act("rate-5"); } }
+                MenuItem { title: "★★★★"; activated => { root.act("rate-4"); } }
+                MenuItem { title: "★★★"; activated => { root.act("rate-3"); } }
+                MenuItem { title: "★★"; activated => { root.act("rate-2"); } }
+                MenuItem { title: "★"; activated => { root.act("rate-1"); } }
+                MenuItem { title: "No rating"; activated => { root.act("rate-0"); } }
+            }
+            if item.fav >= 0: MenuItem {
+                title: item.fav == 1 ? "Remove from Favorites" : "Add to Favorites";
+                activated => { root.act("fav"); }
+            }
+
             // Playlist items.
             if (item.kind == 0 || item.kind == 11) && root.album-tracks == false: MenuItem {
                 title: "Remove from this playlist";
@@ -967,8 +1002,9 @@ component AlbumTile inherits Rectangle {
             font-weight: P.kawaii ? 700 : 600;
             color: item.playing ? P.accent-text : (item.off ? P.wave : P.text);
         }
+        // A rated album shows its stars after the artist.
         Text {
-            text: item.sub;
+            text: item.stars != "" ? item.sub + "  " + item.stars : item.sub;
             overflow: elide;
             font-size: 12px;
             color: item.off ? P.wave : P.muted;
@@ -981,6 +1017,21 @@ component AlbumTile inherits Rectangle {
             MenuItem { title: "Add to queue"; activated => { root.act("queue"); } }
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
             if item.can-mix: MenuItem { title: "Artist mix"; activated => { root.act("mix"); } }
+            // Ratings and favorites.
+            if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
+            if item.rating >= 0: Menu {
+                title: item.rating > 0 ? "Rated " + item.stars : "Rate";
+                MenuItem { title: "★★★★★"; activated => { root.act("rate-5"); } }
+                MenuItem { title: "★★★★"; activated => { root.act("rate-4"); } }
+                MenuItem { title: "★★★"; activated => { root.act("rate-3"); } }
+                MenuItem { title: "★★"; activated => { root.act("rate-2"); } }
+                MenuItem { title: "★"; activated => { root.act("rate-1"); } }
+                MenuItem { title: "No rating"; activated => { root.act("rate-0"); } }
+            }
+            if item.fav >= 0: MenuItem {
+                title: item.fav == 1 ? "Remove from Favorites" : "Add to Favorites";
+                activated => { root.act("fav"); }
+            }
             if item.can-pin: MenuSeparator {}
             if item.can-pin: MenuItem {
                 title: item.pinned ? "Stop keeping offline" : "Keep offline";
@@ -1378,6 +1429,24 @@ export component AppWindow inherits Window {
     // Love on the song playing: 0 none (no song, radio), 1 not loved, 2 loved.
     in property <int> love-state;
     callback love-clicked;
+    // The song playing: its rating, 0 to 5; -1 when it can't have one.
+    in property <int> np-rating: -1;
+    callback np-rate(int);
+    // Album headers: stars and the favorite toggle.
+    callback hero-rate(int);
+    callback hero-fav;
+    // Sidebar favorites: move up, move down, remove.
+    callback side-act(int, string);
+    // Lyrics, shown in a panel on the right.
+    in property <bool> lyrics-open;
+    in property <string> lyrics-title;
+    in property <string> lyrics-note;
+    in property <bool> lyrics-warn;
+    in property <[string]> lyrics-lines;
+    // The playing line among them; -1 for none (unsynced).
+    in property <int> lyrics-current: -1;
+    in property <bool> lyrics-synced;
+    callback lyrics-clicked;
     in property <image> np-art;
     in property <bool> np-has-art;
     in property <bool> playing;
@@ -1585,11 +1654,13 @@ export component AppWindow inherits Window {
                                 for item[i] in root.side: Rectangle {
                                     // Kawaii: the open one is a pink pill.
                                     property <bool> pill: item.active && P.kawaii && item.kind == 0;
+                                    // Favorites sit like sections, with a menu.
+                                    property <bool> entry: item.kind <= 1 || item.kind == 4;
                                     height: item.kind == 3 ? 12px : (item.kind == 2 ? 28px : 34px);
                                     border-radius: 6px * P.round;
                                     border-width: 1px;
                                     border-color: pill ? P.verdigris : (item.active ? P.verdigris-dim : transparent);
-                                    background: pill ? P.verdigris : (item.active ? P.raised : (sta.has-hover && item.kind <= 1 ? P.raised : transparent));
+                                    background: pill ? P.verdigris : (item.active ? P.raised : (sta.has-hover && entry ? P.raised : transparent));
                                     drop-shadow-offset-y: pill ? 3px : 0px;
                                     drop-shadow-color: pill ? P.accent-edge : transparent;
                                     if item.kind == 2: Text {
@@ -1600,7 +1671,7 @@ export component AppWindow inherits Window {
                                         letter-spacing: 0.9px;
                                         color: P.muted;
                                     }
-                                    if item.kind <= 1: HorizontalLayout {
+                                    if entry: HorizontalLayout {
                                         padding-left: 10px;
                                         padding-right: 10px;
                                         spacing: 10px;
@@ -1629,6 +1700,14 @@ export component AppWindow inherits Window {
                                                     stroke: P.verdigris;
                                                     stroke-width: 2px;
                                                 }
+                                            }
+                                        }
+                                        if item.kind == 4: Rectangle {
+                                            width: 16px;
+                                            Icon {
+                                                y: (parent.height - self.height) / 2;
+                                                d: Icons.star;
+                                                stroke: P.copper;
                                             }
                                         }
                                         if item.kind == 1: Rectangle {
@@ -1680,12 +1759,25 @@ export component AppWindow inherits Window {
                                             color: pill ? P.on-accent : (item.dot == 2 ? P.copper : P.muted);
                                         }
                                     }
-                                    sta := TouchArea {
-                                        enabled: item.kind <= 1;
-                                        mouse-cursor: item.kind <= 1 ? pointer : default;
-                                        clicked => {
-                                            root.side-clicked(i);
-                                            keys.focus();
+                                    scm := ContextMenuArea {
+                                        enabled: item.kind == 4;
+                                        Menu {
+                                            MenuItem { title: "Move up"; activated => { root.side-act(i, "up"); } }
+                                            MenuItem { title: "Move down"; activated => { root.side-act(i, "down"); } }
+                                            MenuItem { title: "Remove from Favorites"; activated => { root.side-act(i, "remove"); } }
+                                        }
+                                        sta := TouchArea {
+                                            enabled: entry;
+                                            mouse-cursor: entry ? pointer : default;
+                                            pointer-event(e) => {
+                                                if e.kind == PointerEventKind.down && e.button == PointerEventButton.right && item.kind == 4 {
+                                                    scm.show({ x: self.mouse-x, y: self.mouse-y });
+                                                }
+                                            }
+                                            clicked => {
+                                                root.side-clicked(i);
+                                                keys.focus();
+                                            }
                                         }
                                     }
                                 }
@@ -1879,6 +1971,31 @@ export component AppWindow inherits Window {
                                         }
                                         Text { text: root.hero.sub; font-size: 15px; color: P.text; overflow: elide; }
                                         Text { text: root.hero.meta; font-size: 12.5px; color: P.muted; overflow: elide; }
+                                        // An album's stars, and the favorite toggle.
+                                        if root.hero.rating >= 0 || root.hero.fav >= 0: HorizontalLayout {
+                                            spacing: 2px;
+                                            alignment: start;
+                                            if root.hero.rating >= 0: HorizontalLayout {
+                                                spacing: 0px;
+                                                for n in [1, 2, 3, 4, 5]: Text {
+                                                    width: 20px;
+                                                    text: n <= root.hero.rating ? "★" : "☆";
+                                                    font-size: 17px;
+                                                    color: n <= root.hero.rating ? P.copper : (hsa.has-hover ? P.copper-dim : P.wave);
+                                                    hsa := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.hero-rate(n == root.hero.rating ? 0 : n); keys.focus(); }
+                                                    }
+                                                }
+                                            }
+                                            if root.hero.rating >= 0 && root.hero.fav >= 0: Rectangle { width: 12px; }
+                                            if root.hero.fav >= 0: Chip {
+                                                h: 26px;
+                                                text: root.hero.fav == 1 ? "★ In Favorites" : "☆ Add to Favorites";
+                                                active: root.hero.fav == 1;
+                                                clicked => { root.hero-fav(); keys.focus(); }
+                                            }
+                                        }
                                         HorizontalLayout {
                                             padding-top: 12px;
                                             padding-bottom: P.kawaii ? 3px : 0px;
@@ -2163,6 +2280,58 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // ----- Lyrics panel -----
+                if root.lyrics-open: Rectangle {
+                    width: 340px;
+                    background: P.surface;
+                    Rectangle { width: 1px; x: 0; background: P.border; }
+                    VerticalLayout {
+                        padding-top: 16px;
+                        padding-left: 18px;
+                        padding-right: 16px;
+                        padding-bottom: 12px;
+                        spacing: 6px;
+                        HorizontalLayout {
+                            Text { text: "Lyrics"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
+                            Rectangle { horizontal-stretch: 1; }
+                            IconButton { icon: Icons.close; tip: "Close (Ctrl+L)"; clicked => { root.lyrics-clicked(); keys.focus(); } }
+                        }
+                        Text { text: root.lyrics-title; overflow: elide; font-weight: 600; color: P.text; }
+                        Text { text: root.lyrics-note; wrap: word-wrap; font-size: 11.5px; color: root.lyrics-warn ? P.copper : P.muted; }
+                        Rectangle { height: 6px; }
+                        // Synced: the lines from a little before the one
+                        // playing, which the app picks, so it stays in view.
+                        if root.lyrics-synced: Rectangle {
+                            vertical-stretch: 1;
+                            clip: true;
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 6px;
+                                for l[i] in root.lyrics-lines: Text {
+                                    text: l;
+                                    wrap: word-wrap;
+                                    font-size: i == root.lyrics-current ? 15px : 13.5px;
+                                    font-weight: i == root.lyrics-current ? 700 : 400;
+                                    color: i == root.lyrics-current ? P.accent-text : (i < root.lyrics-current ? P.muted : P.text);
+                                }
+                            }
+                        }
+                        if !root.lyrics-synced: Flickable {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 4px;
+                                for l in root.lyrics-lines: Text {
+                                    text: l;
+                                    wrap: word-wrap;
+                                    font-size: 13.5px;
+                                    color: P.text;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ----- Queue panel -----
                 if root.queue-panel: Rectangle {
                     width: 300px;
@@ -2279,6 +2448,22 @@ export component AppWindow inherits Window {
                             tip: root.love-state == 2 ? "Loved (l)" : "Love (l)";
                             active: root.love-state == 2;
                             clicked => { root.love-clicked(); keys.focus(); }
+                        }
+                        // Stars for the song playing; click one to rate,
+                        // the same one again to clear.
+                        if root.np-rating >= 0 && !root.compact: HorizontalLayout {
+                            spacing: 0px;
+                            for n in [1, 2, 3, 4, 5]: Text {
+                                width: 15px;
+                                text: n <= root.np-rating ? "★" : "☆";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                color: n <= root.np-rating ? P.copper : (nsa.has-hover ? P.copper-dim : P.wave);
+                                nsa := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.np-rate(n == root.np-rating ? 0 : n); keys.focus(); }
+                                }
+                            }
                         }
                     }
 
@@ -2484,6 +2669,13 @@ export component AppWindow inherits Window {
                             icon: Icons.output;
                             text: root.output-label;
                             clicked => { root.output-clicked(); }
+                        }
+                        IconButton {
+                            y: (parent.height - self.height) / 2;
+                            icon: Icons.lyrics;
+                            tip: "Lyrics (Ctrl+L)";
+                            active: root.lyrics-open;
+                            clicked => { root.lyrics-clicked(); keys.focus(); }
                         }
                         IconButton {
                             y: (parent.height - self.height) / 2;

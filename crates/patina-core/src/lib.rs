@@ -12,6 +12,7 @@ pub mod eq;
 pub mod lastfm;
 pub mod level;
 pub mod library;
+pub mod lyrics;
 pub mod mix;
 pub mod player;
 pub mod podcast;

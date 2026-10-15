@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 13 of the build plan: everything from milestones 1 to 12 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, and the output controls), plus the amp stack: nine devices that emulate tube amps, tape, transformers and other old hardware, run oversampled, chained in any order, with five built-in presets and a stack per output device. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Ratings, lyrics and favorites come next, then the polish. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 14 of the build plan: everything from milestones 1 to 13 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, the output controls and the amp stack), plus ratings for songs and albums that sync with your servers, lyrics on request, and a Favorites list of starred folders, albums and artists in the sidebar. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. MPRIS, the tray and the polish come next. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -75,6 +75,22 @@ This is milestone 13 of the build plan: everything from milestones 1 to 12 (the 
 - Below the ceiling it doesn't touch a single sample. The gapless test plays through it and still matches the source bit for bit.
 - While it's working, the bottom bar shows how much it's taking off (`LIM -2.2 dB`, in copper), held for a moment so you can see it.
 - Bit-perfect playback skips it, along with everything else.
+
+**Ratings**
+- Songs and albums take 1 to 5 stars. Right-click one in the desktop app and pick Rate, or press `y` on it in the TUI. An open album has its stars in the header; the song playing has them on the bottom bar (click one, or `Y` in the TUI). Rating it the same again clears it.
+- Songs and Albums can sort by rating, highest first (the Sort chip, or `o` in the TUI).
+- Ratings sync both ways with Subsonic and Ampache servers: what you rate here goes to the song's server, and what the server says comes in on each sync. A rating you set while the server is away waits and goes when it's back, and a sync in between never undoes it.
+- Local files keep their ratings in the library, by path, so a rescan keeps them.
+
+**Favorites**
+- Star a folder, an album or an artist (right-click, Add to Favorites; `*` in the TUI; or the button in an album's header) and it joins the Favorites list in the sidebar, one click away.
+- Reorder and unstar right there: right-click a favorite in the desktop app, or `J`/`K` and `d` on it in the TUI sidebar.
+- Starred albums and artists sync with the server's starred list (Subsonic's star, Ampache's flag), both ways. Starred folders stay local.
+
+**Lyrics**
+- Press Lyrics on the bottom bar (`Ctrl+L` in either app) and the song playing gets its lyrics in a panel on the right. Nothing is looked up until you press it, and only for that song: when the next one starts, the panel says so and waits for another press.
+- Where it looks, in order: the song's own tags (USLT, LYRICS, ©lyr), an .lrc file next to it with the same name, its server (OpenSubsonic's lyrics by song, else plain Subsonic's), then LRCLIB, an open lyrics database, only if you turn it on in Settings, under Lyrics. It's off until you do.
+- Synced lyrics (LRC times, from any of those) follow the song, the line playing lit up, and scroll themselves. Plain ones scroll by hand.
 
 **Amp stack**
 - A rack of old hardware you switch on and chain, for when you want a record to sound like it's coming through a warm tube amp instead of a clean DAC. Off by default. `Ctrl+A` opens it in either app, or click AMP on the bottom bar, which lights copper while the stack is working.
@@ -398,6 +414,9 @@ trim_out = -1.5
 [amp.devices]            # output device to the stack preset it gets
 "alsa_output.pci-0000_00_1f.3.analog-stereo" = "Speakers stack"
 
+[lyrics]
+online = false           # ask LRCLIB when nothing local or on the server has them
+
 [podcasts]
 feeds = ["https://example.com/feed.xml"]
 speed = 1.0              # 0.5 to 3, podcasts only
@@ -499,12 +518,17 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | Ctrl+E | The EQ view |
 | Ctrl+O | Pick the output device |
 | Ctrl+A | The amp stack |
+| Ctrl+L | Lyrics for the song playing |
+| `*` | Star the selected folder, album or artist (Favorites) |
+| y / Y | Rate the selected song or album / the song playing |
 | . | Jump to the playing track in Queue |
 | F5 | Check folders for changes and refresh podcast feeds |
 | ? | Help |
 | Ctrl+Q | Quit |
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
+
+On a favorite in the sidebar: `J`/`K` move it, `d` takes it out of Favorites, Enter opens it.
 
 In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option (a long list, like Device or Sample rate, opens to pick from), `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`. In the EQ: Enter flips, cycles or edits, `h`/`l` move a band half a dB, `H`/`L` move a parametric band's frequency, `o` turns the EQ on or off, `d` removes a parametric band. In Downloads: Enter opens a pinned item, `w` pauses or resumes a download, `x` cancels it or unpins, `W` pauses all downloads, `C` clears the cache.
 
@@ -534,6 +558,7 @@ crates/
     src/dsp/amp/        the amp stack as it runs: the oversampler and the nine devices
     src/amp.rs          the amp stack as you set it: devices, knobs, presets, files
     src/eq/             the EQ as you set it: graphic and parametric bands, presets, AutoEq and APO import
+    src/lyrics.rs       lyrics lookup: tags, .lrc files, the server, LRCLIB; LRC parsing
     src/lastfm.rs       Last.fm calls: signing, linking, Now Playing, scrobbles, love, similar artists and songs
     src/scrobble.rs     the Last.fm thread: linking, the scrobble queue, retries
     src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
@@ -579,6 +604,8 @@ The EQ tests play a 1 kHz tone through the player with a capturing output: a +6 
 
 The Last.fm tests run a stand-in Last.fm that checks every call's signature. They link through the approval page (waiting while it isn't approved yet), send scrobbles while it's down and check they arrive later in batches of 50 with their original times, drop a session it stops accepting while keeping the queue, love a song and ask if it's loved, and play a 32-second song in real time to see Now Playing at the start and the scrobble at the halfway mark, timed from when it started. Another checks, for each choice of who scrobbles, that a server song goes to Last.fm, to the stand-in Navidrome's scrobble endpoint, or both, exactly once each.
 
+The marks tests rate songs and albums through the shared browser on a real indexed folder and check the rating sorts, the album header and the song playing; star a folder, an album and an artist, reorder them, open one from the sidebar and unstar them; and look up a song's lyrics from its tags, synced. Against the stand-in Navidrome, ratings and the starred list come in on a sync, a rating made here survives a sync while it waits and then reaches the server, a rating taken away is taken away there too, and unstar and star go out both ways. Others get synced lyrics from the stand-in's OpenSubsonic endpoint through the same lookup the button uses, check a stand-in LRCLIB is never asked while it's off and is asked once it's on, and check the stand-in Ampache hears rate and flag.
+
 The amp tests play a tone through the player with the stack off and on: on with every device off comes out bit for bit, a driven tube preamp keeps the tone and adds a second harmonic that wasn't there, and every built-in preset plays without going near clipping. Unit tests check each device at its defaults stays within 3 dB with its harmonics 20 dB down, that the tube preamp's second harmonic leads and the power amp's third does, the compressor's gain at 4:1, the phono stage folding the bass to mono, that switching a device on glides in without a jump, and that the oversampler is a clean delay that keeps images 60 dB down. Others build a rack from the Amp view's rows, save and load presets, give the output its own stack, and check what config.toml holds after.
 
 The output tests play FFmpeg-made tones through the player with a capturing output and compare them with the same tone worked out exactly. Three 44.1 kHz parts of an album cut at odd places come out at a fixed 48 kHz through one output, every frame there, within 3/10,000 of the exact tone across the joins. An album that goes from 44.1 to 48 kHz between tracks stays on one output with no gap and no click at the join. Two albums at different rates each get their own rate. A one-second crossfade between two steady levels is checked at the start, quarter points and end of the fade against the cos and sin curve, and two tracks that follow on on an album are checked untouched with crossfade on. Unit tests check every resampler quality for pitch, length, level, lining up to a fraction of a sample, and that Balanced and Best keep a 30 kHz tone out of a 44.1 kHz output where Fast lets it fold down. The dither test checks it averages to the true value with TPDF's noise level and keeps a tone a third of a step tall that rounding wipes out. One more lists a real PipeWire's outputs.
@@ -603,6 +630,11 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - A change to crossfade applies from the next song on, since the end of the song playing is already decided. Rate, resampler, format and dither changes reopen the output at once, from where it was.
 - The 24-bit ALSA format is S24_LE, 24 bits in a 32-bit word. Devices that only take packed 3-byte 24-bit get 32-bit or 16-bit from Auto instead.
 - The device list and switching were tested against a real PipeWire 1.0 with stand-in outputs (null sinks), and the ALSA list hasn't met a sound card at all (this box has none). Real USB DACs, HDMI and Bluetooth outputs haven't been tried from here.
+- A song's rating changed on the server by another app comes in when that album syncs again (Subsonic has no list of rated songs to ask for, and a sync only reads albums that changed). Album ratings come in on every sync.
+- An artist starred here is starred on the first server that has their songs. DLNA servers have no ratings or stars, so their songs and albums keep theirs here only.
+- Ampache has no lyrics call, so lyrics for Ampache songs come from the cached file's tags or LRCLIB.
+- LRCLIB was tested against a stand-in answering its API, not the real site, which this box can't reach.
+- With lyrics open, the stars, the badges and the output chip all share the bottom bar, and on a window under about 1400 pixels the song title gets short. Making the window shrink properly is the milestone 15 fix.
 - The amp stack costs CPU: on this box (a 2.8 GHz Xeon core) Warm Glow at 4x takes about 4% of one core at 44.1 kHz, and all nine devices at once about 14%. At 8x, double that. A 192 kHz song gets 4x at most, since the devices stop at 768 kHz.
 - The limiter's look ahead sees the amp stack only by its trims, since the stack's state can't be borrowed for a preview. A peak the stack makes itself (an exciter at full, say) is still held under the ceiling, with a shorter ramp.
 - The stack delays the sound by 48 frames (1 ms at 48 kHz) while it's on. Switching it on or off crossfades against the undelayed sound, which is a 20 ms smear, never a click.

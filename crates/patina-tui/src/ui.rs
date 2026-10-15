@@ -32,7 +32,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(area);
 
     let side_w = if area.width >= 70 { SIDEBAR_W } else { 0 };
-    let queue_w = if app.queue_panel && area.width >= 100 {
+    // The lyrics, while they're up, take the panel's place.
+    let lyrics = app.b.lyrics().is_some();
+    let queue_w = if lyrics && area.width >= 90 {
+        LYRICS_W.min(area.width / 3)
+    } else if app.queue_panel && area.width >= 100 {
         QUEUE_W
     } else {
         0
@@ -50,7 +54,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         draw_level(f, app, content);
     }
-    if queue_w > 0 {
+    if queue_w > 0 && lyrics {
+        draw_lyrics_panel(f, app, panel);
+    } else if queue_w > 0 {
         draw_queue_panel(f, app, panel);
     }
     draw_toast(f, app, toast);
@@ -123,6 +129,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             selected,
             ..
         } => draw_pick(f, app, area, title, options, *selected, false),
+        Modal::PickRate {
+            title, selected, ..
+        } => {
+            let opts: Vec<String> = (0..=5u8)
+                .map(|n| {
+                    if n == 0 {
+                        "☆☆☆☆☆  no rating".to_string()
+                    } else {
+                        patina_core::browse::marks::stars_text(n)
+                    }
+                })
+                .collect();
+            draw_pick(f, app, area, title, &opts, *selected, false)
+        }
         Modal::Confirm { msg, .. } => draw_confirm(f, app, area, msg),
         _ => {}
     }
@@ -260,6 +280,13 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     ),
                 ])
             }
+            SideEntry::Favorite { label, .. } => {
+                let w = (area.width as usize).saturating_sub(3);
+                Line::from(vec![
+                    Span::styled(" ★ ", base.fg(t.copper)),
+                    Span::styled(pad(&truncate(label, w), w), base.fg(t.text)),
+                ])
+            }
             SideEntry::Label(l) => {
                 Line::from(Span::styled(format!(" {l}"), Style::default().fg(t.muted)))
             }
@@ -271,6 +298,18 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 // ----- Library levels -----
+
+/// A title with its rating after it, in copper: "Blew  ★★★".
+fn titled<'a>(title: &str, style: Style, rating: u8, t: &crate::theme::Theme) -> Line<'a> {
+    let mut v = vec![Span::styled(title.to_string(), style)];
+    if rating > 0 {
+        v.push(Span::styled(
+            format!("  {}", "★".repeat(rating as usize)),
+            Style::default().fg(t.copper),
+        ));
+    }
+    Line::from(v)
+}
 
 /// What a row's columns show, which depends on the list it's in.
 #[derive(Clone, Copy, PartialEq)]
@@ -683,7 +722,7 @@ fn item_row<'a>(
                     mark(" ")
                 },
                 Cell::from(Span::styled(num, dim)),
-                Cell::from(Span::styled(tr.title.clone(), ts)),
+                Cell::from(titled(&tr.title, ts, tr.rating, t)),
                 Cell::from(Span::styled(tr.artist.clone().unwrap_or_default(), ss)),
                 Cell::from(Span::styled(tr.album.clone().unwrap_or_default(), ss)),
                 Cell::from(Span::styled(
@@ -718,7 +757,7 @@ fn item_row<'a>(
         Item::Album(a) => vec![
             mark(" "),
             Cell::from(""),
-            Cell::from(Span::styled(a.name.clone(), text)),
+            Cell::from(titled(&a.name, text, a.rating, t)),
             Cell::from(Span::styled(a.artist_line(), muted)),
             Cell::from(Span::styled(
                 a.year.map(|y| y.to_string()).unwrap_or_default(),
@@ -1353,6 +1392,70 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Compact "up next" list beside whatever view is open.
+const LYRICS_W: u16 = 48;
+
+fn draw_lyrics_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    use patina_core::browse::marks::LyricsStatus;
+    let t = &app.theme;
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(t.border))
+        .style(Style::default().bg(t.surface));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let stale = app.b.lyrics_stale();
+    let Some(v) = app.b.lyrics() else { return };
+    let w = inner.width.saturating_sub(2) as usize;
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" {}", truncate(&v.title, w)),
+        Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+    ))];
+    let note = |s: String, c| Line::from(Span::styled(format!(" {s}"), Style::default().fg(c)));
+    if stale {
+        lines.push(note(
+            "Another song is playing. Ctrl+L looks it up.".into(),
+            t.copper,
+        ));
+    }
+    match &v.status {
+        LyricsStatus::Looking => lines.push(note("Looking…".into(), t.muted)),
+        LyricsStatus::Nothing(why) => lines.push(note(why.clone(), t.muted)),
+        LyricsStatus::Failed(e) => lines.push(note(format!("Couldn't look: {e}"), t.copper)),
+        LyricsStatus::Found(l) => {
+            lines.push(note(l.origin.label().to_string(), t.wave_raw));
+            lines.push(Line::from(""));
+            let cur = if stale {
+                None
+            } else {
+                l.line_at(app.snap.position)
+            };
+            let room = inner.height.saturating_sub(lines.len() as u16) as usize;
+            // Keep the playing line a third of the way down.
+            let first = cur.map(|c| c.saturating_sub(room / 3)).unwrap_or(0);
+            for (i, (_, text)) in l.lines.iter().enumerate().skip(first).take(room) {
+                let style = if Some(i) == cur {
+                    Style::default()
+                        .fg(t.verdigris)
+                        .add_modifier(Modifier::BOLD)
+                } else if l.synced && cur.is_some_and(|c| i < c) {
+                    Style::default().fg(t.muted)
+                } else {
+                    Style::default().fg(t.text)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", truncate(text, w)),
+                    style,
+                )));
+            }
+        }
+    }
+    // Notes can run long; lyric lines are cut to fit already.
+    f.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
+}
+
 fn draw_queue_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let t = &app.theme;
     let block = Block::default()
@@ -1438,6 +1541,12 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         Some(true) => left.push(Span::styled("♥ ", Style::default().fg(t.copper))),
         Some(false) => left.push(Span::styled("♡ ", Style::default().fg(t.wave_raw))),
         None => {}
+    }
+    if let Some(r) = app.b.playing_rating() {
+        left.push(Span::styled(
+            format!("{} ", patina_core::browse::marks::stars_text(r)),
+            Style::default().fg(if r > 0 { t.copper } else { t.wave_raw }),
+        ));
     }
     match &s.track {
         Some(info) => {
@@ -1846,6 +1955,14 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "Enter change, h/l turn a knob, o rack on/off; add, move and remove devices from their rows",
         ),
         ("Ctrl+O", "Pick the output device"),
+        (
+            "Ctrl+L",
+            "Lyrics for the song playing (looked up only then)",
+        ),
+        (
+            "* / y / Y",
+            "Star a folder, album or artist; rate the selection; rate the song playing",
+        ),
         ("F5", "Check folders and podcast feeds for changes"),
         (
             "Mouse",

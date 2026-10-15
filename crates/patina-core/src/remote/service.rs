@@ -131,6 +131,8 @@ pub enum Job {
         id: String,
         pos: Duration,
     },
+    /// Send the ratings and stars waiting for this server.
+    PushMarks,
 }
 
 enum Cmd {
@@ -622,6 +624,18 @@ impl Worker {
             Ok(false) => {}
             Err(e) => log::warn!("{name} playlists: {e}"),
         }
+        // Your marks: what's waiting goes first, so the server's answer
+        // already has it.
+        if let Err(e) = sync::push_marks(&self.lib, &name, kind, client.as_ref()) {
+            log::info!("{name} ratings and stars: {e}");
+        }
+        match sync::pull_starred(&mut self.lib, &name, kind, client.as_ref()) {
+            Ok(true) => {
+                let _ = self.ctx.events.send(RemoteEvent::Changed);
+            }
+            Ok(false) => {}
+            Err(e) => log::info!("{name} starred: {e}"),
+        }
         let stations = client.radio().unwrap_or_else(|e| {
             log::info!("{name} radio: {e}");
             Vec::new()
@@ -674,6 +688,16 @@ impl Worker {
                 None => Some(RemoteEvent::Done(format!("{name} has no saved queue"))),
             }),
             Job::Bookmark { id, pos } => c.bookmark(&id, pos).map(|_| None),
+            Job::PushMarks => {
+                match sync::push_marks(&self.lib, &name, self.cfg.kind, c.as_ref()) {
+                    Ok(_) => Ok(None),
+                    // Waits for the next sync; no need to shout.
+                    Err(e) => {
+                        log::info!("{name}: ratings and stars wait: {e}");
+                        Ok(None)
+                    }
+                }
+            }
         };
         match res {
             Ok(ev) => {

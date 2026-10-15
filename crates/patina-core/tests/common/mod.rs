@@ -233,6 +233,14 @@ pub struct State {
     pub similar_artists: HashMap<String, Vec<String>>,
     /// Songs the server says are similar to a song, by id.
     pub similar_songs: HashMap<String, Vec<String>>,
+    /// Your ratings, by song or album id, and every rating call.
+    pub ratings: HashMap<String, u8>,
+    pub rated: Vec<(String, u8)>,
+    /// Starred albums and artists, by id.
+    pub starred_albums: Vec<String>,
+    pub starred_artists: Vec<String>,
+    /// Lyrics by song id: (ms, line), synced.
+    pub lyrics: HashMap<String, Vec<(u64, String)>>,
 }
 
 impl State {
@@ -357,6 +365,11 @@ pub fn library(gonic: bool) -> State {
         streams: Vec::new(),
         similar_artists: HashMap::new(),
         similar_songs: HashMap::new(),
+        ratings: HashMap::new(),
+        rated: Vec::new(),
+        starred_albums: Vec::new(),
+        starred_artists: Vec::new(),
+        lyrics: HashMap::new(),
     }
 }
 
@@ -402,7 +415,15 @@ fn many(flavor: Flavor, v: Vec<Value>) -> Value {
     }
 }
 
-fn child(flavor: Flavor, a: &MAlbum, s: &MSong) -> Value {
+fn child(flavor: Flavor, a: &MAlbum, s: &MSong, rt: &HashMap<String, u8>) -> Value {
+    let mut v = child_bare(flavor, a, s);
+    if let Some(r) = rt.get(&s.id) {
+        v["userRating"] = json!(r);
+    }
+    v
+}
+
+fn child_bare(flavor: Flavor, a: &MAlbum, s: &MSong) -> Value {
     match flavor {
         Flavor::Navidrome => json!({
             "id": s.id, "parent": a.id, "isDir": false, "title": s.title, "album": a.name,
@@ -427,7 +448,7 @@ fn child(flavor: Flavor, a: &MAlbum, s: &MSong) -> Value {
     }
 }
 
-fn album_json(flavor: Flavor, a: &MAlbum, with_songs: bool) -> Value {
+fn album_json(flavor: Flavor, a: &MAlbum, with_songs: bool, rt: &HashMap<String, u8>) -> Value {
     let mut v = json!({
         "id": a.id, "name": a.name, "artist": a.artist, "songCount": a.songs.len(),
         "duration": a.songs.len(), "year": a.year, "created": "2024-01-02T03:04:05Z",
@@ -436,8 +457,11 @@ fn album_json(flavor: Flavor, a: &MAlbum, with_songs: bool) -> Value {
     if with_songs {
         v["song"] = many(
             flavor,
-            a.songs.iter().map(|s| child(flavor, a, s)).collect(),
+            a.songs.iter().map(|s| child(flavor, a, s, rt)).collect(),
         );
+    }
+    if let Some(r) = rt.get(&a.id) {
+        v["userRating"] = json!(r);
     }
     v
 }
@@ -512,7 +536,7 @@ fn subsonic(
                 .iter()
                 .skip(offset)
                 .take(size)
-                .map(|a| album_json(flavor, a, false))
+                .map(|a| album_json(flavor, a, false, &s.ratings))
                 .collect();
             if flavor == Flavor::Gonic && list.is_empty() {
                 // Gonic leaves the empty list out entirely.
@@ -521,7 +545,10 @@ fn subsonic(
             ok(flavor, json!({"albumList2": {"album": many(flavor, list)}}))
         }
         "getAlbum" => match s.albums.iter().find(|a| Some(a.id.as_str()) == r.get("id")) {
-            Some(a) => ok(flavor, json!({"album": album_json(flavor, a, true)})),
+            Some(a) => ok(
+                flavor,
+                json!({"album": album_json(flavor, a, true, &s.ratings)}),
+            ),
             None => fail(70, "Album not found"),
         },
         "stream" => match r.get("id").and_then(|id| s.song(id)) {
@@ -582,7 +609,7 @@ fn subsonic(
                 .unwrap_or_default();
             let songs: Vec<Value> = ids
                 .iter()
-                .filter_map(|id| s.song(id).map(|(a, x)| child(flavor, a, x)))
+                .filter_map(|id| s.song(id).map(|(a, x)| child(flavor, a, x, &s.ratings)))
                 .collect();
             ok(
                 flavor,
@@ -614,7 +641,7 @@ fn subsonic(
             let entries: Vec<Value> = p
                 .songs
                 .iter()
-                .filter_map(|id| s.song(id).map(|(a, x)| child(flavor, a, x)))
+                .filter_map(|id| s.song(id).map(|(a, x)| child(flavor, a, x, &s.ratings)))
                 .collect();
             ok(
                 flavor,
@@ -714,7 +741,7 @@ fn subsonic(
             Some((ids, cur, pos)) => {
                 let entries: Vec<Value> = ids
                     .iter()
-                    .filter_map(|id| s.song(id).map(|(a, x)| child(flavor, a, x)))
+                    .filter_map(|id| s.song(id).map(|(a, x)| child(flavor, a, x, &s.ratings)))
                     .collect();
                 ok(
                     flavor,
@@ -737,10 +764,71 @@ fn subsonic(
             ok(flavor, json!({}))
         }
         "star" | "unstar" => {
-            let id = r.get("id").unwrap_or("").to_string();
-            s.stars.push((id, method == "star"));
+            let on = method == "star";
+            if let Some(id) = r.get("id") {
+                s.stars.push((id.to_string(), on));
+            }
+            if let Some(id) = r.get("albumId").map(str::to_string) {
+                s.stars.push((format!("album:{id}"), on));
+                s.starred_albums.retain(|x| *x != id);
+                if on {
+                    s.starred_albums.push(id);
+                }
+            }
+            if let Some(id) = r.get("artistId").map(str::to_string) {
+                s.stars.push((format!("artist:{id}"), on));
+                s.starred_artists.retain(|x| *x != id);
+                if on {
+                    s.starred_artists.push(id);
+                }
+            }
             ok(flavor, json!({}))
         }
+        "setRating" => {
+            let id = r.get("id").unwrap_or("").to_string();
+            let n: u8 = r.get("rating").and_then(|n| n.parse().ok()).unwrap_or(0);
+            s.rated.push((id.clone(), n));
+            if n == 0 {
+                s.ratings.remove(&id);
+            } else {
+                s.ratings.insert(id, n);
+            }
+            ok(flavor, json!({}))
+        }
+        "getStarred2" => {
+            let albums: Vec<Value> = s
+                .albums
+                .iter()
+                .filter(|a| s.starred_albums.contains(&a.id))
+                .map(|a| album_json(flavor, a, false, &s.ratings))
+                .collect();
+            let artists: Vec<Value> = s
+                .starred_artists
+                .iter()
+                .map(|id| json!({"id": id, "name": id.trim_start_matches("ar-")}))
+                .collect();
+            ok(
+                flavor,
+                json!({"starred2": {"album": many(flavor, albums), "artist": many(flavor, artists)}}),
+            )
+        }
+        "getLyricsBySongId" => {
+            let lines: Vec<Value> = s
+                .lyrics
+                .get(r.get("id").unwrap_or(""))
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(ms, l)| json!({"start": ms, "value": l}))
+                .collect();
+            let list = if lines.is_empty() {
+                json!([])
+            } else {
+                json!([{"lang": "eng", "synced": true, "line": lines}])
+            };
+            ok(flavor, json!({"lyricsList": {"structuredLyrics": list}}))
+        }
+        "getLyrics" => ok(flavor, json!({"lyrics": {}})),
         _ => fail(0, "unknown method"),
     }
 }
@@ -961,6 +1049,25 @@ fn ampache(st: &Mutex<State>, user: &str, password: &str, r: &Request) -> Respon
             let pos: u64 = r.get("position").and_then(|p| p.parse().ok()).unwrap_or(0);
             s.bookmarks.insert(filter, pos);
             Response::json(json!({"bookmark": []}))
+        }
+        "rate" => {
+            let id = format!(
+                "{}:{}",
+                r.get("type").unwrap_or(""),
+                r.get("id").unwrap_or("")
+            );
+            let n: u8 = r.get("rating").and_then(|n| n.parse().ok()).unwrap_or(0);
+            s.rated.push((id, n));
+            Response::json(json!({"success": "rating set"}))
+        }
+        "flag" => {
+            let id = format!(
+                "{}:{}",
+                r.get("type").unwrap_or(""),
+                r.get("id").unwrap_or("")
+            );
+            s.stars.push((id, r.get("flag") == Some("1")));
+            Response::json(json!({"success": "flag set"}))
         }
         _ => amp_err("4705", &action, "Missing Method"),
     }

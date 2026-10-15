@@ -8,6 +8,7 @@ mod downloads;
 pub mod eq;
 pub mod lastfm;
 mod leveling;
+pub mod marks;
 mod mixes;
 pub mod model;
 pub mod offline;
@@ -57,6 +58,12 @@ pub enum SideEntry {
     Mix {
         id: i64,
         name: String,
+    },
+    /// A starred folder, album or artist. Opening it opens that.
+    Favorite {
+        id: i64,
+        label: String,
+        kind: crate::library::marks::FavKind,
     },
     Label(&'static str),
     Gap,
@@ -167,6 +174,10 @@ pub struct Browser {
     generation: u64,
     /// When the library roots were last checked for being there.
     roots_checked: Instant,
+    /// The playing song's rating as last read, by its path.
+    playing_rating: Option<(PathBuf, Option<u8>)>,
+    lyrics: Option<marks::LyricsView>,
+    lyrics_job: Option<marks::LyricsJob>,
 }
 
 fn plural(n: usize) -> &'static str {
@@ -267,6 +278,9 @@ impl Browser {
             notes: Vec::new(),
             generation: 0,
             roots_checked: Instant::now(),
+            playing_rating: None,
+            lyrics: None,
+            lyrics_job: None,
         };
         b.rebuild_sidebar();
         b
@@ -319,6 +333,7 @@ impl Browser {
         self.poll_level();
         self.eq_tick();
         self.amp_tick();
+        self.poll_lyrics();
         if events.iter().any(|e| matches!(e, Event::Played(_))) {
             for s in Section::STATS {
                 self.refresh_section(s);
@@ -402,6 +417,16 @@ impl Browser {
             s.push(SideEntry::Gap);
             s.push(SideEntry::Label("Listening"));
             s.extend(Section::STATS.iter().map(|&x| SideEntry::Section(x)));
+            let favs = self.favorites();
+            if !favs.is_empty() {
+                s.push(SideEntry::Gap);
+                s.push(SideEntry::Label("Favorites"));
+                s.extend(favs.into_iter().map(|f| SideEntry::Favorite {
+                    id: f.id,
+                    label: f.label,
+                    kind: f.kind,
+                }));
+            }
             let saved = self.saved_mixes();
             if !saved.is_empty() {
                 s.push(SideEntry::Gap);
@@ -484,13 +509,20 @@ impl Browser {
             }
             if matches!(
                 self.sidebar[i as usize],
-                SideEntry::Section(_) | SideEntry::Source { .. } | SideEntry::Mix { .. }
+                SideEntry::Section(_)
+                    | SideEntry::Source { .. }
+                    | SideEntry::Mix { .. }
+                    | SideEntry::Favorite { .. }
             ) {
                 break;
             }
         }
-        // Moving onto a saved mix selects it; Enter plays it.
-        if matches!(self.sidebar[i as usize], SideEntry::Mix { .. }) {
+        // Moving onto a saved mix or a favorite selects it; Enter opens
+        // it. (A favorite moved by J and K stays put this way.)
+        if matches!(
+            self.sidebar[i as usize],
+            SideEntry::Mix { .. } | SideEntry::Favorite { .. }
+        ) {
             self.sidebar_sel = i as usize;
             self.touch();
             return;
@@ -513,6 +545,12 @@ impl Browser {
             Some(SideEntry::Mix { id, .. }) => {
                 self.sidebar_sel = index;
                 self.play_saved_mix(id);
+            }
+            Some(SideEntry::Favorite { id, .. }) => {
+                if let Some(f) = self.favorites().into_iter().find(|f| f.id == id) {
+                    self.open_favorite(&f);
+                }
+                self.sidebar_sel = index;
             }
             _ => return,
         }
@@ -1481,6 +1519,10 @@ impl Browser {
                     ))?;
                     self.config.output.bit_perfect_device = (!v.is_empty()).then(|| v.clone());
                     self.apply_bit_perfect();
+                }
+                (Key::LyricsOnline, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "lyrics", "online", *on))?;
+                    self.config.lyrics.online = *on;
                 }
                 (Key::PodcastSpeed, Control::Number { value, scale, .. }) => {
                     let t = *value as f64 / *scale as f64;

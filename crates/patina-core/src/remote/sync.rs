@@ -309,6 +309,7 @@ fn write_album(
                 tx.last_insert_rowid()
             }
         };
+        Library::server_song_rating(tx, &path, s.rating)?;
         tx.execute("DELETE FROM track_genres WHERE track_id = ?1", [track_id])?;
         for g in &s.genres {
             tx.execute(
@@ -413,11 +414,105 @@ pub fn sync_library(
         tx.commit()?;
         progress(((n + 1) * BATCH).min(total), total);
     }
+    // Album ratings ride along with the album list, so they're read on
+    // every sync, not just for albums that changed.
+    let ratings: Vec<(String, Option<u8>)> =
+        albums.iter().map(|a| (a.id.clone(), a.rating)).collect();
+    if lib.server_album_ratings(source_id, &ratings)? {
+        stats.updated += 1;
+    }
     lib.conn.execute(
         "UPDATE sources SET last_scan = ?2 WHERE id = ?1",
         params![source_id, now_secs()],
     )?;
     Ok(stats)
+}
+
+/// Send the ratings and stars you set here that this server hasn't heard
+/// yet. One that fails stays waiting for the next try. True if anything
+/// was sent.
+pub fn push_marks(
+    lib: &Library,
+    server: &str,
+    kind: ServerKind,
+    client: &dyn Client,
+) -> Result<bool> {
+    let source_id = ensure_source(lib, server, kind)?;
+    let mut sent = false;
+    let mut first_err = None;
+    let mut note = |r: std::result::Result<(), RemoteError>| match r {
+        Ok(()) => true,
+        Err(RemoteError::Unsupported(_)) => false,
+        Err(e) => {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+            false
+        }
+    };
+    for p in lib.pending_song_ratings(source_id)? {
+        if note(client.set_rating(super::Rated::Song, &p.remote_id, p.stars)) {
+            lib.rating_sent(true, &p.key, p.stars)?;
+            sent = true;
+        }
+    }
+    for p in lib.pending_album_ratings(source_id)? {
+        if note(client.set_rating(super::Rated::Album, &p.remote_id, p.stars)) {
+            lib.rating_sent(false, &p.key, p.stars)?;
+            sent = true;
+        }
+    }
+    for p in lib.pending_stars(server, source_id)? {
+        use crate::library::marks::FavKind;
+        let r = match p.kind {
+            FavKind::Album => match &p.remote_id {
+                Some(id) => client.star_album(id, p.on),
+                // The album's gone from the server: nothing to tell it.
+                None => Ok(()),
+            },
+            FavKind::Artist => client.star_artist(&String::from_utf8_lossy(&p.key), p.on),
+            FavKind::Folder => Ok(()),
+        };
+        if note(r) {
+            lib.star_sent(p.id)?;
+            sent = true;
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e.into());
+    }
+    Ok(sent)
+}
+
+/// Read what the server has starred into the favorites. True if the list
+/// changed.
+pub fn pull_starred(
+    lib: &mut Library,
+    server: &str,
+    kind: ServerKind,
+    client: &dyn Client,
+) -> Result<bool> {
+    let source_id = ensure_source(lib, server, kind)?;
+    let starred = match client.starred() {
+        Ok(s) => s,
+        Err(RemoteError::Unsupported(_)) => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let mut albums = Vec::new();
+    for id in &starred.albums {
+        let row: Option<(String, String)> = lib
+            .conn
+            .query_row(
+                "SELECT t.album_key, COALESCE(a.name, t.album, '') FROM tracks t                  LEFT JOIN albums a ON a.key = t.album_key                  WHERE t.source_id = ?1 AND t.remote_album = ?2 LIMIT 1",
+                params![source_id, id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some(r) = row {
+            albums.push(r);
+        }
+    }
+    Ok(lib.server_starred(server, &albums, &starred.artists)?)
 }
 
 /// Copy the server's playlists. True if anything changed.

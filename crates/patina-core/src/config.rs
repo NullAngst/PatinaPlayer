@@ -100,6 +100,15 @@ pub struct Config {
     /// The amp stack, and which output device gets which preset.
     pub amp: crate::amp::AmpConfig,
     pub limiter: LimiterConfig,
+    pub lyrics: LyricsConfig,
+}
+
+/// Where lyrics may be looked up.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LyricsConfig {
+    /// Ask LRCLIB, online, when the song, its folder and its server have
+    /// none. Off until you turn it on.
+    pub online: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -361,6 +370,7 @@ impl Default for Config {
             eq: crate::eq::EqConfig::default(),
             amp: crate::amp::AmpConfig::default(),
             limiter: LimiterConfig::default(),
+            lyrics: LyricsConfig::default(),
         }
     }
 }
@@ -384,6 +394,13 @@ struct RawConfig {
     eq: Option<toml::Value>,
     amp: Option<toml::Value>,
     limiter: Option<RawLimiter>,
+    lyrics: Option<RawLyrics>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLyrics {
+    online: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -792,6 +809,9 @@ impl Config {
             eq,
             amp,
             limiter,
+            lyrics: LyricsConfig {
+                online: raw.lyrics.unwrap_or_default().online.unwrap_or(false),
+            },
         })
     }
 
@@ -866,6 +886,11 @@ dither = true
 # Crossfade between songs in milliseconds, 0 (off) to 12000. Never between
 # songs that follow on from each other on the same album.
 crossfade_ms = 0
+
+[lyrics]
+# Ask LRCLIB (lrclib.net) for lyrics the song, its folder and its server
+# don't have. Nothing is looked up until you press Lyrics.
+online = false
 
 [appearance]
 # How the app looks: runout (dark verdigris and copper), light or dark

@@ -79,6 +79,10 @@ pub struct State {
     /// The EQ panel's band handles. Kept and updated in place, so a handle
     /// being dragged isn't torn down under the pointer.
     eq_bands: Rc<VecModel<EqBand>>,
+    /// What's in Favorites, read once per rebuild of the rows.
+    fav_keys: std::collections::HashSet<(patina_core::library::marks::FavKind, Vec<u8>)>,
+    /// The lyrics as last shown, so the list is only replaced on change.
+    lyrics_shown: (Vec<String>, i32),
     /// The rack: a row per unit, and each unit's knobs in a model of its
     /// own, updated in place so a knob being dragged keeps its grip.
     amp_units: Rc<VecModel<AmpUnit>>,
@@ -142,6 +146,10 @@ l            love the song playing
 Ctrl+E       the EQ (o in it: on or bypassed)
 Ctrl+A       the amp stack: drag a dial up or down to turn it
 Ctrl+O       pick the output device (or click the output on the bottom bar)
+Ctrl+L       lyrics for the song playing (looked up only when asked)
+Right-click a song or album to rate it, a folder, album or artist to
+             add it to Favorites; the album header and the bottom bar
+             have stars too
 F5           check folders and feeds for changes
 Ctrl+Q       quit
 
@@ -226,6 +234,8 @@ impl State {
             snap: Snapshot::default(),
             rows: Rc::new(VecModel::default()),
             eq_bands: Rc::new(VecModel::default()),
+            fav_keys: Default::default(),
+            lyrics_shown: (Vec::new(), -1),
             amp_units: Rc::new(VecModel::default()),
             amp_knobs: Vec::new(),
             amp_kinds: Vec::new(),
@@ -275,8 +285,17 @@ impl State {
         let mut r = Row {
             selectable: item.selectable(),
             num: ss((i + 1).to_string()),
+            rating: -1,
+            fav: -1,
             ..Default::default()
         };
+        if let Some(rt) = Browser::item_rating(item) {
+            r.rating = rt as i32;
+            r.stars = ss("★".repeat(rt as usize));
+        }
+        if let Some(k) = patina_core::browse::marks::fav_key(item) {
+            r.fav = i32::from(self.fav_keys.contains(&k));
+        }
         let playing = self.playing_path();
         match item {
             Item::Track(t) => {
@@ -745,6 +764,12 @@ impl State {
         // Numbers count within each headed group, so search results read
         // 1, 2, 3 under Songs instead of carrying on from Albums.
         let mut n = 0;
+        self.fav_keys = self
+            .b
+            .favorites()
+            .into_iter()
+            .map(|f| (f.kind, f.key))
+            .collect();
         let rows: Vec<Row> = items
             .iter()
             .map(|it| {
@@ -828,6 +853,12 @@ impl State {
                         .and_then(|p| self.art.get(Req::Track(p), LARGE));
                     Hero {
                         show: true,
+                        rating: self.b.level_rating().map(i32::from).unwrap_or(-1),
+                        fav: self
+                            .b
+                            .level_fav_target()
+                            .map(|t| i32::from(self.b.is_favorite(&t)))
+                            .unwrap_or(-1),
                         kicker: ss(if self.b.config.appearance.theme.is_kawaii() {
                             "ALBUM · アルバム"
                         } else {
@@ -952,6 +983,15 @@ impl State {
                         },
                     }
                 }
+                SideEntry::Favorite { label, .. } => SideItem {
+                    kind: 4,
+                    label: ss(label),
+                    sub: SharedString::new(),
+                    icon: icons.get_star(),
+                    active: false,
+                    count: SharedString::new(),
+                    dot: 0,
+                },
                 SideEntry::Mix { id, name } => SideItem {
                     kind: 0,
                     label: ss(name),
@@ -1057,6 +1097,10 @@ impl State {
     }
 
     fn sync_playback(&mut self, ui: &AppWindow) {
+        // Every tick: the stars follow the song, and synced lyrics the
+        // position.
+        ui.set_np_rating(self.b.playing_rating().map(i32::from).unwrap_or(-1));
+        self.sync_lyrics(ui);
         let s = &self.snap;
         let track = s.track.clone();
         ui.set_has_track(track.is_some());
@@ -1907,6 +1951,59 @@ impl State {
         ui.set_eq_info(ss(info));
     }
 
+    /// The lyrics panel. Synced lyrics show from a couple of lines before
+    /// the one playing, so it stays in view without scrolling.
+    fn sync_lyrics(&mut self, ui: &AppWindow) {
+        use patina_core::browse::marks::LyricsStatus;
+        let stale = self.b.lyrics_stale();
+        let pos = self.snap.position;
+        let Some(v) = self.b.lyrics() else {
+            ui.set_lyrics_open(false);
+            return;
+        };
+        ui.set_lyrics_open(true);
+        ui.set_lyrics_title(ss(&v.title));
+        let (note, warn, lines, cur, synced): (String, bool, Vec<String>, i32, bool) = match &v
+            .status
+        {
+            LyricsStatus::Looking => ("Looking…".into(), false, Vec::new(), -1, false),
+            LyricsStatus::Nothing(why) => (why.clone(), false, Vec::new(), -1, false),
+            LyricsStatus::Failed(e) => (format!("Couldn't look: {e}"), true, Vec::new(), -1, false),
+            LyricsStatus::Found(l) => {
+                let all: Vec<String> = l.lines.iter().map(|x| x.1.clone()).collect();
+                let now = if stale { None } else { l.line_at(pos) };
+                if l.synced {
+                    let first = now.map(|c| c.saturating_sub(2)).unwrap_or(0);
+                    let cur = now.map(|c| (c - first) as i32).unwrap_or(-1);
+                    (
+                        l.origin.label().into(),
+                        false,
+                        all[first.min(all.len())..].to_vec(),
+                        cur,
+                        true,
+                    )
+                } else {
+                    (l.origin.label().into(), false, all, -1, false)
+                }
+            }
+        };
+        let note = if stale {
+            "Another song is playing. Press Lyrics to look it up.".to_string()
+        } else {
+            note
+        };
+        ui.set_lyrics_note(ss(note));
+        ui.set_lyrics_warn(warn || stale);
+        ui.set_lyrics_synced(synced);
+        if self.lyrics_shown.0 != lines || self.lyrics_shown.1 != cur {
+            ui.set_lyrics_lines(ModelRc::from(Rc::new(VecModel::from(
+                lines.iter().map(ss).collect::<Vec<_>>(),
+            ))));
+            ui.set_lyrics_current(cur);
+            self.lyrics_shown = (lines, cur);
+        }
+    }
+
     /// The rack above the Amp view's rows, and the AMP badge.
     fn sync_amp_panel(&mut self, ui: &AppWindow) {
         let a = self.b.amp_settings().clone();
@@ -2007,6 +2104,15 @@ impl State {
         };
         let n = s.choices.len().max(1) as f64;
         self.b.amp_set_param(u.kind, j, (u.p[j] + 1.0) % n);
+    }
+
+    /// Lyrics: up for the song playing, or closed if they already are.
+    fn toggle_lyrics(&mut self) {
+        if self.b.lyrics().is_some() && !self.b.lyrics_stale() {
+            self.b.lyrics_hide();
+        } else {
+            self.b.lyrics_show();
+        }
     }
 
     fn open_amp_save(&mut self, ui: &AppWindow) {
@@ -2115,7 +2221,11 @@ impl State {
                 .b
                 .note("Stations from a server are changed on the server");
         }
+        if let Some(n) = a.strip_prefix("rate-").and_then(|n| n.parse::<u8>().ok()) {
+            return self.b.rate_selected(n);
+        }
         match a {
+            "fav" => self.b.toggle_favorite_selected(),
             "play" => self.play_selected(),
             "next" => self.b.add_selected_to_queue(true),
             "queue" => self.b.add_selected_to_queue(false),
@@ -2375,6 +2485,7 @@ impl State {
                 "e" | "E" => self.b.switch(Section::Eq),
                 "a" | "A" => self.b.switch(Section::Amp),
                 "o" | "O" => self.pick_device(ui),
+                "l" | "L" => self.toggle_lyrics(),
                 "f" | "F" => {
                     let q = self.b.start_search();
                     ui.set_search_text(ss(q));
@@ -2662,6 +2773,19 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
     on!(on_eq_point, |s, _u, i, x, g| s
         .eq_point(i as usize, x as f64, g as f64));
     on!(on_eq_chip, |s, _u| s.b.switch(Section::Eq));
+    on!(on_np_rate, |s, _u, n| s.b.rate_playing(n.clamp(0, 5) as u8));
+    on!(on_hero_rate, |s, _u, n| s.b.rate_level(n.clamp(0, 5) as u8));
+    on!(on_hero_fav, |s, _u| s.b.toggle_favorite_level());
+    on!(on_lyrics_clicked, |s, _u| s.toggle_lyrics());
+    on!(on_side_act, |s, _u, i, a| {
+        if let Some(SideEntry::Favorite { id, .. }) = s.b.sidebar.get(i as usize).cloned() {
+            match a.as_str() {
+                "up" => s.b.favorite_move(id, -1),
+                "down" => s.b.favorite_move(id, 1),
+                _ => s.b.unfavorite(id),
+            }
+        }
+    });
     on!(on_amp_chip, |s, _u| s.b.switch(Section::Amp));
     on!(on_amp_knob, |s, _u, i, j, p| s
         .amp_knob(i as usize, j as usize, p as f64));

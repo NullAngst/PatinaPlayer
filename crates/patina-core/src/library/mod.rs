@@ -6,6 +6,7 @@
 //! scanner writes. [`service::LibraryService`] owns scanning and watching.
 
 pub mod loudness;
+pub mod marks;
 pub mod mixes;
 pub mod podcasts;
 pub mod scan;
@@ -99,12 +100,15 @@ pub struct TrackRow {
     pub remote_id: Option<String>,
     /// File size in bytes, as the folder or the server reported it.
     pub size: u64,
+    /// Your rating, 1 to 5; 0 is none.
+    pub rating: u8,
 }
 
 impl TrackRow {
     const COLS: &'static str = "id, path, title, filename, artist, album_artist, album, album_key, \
         track_no, disc_no, year, genre, duration_ms, codec, sample_rate, bits, channels, kbps, \
-        lossless, added_at, play_count, remote_id, size";
+        lossless, added_at, play_count, remote_id, size, \
+        (SELECT stars FROM song_ratings WHERE song_ratings.path = tracks.path)";
 
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
         let title: Option<String> = r.get(2)?;
@@ -139,6 +143,7 @@ impl TrackRow {
             play_count: r.get(20)?,
             remote_id: r.get(21)?,
             size: r.get::<_, Option<i64>>(22)?.unwrap_or(0).max(0) as u64,
+            rating: r.get::<_, Option<i64>>(23)?.unwrap_or(0).clamp(0, 5) as u8,
         })
     }
 
@@ -195,6 +200,8 @@ pub struct AlbumRow {
     pub lossless: bool,
     /// First track on the album, which is where its cover art is looked up.
     pub cover_track: Option<PathBuf>,
+    /// Your rating, 1 to 5; 0 is none.
+    pub rating: u8,
 }
 
 impl AlbumRow {
@@ -213,7 +220,8 @@ impl AlbumRow {
     }
     const COLS: &'static str = "key, name, artist, year, genre, track_count, duration_ms, added_at, \
         play_count, dir, lossless, \
-        (SELECT path FROM tracks t WHERE t.album_key = albums.key ORDER BY disc_no, track_no LIMIT 1)";
+        (SELECT path FROM tracks t WHERE t.album_key = albums.key ORDER BY disc_no, track_no LIMIT 1), \
+        (SELECT stars FROM album_ratings WHERE album_ratings.key = albums.key)";
 
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -229,6 +237,7 @@ impl AlbumRow {
             dir: bytes_path(r.get(9)?),
             lossless: r.get::<_, i64>(10)? != 0,
             cover_track: r.get::<_, Option<Vec<u8>>>(11)?.map(bytes_path),
+            rating: r.get::<_, Option<i64>>(12)?.unwrap_or(0).clamp(0, 5) as u8,
         })
     }
 }
@@ -308,16 +317,19 @@ pub enum AlbumSort {
     Year,
     RecentlyAdded,
     MostPlayed,
+    /// Your rating, highest first.
+    Rating,
     Random,
 }
 
 impl AlbumSort {
-    pub const ALL: [AlbumSort; 6] = [
+    pub const ALL: [AlbumSort; 7] = [
         AlbumSort::Name,
         AlbumSort::Artist,
         AlbumSort::Year,
         AlbumSort::RecentlyAdded,
         AlbumSort::MostPlayed,
+        AlbumSort::Rating,
         AlbumSort::Random,
     ];
     pub fn label(self) -> &'static str {
@@ -327,6 +339,7 @@ impl AlbumSort {
             AlbumSort::Year => "year",
             AlbumSort::RecentlyAdded => "recently added",
             AlbumSort::MostPlayed => "most played",
+            AlbumSort::Rating => "rating",
             AlbumSort::Random => "random",
         }
     }
@@ -343,6 +356,10 @@ impl AlbumSort {
             }
             AlbumSort::RecentlyAdded => "added_at DESC, name COLLATE NOCASE",
             AlbumSort::MostPlayed => "play_count DESC, name COLLATE NOCASE",
+            AlbumSort::Rating => {
+                "COALESCE((SELECT stars FROM album_ratings WHERE album_ratings.key = albums.key), 0) DESC, \
+                 artist COLLATE NOCASE, name COLLATE NOCASE"
+            }
             AlbumSort::Random => "random()",
         }
     }
@@ -358,10 +375,12 @@ pub enum SongSort {
     Duration,
     RecentlyAdded,
     MostPlayed,
+    /// Your rating, highest first.
+    Rating,
 }
 
 impl SongSort {
-    pub const ALL: [SongSort; 7] = [
+    pub const ALL: [SongSort; 8] = [
         SongSort::Title,
         SongSort::Artist,
         SongSort::Album,
@@ -369,6 +388,7 @@ impl SongSort {
         SongSort::Duration,
         SongSort::RecentlyAdded,
         SongSort::MostPlayed,
+        SongSort::Rating,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -379,6 +399,7 @@ impl SongSort {
             SongSort::Duration => "length",
             SongSort::RecentlyAdded => "recently added",
             SongSort::MostPlayed => "most played",
+            SongSort::Rating => "rating",
         }
     }
     pub fn next(self) -> Self {
@@ -404,6 +425,11 @@ impl SongSort {
             SongSort::MostPlayed => {
                 format!("play_count{}, {title}", if desc { "" } else { " DESC" })
             }
+            SongSort::Rating => format!(
+                "COALESCE((SELECT stars FROM song_ratings WHERE song_ratings.path = tracks.path), 0){}, \
+                 artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no",
+                if desc { "" } else { " DESC" }
+            ),
         }
     }
 }

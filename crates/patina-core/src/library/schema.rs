@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 7;
+pub const VERSION: i64 = 8;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -249,6 +249,42 @@ CREATE TABLE loves (
 );
 "#;
 
+/// Ratings and favorites. Ratings are kept by path (songs) and album key,
+/// which a rescan or a re-sync keeps. `dirty` marks a change a server
+/// hasn't heard yet; a server song's rating of 0 with `dirty` set is a
+/// rating taken away, waiting to be sent. Favorites are starred folders,
+/// albums and artists in your order. `server` is set on ones that came
+/// from, or went to, a server's starred list; `removed` keeps an unstar
+/// until that server has heard it.
+const V8: &str = r#"
+CREATE TABLE song_ratings (
+    path        BLOB PRIMARY KEY,
+    stars       INTEGER NOT NULL,
+    rated_at    INTEGER NOT NULL,
+    dirty       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE album_ratings (
+    key         TEXT PRIMARY KEY,
+    stars       INTEGER NOT NULL,
+    rated_at    INTEGER NOT NULL,
+    dirty       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE favorites (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL,          -- 'folder', 'album' or 'artist'
+    key         BLOB NOT NULL,          -- folder path, album key, artist name
+    label       TEXT NOT NULL,
+    pos         INTEGER NOT NULL,
+    added_at    INTEGER NOT NULL,
+    server      TEXT,
+    dirty       INTEGER NOT NULL DEFAULT 0,
+    removed     INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (kind, key)
+);
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -283,6 +319,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 7 {
         tx.execute_batch(V7)?;
+    }
+    if current < 8 {
+        tx.execute_batch(V8)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

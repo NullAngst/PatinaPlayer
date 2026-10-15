@@ -193,6 +193,8 @@ pub struct RemoteAlbum {
     pub year: Option<i32>,
     /// When the server last changed it, if it says.
     pub changed: Option<String>,
+    /// Your rating there, 1 to 5. None when it has none.
+    pub rating: Option<u8>,
 }
 
 impl RemoteAlbum {
@@ -238,6 +240,36 @@ pub struct RemoteSong {
     pub rg_album_gain: Option<f64>,
     pub rg_album_peak: Option<f64>,
     pub play_count: i64,
+    /// Your rating there, 1 to 5. None when it has none.
+    pub rating: Option<u8>,
+}
+
+/// What a rating is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rated {
+    Song,
+    Album,
+}
+
+/// What a server has starred, besides songs: album ids, and artists by
+/// name.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Starred {
+    pub albums: Vec<String>,
+    pub artists: Vec<String>,
+}
+
+/// Lyrics a server sent: lines, with times when they're synced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerLyrics {
+    pub synced: bool,
+    pub lines: Vec<(Option<Duration>, String)>,
+}
+
+/// A rating from a server's 0 to 5 (0 meaning none).
+pub fn rating_of(v: Option<f64>) -> Option<u8> {
+    v.filter(|r| *r >= 0.5)
+        .map(|r| r.round().clamp(1.0, 5.0) as u8)
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -363,6 +395,32 @@ pub trait Client: Send + Sync {
     /// Star or unstar a song (a favourite on the server).
     fn star(&self, _id: &str, _on: bool) -> Result<()> {
         Err(RemoteError::Unsupported("stars"))
+    }
+
+    /// Rate a song or an album, 1 to 5; 0 takes the rating away.
+    fn set_rating(&self, _what: Rated, _id: &str, _stars: u8) -> Result<()> {
+        Err(RemoteError::Unsupported("ratings"))
+    }
+
+    /// Star or unstar an album.
+    fn star_album(&self, _id: &str, _on: bool) -> Result<()> {
+        Err(RemoteError::Unsupported("stars"))
+    }
+
+    /// Star or unstar an artist, by name. Fine if the server doesn't
+    /// have them.
+    fn star_artist(&self, _name: &str, _on: bool) -> Result<()> {
+        Err(RemoteError::Unsupported("stars"))
+    }
+
+    /// The albums and artists starred there.
+    fn starred(&self) -> Result<Starred> {
+        Err(RemoteError::Unsupported("stars"))
+    }
+
+    /// The server's lyrics for a song, if it has any.
+    fn lyrics(&self, _song_id: &str, _artist: &str, _title: &str) -> Result<Option<ServerLyrics>> {
+        Err(RemoteError::Unsupported("lyrics"))
     }
 }
 

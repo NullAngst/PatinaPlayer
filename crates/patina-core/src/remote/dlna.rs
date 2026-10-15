@@ -758,6 +758,7 @@ impl Dlna {
                 let mut ids: Vec<&str> = list.iter().map(|s| s.id.as_str()).collect();
                 ids.sort_unstable();
                 RemoteAlbum {
+                    rating: None,
                     id: id.clone(),
                     name: first.album.clone().unwrap_or_default(),
                     artist: first.album_artist.clone().unwrap_or_default(),

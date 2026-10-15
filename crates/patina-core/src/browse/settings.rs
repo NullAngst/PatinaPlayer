@@ -54,6 +54,8 @@ pub enum Key {
     CacheFormat,
     /// Genre mixes match album tags or each song's tags.
     GenreMatch,
+    /// Ask LRCLIB for lyrics.
+    LyricsOnline,
     LastFmKey,
     /// Link to Last.fm, or unlink.
     LastFmLink,
@@ -1083,6 +1085,18 @@ pub fn rows(
                 options: opts,
                 index,
             },
+        },
+    );
+
+    // Lyrics
+    push(
+        "Lyrics",
+        Setting {
+            disabled: None,
+            key: Key::LyricsOnline,
+            label: "Look lyrics up online".into(),
+            help: "Ask LRCLIB (lrclib.net) when the song, its folder and its server have none. Only ever when you press Lyrics.",
+            control: Control::Toggle(cfg.lyrics.online),
         },
     );
 

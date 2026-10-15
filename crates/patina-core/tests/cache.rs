@@ -717,6 +717,7 @@ fn settings_keep_prefetch_inside_the_cache_and_views_pin_whole() {
         dir: PathBuf::from("/music/Me/Local"),
         lossless: true,
         cover_track: None,
+        rating: 0,
     });
     assert!(!b.can_pin(&local));
 }
