@@ -77,6 +77,7 @@ jobs:
           done
           sleep 1
           cargo test -p patina-core --test eq pipewire -- --ignored
+          cargo test -p patina-core --test output_controls pipewire -- --ignored
 
       - name: Build TUI and GUI
         run: cargo build --release -p patina-tui -p patina-gui
