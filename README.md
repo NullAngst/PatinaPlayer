@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 7 of the build plan: everything from milestones 1 to 6.5 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic and Ampache servers with their playlists, stations, podcasts and play queue, and DLNA media servers), plus the song cache: prefetch, a size-capped cache of what you've played, albums, artists, playlists and folders pinned for offline, and offline mode when a server goes away. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Mixes come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 8 of the build plan: everything from milestones 1 to 7 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, and the song cache with prefetch, offline pins and offline mode), plus mixes: genre mixes across one or more genres, endless artist and track mixes, and saved mixes in the sidebar. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Volume leveling comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -18,6 +18,17 @@ This is milestone 7 of the build plan: everything from milestones 1 to 6.5 (the 
 - The server's radio stations show under your own in Radio, and its podcasts (the episodes the server has downloaded) show in Podcasts, with your place in them saved here and sent to the server as a bookmark.
 - Passwords and API keys go in the desktop keyring through the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in config.toml. With no keyring running (a TTY, the TUI over SSH), they go in `~/.config/patinaplayer/secrets.toml`, readable only by you, and the app says so when it does it.
 - Logins use a salted token, or an API key where the server offers OpenSubsonic API keys (leave the user name empty and put the key in the password box). The plain password is never put in a URL.
+
+**Mixes**
+- Genre mix: mark one or more genres (`M` in Genres, or right-click, Mark for a mix) and play the mix (`X`, or the Play mix button). It takes every song on the albums tagged with all of the genres you marked, shuffled up front. Blues Rock and Post-Grunge together gets you albums carrying both tags, not every album with either. Settings, Genre mixes match, switches from album tags to each song's own tags.
+- Artist mix: the artist and similar artists, shuffled, a quarter of it the artist themselves. Start one with `X` on an artist or an album, right-click, Artist mix, or the Mix button on an artist or album page.
+- Track mix: songs similar to one song, with that song first. `X` on a song, or right-click, Track mix.
+- Artist and track mixes are endless. When fewer than ten songs are left in the queue, the next 25 go on the end, so prefetch always has something to fetch. A song picked in the last 100 isn't picked again, and the same artist doesn't come up twice in a row when there's anyone else.
+- Who's similar comes from your server first (Navidrome, Gonic, Airsonic and Ampache get it from Last.fm, if they're set up for it). When the server has nothing, PatinaPlayer asks Last.fm itself, if you've given it an API key. When neither knows, it goes by your own tags: artists and songs that share genres with what you picked. That last way works with local folders and no key at all.
+- Only what's in your libraries plays. A similar artist you don't have is skipped. Every source counts, and a song that lives in two places plays once, from a local copy if there is one.
+- While a server is unreachable, a mix leaves out its songs that aren't kept.
+- Save a mix you like with Save mix on the Queue page (`M` in the Queue). It goes in the sidebar under Mixes, one click to play, and in Playlists under Saved mixes, where you can rename it, delete it, or keep it offline. A saved mix remembers who was similar when you saved it, so it plays the same way without the server or Last.fm.
+- Playing anything else ends the mix. Adding to the queue doesn't.
 
 **Cache and offline**
 - Server songs are kept on disk in three ways. Prefetch downloads the songs coming up in the queue, nearest first. The cache keeps what you've played, so a replay doesn't hit the server, and drops the least recently played songs once it's full. Pinned songs stay until you unpin them.
@@ -281,6 +292,12 @@ pause_on_metered = true  # hold background downloads on a metered connection
 format = "raw"           # raw (the original), opus or mp3
 bitrate = 192            # kbps, for opus and mp3
 
+[mixes]
+genre_match = "album"    # album (the album's tags) or track (each song's own)
+
+[lastfm]
+api_key = ""             # optional: for mixes when your server can't say who's similar
+
 [[radio.station]]
 name = "Some Station"
 url = "https://example.com/listen.pls"
@@ -344,6 +361,8 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | o / O | Sort Albums or Songs / reverse Songs |
 | t | Artists: album or track artist. Genres: albums or songs |
 | f / F | Keep the selection / the whole view offline, or stop |
+| X | Mix from the selection: an artist, album, song, or the marked genres |
+| M | Genres: mark a genre for a mix. Queue: save the mix playing |
 | q | Queue panel |
 | . | Jump to the playing track in Queue |
 | F5 | Check folders for changes and refresh podcast feeds |
@@ -374,6 +393,8 @@ crates/
     src/podcast.rs      feed fetching, episode downloads with resume
     src/remote/         music servers: the Subsonic, Ampache and DLNA clients, syncing into the index, the server threads
     src/cache/          the song cache: downloads, reading a song while it downloads, prefetch, pins, eviction
+    src/mix.rs          genre, artist and track mixes, and who's similar
+    src/lastfm.rs       Last.fm, for now only for similar artists and songs
     src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
     src/config.rs       config file and XDG paths
     src/player.rs       core thread: commands in, snapshots and events out
@@ -404,6 +425,8 @@ The bit-perfect test plays a 16/44.1 and a 24/96 FLAC of white noise to ALSA's `
 Server songs live in the same index as local files, under made-up paths like `server://Home/Nirvana/Bleach/01 Blew.flac` that follow the server's own folder layout. That's what makes every view, search and the folder tree work the same for both. The server's song id sits next to the path, and that's what playing, playlists and covers use. A song's stream address carries a login token, so it's asked for when the song starts rather than stored.
 
 The server tests run stand-in servers inside the test itself: one that answers like Navidrome (OpenSubsonic fields, made-up paths), one like Gonic (prefixed ids, real paths, missing fields, one-item lists sent as a lone object) and an Ampache one whose sessions run out every few calls. `.github/workflows/servers.yml` then runs the same clients against real Navidrome, Gonic and Ampache containers. The keyring test runs its own small Secret Service on a private D-Bus, locked keyring and unlock prompt included.
+
+The mix tests check genre mixes against two stand-in servers holding the same songs (each plays once, and with one server away the songs come from the other), artist mixes from the server's similar artists, track mixes from the server, then a stand-in Last.fm, then shared genres, endless refills, and saved mixes.
 
 The cache tests play songs through the cache from the stand-in Navidrome, and check prefetch by size and by count, eviction least recently played first, pins moving between the cache and the offline folder, converted downloads, podcast episodes in the same queue, and what greys out with a server away. One decodes a FLAC while it's still being written and checks it comes out sample for sample the same as the finished file. Another stalls a download and checks that a read near the end goes to the server by range. The servers workflow runs the cache against real MiniDLNA and Gerbera as well.
 
@@ -442,7 +465,12 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - Prefetch plans with the sizes the server reports. A DLNA server that reports none gets planned at 30 MB a song, so by-size prefetch may hold more or fewer songs than the setting suggests.
 - Metered connections are only seen through NetworkManager, which Plasma and GNOME use. Without it, nothing counts as metered.
 - An album pin follows the album's name and artist. If the album is retagged on the server, the pin stops matching and its songs drop back into the cache. Pin it again.
-- Genres can't be pinned, since a genre is usually most of a library. Pinned mixes come with mixes in milestone 8.
+- Genres can't be pinned, since a genre is usually most of a library. Save a genre mix and keep that offline instead.
+- Mixes were tested against stand-in servers and a stand-in Last.fm. Real similarity data hasn't been tried from this box, which can't reach Last.fm. Navidrome only has similar artists and songs when its Last.fm agent is set up (`LastFM.ApiKey`); without it, mixes fall back to Last.fm here (with a key) or your tags.
+- Matching Last.fm's answers to your library goes by artist and title, exactly as tagged apart from case. "The Beatles" and "Beatles" don't match, and neither do titles with "(Remastered)" on one side.
+- The last 100 picks are remembered while the app runs, not between runs.
+- Genre mixes come from the index. Before a server's first sync finishes, its songs aren't in mixes yet.
+- A Last.fm API key goes in config.toml in the clear. It's an API key, not a password: it identifies the app, it can't touch your account. Scrobbling in milestone 11 needs a login, and that goes in the keyring.
 - Server songs that aren't kept only play while the server can be reached.
 - Play counts from server songs count here, and the server's own counts are taken in at sync, but plays aren't reported back to the server yet. That comes with Last.fm in milestone 11, along with the choice of who scrobbles (the app, the server, or both) so a play isn't counted twice.
 - No ratings, lyrics or Favorites yet, and starring isn't synced. Those are milestone 14.
@@ -461,4 +489,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono, M PLUS Rounded 1c, Zen Maru Gothic) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/`.
 
-Now PatinaPlayer plays from your Navidrome, Gonic, Ampache or DLNA server through a cache that downloads ahead, keeps what you've played, holds what you've pinned when the server goes away, and everything is working as it should be.
+Now PatinaPlayer plays your servers and folders through a cache that downloads ahead and holds what you've pinned, makes genre mixes and endless artist and track mixes out of all of it, and everything is working as it should be.
