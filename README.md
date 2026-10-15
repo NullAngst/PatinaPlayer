@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 12 of the build plan: everything from milestones 1 to 11 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, and Last.fm), plus the output controls: a device picker on the bottom bar, a fixed output rate or the source's own, three resampler qualities, gapless joins across sample rates, sample format and TPDF dither for ALSA, and crossfade. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The amp stack comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 13 of the build plan: everything from milestones 1 to 12 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, and the output controls), plus the amp stack: nine devices that emulate tube amps, tape, transformers and other old hardware, run oversampled, chained in any order, with five built-in presets and a stack per output device. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Ratings, lyrics and favorites come next, then the polish. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -76,6 +76,19 @@ This is milestone 12 of the build plan: everything from milestones 1 to 11 (the 
 - While it's working, the bottom bar shows how much it's taking off (`LIM -2.2 dB`, in copper), held for a moment so you can see it.
 - Bit-perfect playback skips it, along with everything else.
 
+**Amp stack**
+- A rack of old hardware you switch on and chain, for when you want a record to sound like it's coming through a warm tube amp instead of a clean DAC. Off by default. `Ctrl+A` opens it in either app, or click AMP on the bottom bar, which lights copper while the stack is working.
+- Nine devices: tube preamp (soft, mostly even harmonics), tube power amp (odd harmonics and power supply sag), output transformer (thick, rounded lows, rolled-off extremes), tape deck (7.5, 15 or 30 ips: saturation, head bump, top-end loss, wow, flutter, hiss if you want it), phono stage (mono bass, rumble, crackle if you want it), console channel (a whisper of saturation and crosstalk), bus compressor (opto or VCA), exciter, and bass enhancer.
+- Every device has its own on switch, input and output trims, and a mix knob where blending makes sense. Each kind goes in the rack once, in any order: move a device up or down the chain from its rows.
+- Presets: Warm Glow, Reel to Reel, Late Night, Living Room Console and AM Radio to start, and your own, saved as TOML files in `~/.config/patinaplayer/presets/amp/`.
+- Each output can keep its own stack, like the EQ: your speakers get Warm Glow while your headphones stay clean. "Give this device its own stack" in the Amp view.
+- The desktop app shows the rack as a row of units with dials: drag a dial up or down to turn it, click a unit's light or name to switch it on or off. The TUI shows the same devices as rows with sliders, `h`/`l` to turn them.
+- The devices run at 4x the song's rate by default (2x or 8x in the Amp view, up to 768 kHz), so the harmonics they make don't fold back down as aliasing. A test drives a 7 kHz tone hard and checks the fold-back that shows at 2x is gone at 8x.
+- They're tuned to sound subtle at their defaults: a tone through any one device at its defaults comes out within 3 dB of where it went in, with its harmonics more than 20 dB down. Drive adds harmonics and squeezes peaks; it doesn't turn the music up.
+- These are character effects built from how each kind of hardware behaves in the textbooks (a triode stage, a push-pull pentode stage, a 15 ips tape machine). They don't model any branded unit, and I had no reference gear to match them against.
+- Knobs glide to where you turn them, and switching a device or the whole rack on or off fades over 20 ms, so nothing clicks. On with every device off, the stack passes the sound through untouched, bit for bit.
+- It sits before the EQ, so a headphone correction curve in the EQ applies to the final sound, character included. Bit-perfect skips it, and Auto bit-perfect counts it as changing the sound.
+
 **Output**
 - Click the output on the bottom bar (or press `Ctrl+O` in either app) to pick where the sound goes: every PipeWire output there is, by name, or the ALSA devices when PipeWire isn't running. The song carries on from where it was on the new device. Settings has the same list under Output, Device.
 - Sample rate: Match the source (the default) plays each album at its own rate. A fixed rate (44.1, 48, 88.2, 96, 176.4 or 192 kHz, or any rate in config.toml) resamples everything to it.
@@ -143,7 +156,7 @@ This is milestone 12 of the build plan: everything from milestones 1 to 11 (the 
 - The bottom bar shows BIT-PERFECT while it's happening. NOT BIT-PERFECT in copper means it was refused; click it for the reason. EXCLUSIVE means a lossy source (MP3, AAC) going out untouched as integers, which is as good as it gets for those.
 - Volume goes to the DAC's own volume control if it has one. If it doesn't, volume is fixed at 100% and the slider greys out. Mute still mutes.
 - Radio and podcasts never play bit-perfect. Radio isn't a file, and a sped-up podcast is processed by definition.
-- Auto mode means "bit-perfect whenever nothing would change the sound": leveling Off, the EQ bypassed or flat, the sample rate set to Match, and crossfade off. With leveling on (the default), that's never, so Auto is for people who set leveling to Off.
+- Auto mode means "bit-perfect whenever nothing would change the sound": leveling Off, the EQ bypassed or flat, the amp stack off, the sample rate set to Match, and crossfade off. With leveling on (the default), that's never, so Auto is for people who set leveling to Off.
 - With bit-perfect On, leveling, the EQ and the limiter are skipped, and the leveling and EQ settings grey out with the reason.
 - Pick the card under Bit-perfect device. The list comes from ALSA when you open Settings, so a USB DAC you just plugged in shows up.
 
@@ -367,6 +380,24 @@ parametric = [{ type = "lowshelf", freq = 105.0, gain = 6.7, q = 0.7 }]
 [eq.devices]             # output device to the preset it gets
 "alsa_output.usb-Sennheiser-00.analog-stereo" = "HD 650"
 
+[amp]                    # the app writes this table too; the Amp view is easier
+on = true
+oversample = 4           # 2, 4 or 8
+preset = "Warm Glow"
+
+[[amp.units]]            # one per device, in signal order
+kind = "tube-preamp"
+drive = 3                # knobs by name; anything left out takes its default
+bias = 35
+
+[[amp.units]]
+kind = "transformer"
+on = false
+trim_out = -1.5
+
+[amp.devices]            # output device to the stack preset it gets
+"alsa_output.pci-0000_00_1f.3.analog-stereo" = "Speakers stack"
+
 [podcasts]
 feeds = ["https://example.com/feed.xml"]
 speed = 1.0              # 0.5 to 3, podcasts only
@@ -428,6 +459,7 @@ Where everything else goes:
 | Songs pinned for offline | `~/.local/share/patinaplayer/offline/tracks/` |
 | Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
 | EQ presets you saved or imported | `~/.config/patinaplayer/presets/eq/` |
+| Amp stack presets you saved | `~/.config/patinaplayer/presets/amp/` |
 | Resized cover art, local and from servers | `~/.cache/patinaplayer/art/` |
 | Server passwords, the Last.fm session | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
 | Scrobbles waiting to be sent, loved songs | in the library index |
@@ -466,6 +498,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | l | Love the song playing |
 | Ctrl+E | The EQ view |
 | Ctrl+O | Pick the output device |
+| Ctrl+A | The amp stack |
 | . | Jump to the playing track in Queue |
 | F5 | Check folders for changes and refresh podcast feeds |
 | ? | Help |
@@ -498,6 +531,8 @@ crates/
     src/mix.rs          genre, artist and track mixes, and who's similar
     src/level/          leveling: picking the gain, EBU R128 measuring, the live normalizer, the measuring thread
     src/dsp/            the real-time stages: biquad filters, the EQ as it runs, the true-peak limiter, the resampler
+    src/dsp/amp/        the amp stack as it runs: the oversampler and the nine devices
+    src/amp.rs          the amp stack as you set it: devices, knobs, presets, files
     src/eq/             the EQ as you set it: graphic and parametric bands, presets, AutoEq and APO import
     src/lastfm.rs       Last.fm calls: signing, linking, Now Playing, scrobbles, love, similar artists and songs
     src/scrobble.rs     the Last.fm thread: linking, the scrobble queue, retries
@@ -544,6 +579,8 @@ The EQ tests play a 1 kHz tone through the player with a capturing output: a +6 
 
 The Last.fm tests run a stand-in Last.fm that checks every call's signature. They link through the approval page (waiting while it isn't approved yet), send scrobbles while it's down and check they arrive later in batches of 50 with their original times, drop a session it stops accepting while keeping the queue, love a song and ask if it's loved, and play a 32-second song in real time to see Now Playing at the start and the scrobble at the halfway mark, timed from when it started. Another checks, for each choice of who scrobbles, that a server song goes to Last.fm, to the stand-in Navidrome's scrobble endpoint, or both, exactly once each.
 
+The amp tests play a tone through the player with the stack off and on: on with every device off comes out bit for bit, a driven tube preamp keeps the tone and adds a second harmonic that wasn't there, and every built-in preset plays without going near clipping. Unit tests check each device at its defaults stays within 3 dB with its harmonics 20 dB down, that the tube preamp's second harmonic leads and the power amp's third does, the compressor's gain at 4:1, the phono stage folding the bass to mono, that switching a device on glides in without a jump, and that the oversampler is a clean delay that keeps images 60 dB down. Others build a rack from the Amp view's rows, save and load presets, give the output its own stack, and check what config.toml holds after.
+
 The output tests play FFmpeg-made tones through the player with a capturing output and compare them with the same tone worked out exactly. Three 44.1 kHz parts of an album cut at odd places come out at a fixed 48 kHz through one output, every frame there, within 3/10,000 of the exact tone across the joins. An album that goes from 44.1 to 48 kHz between tracks stays on one output with no gap and no click at the join. Two albums at different rates each get their own rate. A one-second crossfade between two steady levels is checked at the start, quarter points and end of the fade against the cos and sin curve, and two tracks that follow on on an album are checked untouched with crossfade on. Unit tests check every resampler quality for pitch, length, level, lining up to a fraction of a sample, and that Balanced and Best keep a 30 kHz tone out of a 44.1 kHz output where Fast lets it fold down. The dither test checks it averages to the true value with TPDF's noise level and keeps a tone a third of a step tall that rounding wipes out. One more lists a real PipeWire's outputs.
 
 To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
@@ -566,6 +603,10 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - A change to crossfade applies from the next song on, since the end of the song playing is already decided. Rate, resampler, format and dither changes reopen the output at once, from where it was.
 - The 24-bit ALSA format is S24_LE, 24 bits in a 32-bit word. Devices that only take packed 3-byte 24-bit get 32-bit or 16-bit from Auto instead.
 - The device list and switching were tested against a real PipeWire 1.0 with stand-in outputs (null sinks), and the ALSA list hasn't met a sound card at all (this box has none). Real USB DACs, HDMI and Bluetooth outputs haven't been tried from here.
+- The amp stack costs CPU: on this box (a 2.8 GHz Xeon core) Warm Glow at 4x takes about 4% of one core at 44.1 kHz, and all nine devices at once about 14%. At 8x, double that. A 192 kHz song gets 4x at most, since the devices stop at 768 kHz.
+- The limiter's look ahead sees the amp stack only by its trims, since the stack's state can't be borrowed for a preview. A peak the stack makes itself (an exciter at full, say) is still held under the ceiling, with a shorter ramp.
+- The stack delays the sound by 48 frames (1 ms at 48 kHz) while it's on. Switching it on or off crossfades against the undelayed sound, which is a 20 ms smear, never a click.
+- Moving a device along the chain while music plays switches the order at once, which can tick on a loud passage.
 - Crossfade needs the two songs at the same channel layout. A stereo song into a 5.1 one plays out the stereo song in full, then starts the next.
 - Built from source the normal way, both binaries link your system's FFmpeg, PipeWire and ALSA. The AppImage links its own FFmpeg in.
 - Graphic bands are peak filters, and neighbours overlap, so two adjacent bands at +6 dB make a bump a little over 6 dB between them. The curve shows what you get. Imports fitted to the 31-band EQ come within about a dB of the AutoEq curve in the tests, and a curve past ±12 dB stops at 12.

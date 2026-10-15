@@ -30,6 +30,8 @@ pub enum Section {
     Settings,
     /// The EQ view.
     Eq,
+    /// The amp stack.
+    Amp,
     /// Your top five songs, albums and artists.
     MostListened,
     TopAlbums,
@@ -82,6 +84,7 @@ impl Section {
             Section::Downloads => "Downloads",
             Section::Settings => "Settings",
             Section::Eq => "EQ",
+            Section::Amp => "Amp",
             Section::MostListened => "Most listened",
             Section::TopAlbums => "Top albums",
             Section::TopArtists => "Top artists",
@@ -360,6 +363,7 @@ pub struct Ctx<'a> {
     /// The cache, for Downloads.
     pub cache: Option<&'a crate::cache::Status>,
     pub eq: &'a super::eq::EqState,
+    pub amp: &'a super::amp::AmpState,
 }
 
 /// Queue entry for one of your stations.
@@ -504,6 +508,28 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 items.push(Item::Setting(setting));
             }
             Ok(("EQ".into(), items))
+        }
+        Source::Section(Section::Amp) => {
+            let greyed =
+                ctx.settings.config.output.bit_perfect == crate::audio::output::BitPerfect::On;
+            let mut items = Vec::new();
+            if greyed {
+                items.push(Item::Info {
+                    label: "Bit-perfect is on".into(),
+                    value: "the amp stack is skipped while it is. Set bit-perfect to Off or Auto in Settings to use it.".into(),
+                });
+            }
+            let mut last = None;
+            for (group, setting) in super::amp::amp_rows(ctx.amp, greyed) {
+                if group != last
+                    && let Some(g) = group
+                {
+                    items.push(Item::Header(g));
+                }
+                last = group;
+                items.push(Item::Setting(setting));
+            }
+            Ok(("Amp".into(), items))
         }
         Source::Section(Section::Downloads) => {
             let eps = lib
@@ -799,6 +825,7 @@ fn build_library(
             | Section::Podcasts
             | Section::Settings
             | Section::Eq
+            | Section::Amp
             | Section::Downloads
             | Section::Queue,
         )

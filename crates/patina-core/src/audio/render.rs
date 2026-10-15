@@ -2,10 +2,10 @@
 //! [`Renderer::render`] from their audio thread. Nothing in here locks,
 //! allocates (after construction) or waits.
 //!
-//! Stages live here in the order from the design doc: EQ, then fade and
-//! volume, then the true-peak limiter. Leveling runs earlier, in the
-//! decoder thread; the transition mixer, amp stack, channel tools and
-//! resampler slot in at their marked places as their milestones land.
+//! Stages live here in the order from the design doc: the amp stack, the
+//! EQ, then fade and volume, then the true-peak limiter. Leveling,
+//! resampling and crossfade run earlier, in the decoder thread; channel
+//! tools slot in at their marked place when they land.
 //!
 //! The limiter looks ahead by peeking further into the ring than the block
 //! it takes, so it adds no delay and the stream's timing is untouched.
@@ -16,6 +16,7 @@ use rtrb::Consumer;
 
 use super::{SharedRef, StreamFormat};
 use crate::dsp::EqRt;
+use crate::dsp::amp::AmpRt;
 use crate::dsp::limiter::{Limiter, MAX_LOOKAHEAD, TAPS_HALF};
 
 pub struct Renderer {
@@ -34,6 +35,8 @@ pub struct Renderer {
     last_flush: bool,
     eq: EqRt,
     eq_gen: u64,
+    amp: AmpRt,
+    amp_gen: u64,
     limiter: Limiter,
     /// Audio past the block, peeked from the ring for the limiter.
     ahead: Vec<f64>,
@@ -55,6 +58,10 @@ impl Renderer {
         let eq_gen = shared.eq_gen.load(Ordering::Acquire);
         eq.set(&shared.eq.lock().unwrap());
         eq.reset();
+        let mut amp = AmpRt::new(ch, format.rate);
+        let amp_gen = shared.amp_gen.load(Ordering::Acquire);
+        amp.set(&shared.amp.lock().unwrap());
+        amp.reset();
         Self {
             ring,
             format,
@@ -66,6 +73,8 @@ impl Renderer {
             last_flush: false,
             eq,
             eq_gen,
+            amp,
+            amp_gen,
             limiter: Limiter::new(ch, format.rate, MAX_BLOCK_FRAMES),
             ahead: vec![0.0; (MAX_LOOKAHEAD + 2 * TAPS_HALF) * ch],
             shared,
@@ -130,6 +139,13 @@ impl Renderer {
                 self.eq.set(&p);
                 self.eq_gen = g;
             }
+            let g = shared.amp_gen.load(Ordering::Acquire);
+            if g != self.amp_gen
+                && let Ok(p) = shared.amp.try_lock()
+            {
+                self.amp.set(&p);
+                self.amp_gen = g;
+            }
         }
         self.last_from_ring = 0;
         self.last_flush = false;
@@ -161,6 +177,7 @@ impl Renderer {
             shared.flush_ack.store(req, Ordering::Release);
             self.fade = 0.0;
             self.eq.reset();
+            self.amp.reset();
             self.limiter.reset();
             shared.silent.store(true, Ordering::Relaxed);
             self.last_flush = true;
@@ -229,10 +246,11 @@ impl Renderer {
 
         // 2. Leveling gain: applied by the decoder thread before the ring,
         //    so it switches at the exact sample one track becomes the next.
-        // 3. Transition mixer, crossfade          (later)
-        // 4. Amp stack                            (milestone 13)
+        // 3. Transition mixer: crossfade, in the decoder thread too.
+        // 4. Amp stack
         // 5. EQ
         if !exact {
+            self.amp.process(&mut self.buf[..n]);
             self.eq.process(&mut self.buf[..n]);
         }
         // 6. Channel tools                        (later)
@@ -268,6 +286,16 @@ impl Renderer {
         //    and gain, so it can be down by the time a peak arrives.
         if !exact && shared.limiter_on.load(Ordering::Relaxed) {
             let ahead = &mut self.ahead[..ahead_len];
+            // The amp stack bends the waveform and keeps state the look
+            // ahead can't borrow, so it's seen here by its level change
+            // only. A peak the stack itself makes is still caught, with
+            // a shorter ramp.
+            let ag = self.amp.static_gain();
+            if ag != 1.0 {
+                for s in ahead.iter_mut() {
+                    *s *= ag;
+                }
+            }
             self.eq.preview(ahead);
             let fg = (self.fade * std::f64::consts::FRAC_PI_2).sin();
             let g = fg * fg * vol_target;

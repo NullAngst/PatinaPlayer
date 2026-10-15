@@ -1,6 +1,7 @@
 //! PatinaPlayer core. Owns all state (queue, playback, output) so the TUI
 //! and GUI are thin frontends that send commands and draw snapshots.
 
+pub mod amp;
 pub mod art;
 pub mod audio;
 pub mod browse;

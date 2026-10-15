@@ -22,7 +22,8 @@ use slint::platform::Key;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::art::{ArtCache, LARGE, Req, THUMB};
-use crate::{AppWindow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem};
+use crate::{AmpKnob, AmpUnit, AppWindow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem};
+use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
 
 enum Dlg {
@@ -33,6 +34,8 @@ enum Dlg {
     SetValue(SettingKey),
     /// Naming an EQ preset.
     EqSave,
+    /// Naming an amp stack preset.
+    AmpSave,
     /// Typing the path of an EQ file, when there's no file picker.
     EqImportPath,
     AddFolder,
@@ -76,6 +79,11 @@ pub struct State {
     /// The EQ panel's band handles. Kept and updated in place, so a handle
     /// being dragged isn't torn down under the pointer.
     eq_bands: Rc<VecModel<EqBand>>,
+    /// The rack: a row per unit, and each unit's knobs in a model of its
+    /// own, updated in place so a knob being dragged keeps its grip.
+    amp_units: Rc<VecModel<AmpUnit>>,
+    amp_knobs: Vec<Rc<VecModel<AmpKnob>>>,
+    amp_kinds: Vec<AmpKind>,
     side: Rc<VecModel<SideItem>>,
     queue: Rc<VecModel<QueueRow>>,
     crumbs: Rc<VecModel<SharedString>>,
@@ -132,6 +140,7 @@ Enter        in Settings: flip, pick or edit the option
 q            queue panel
 l            love the song playing
 Ctrl+E       the EQ (o in it: on or bypassed)
+Ctrl+A       the amp stack: drag a dial up or down to turn it
 Ctrl+O       pick the output device (or click the output on the bottom bar)
 F5           check folders and feeds for changes
 Ctrl+Q       quit
@@ -164,6 +173,7 @@ fn jp_section(s: Section) -> &'static str {
         Section::Downloads => "ダウンロード",
         Section::Settings => "せってい",
         Section::Eq => "イコライザー",
+        Section::Amp => "アンプ",
         Section::MostListened => "いちばん",
         Section::TopAlbums => "ベスト",
         Section::TopArtists => "スター",
@@ -216,6 +226,9 @@ impl State {
             snap: Snapshot::default(),
             rows: Rc::new(VecModel::default()),
             eq_bands: Rc::new(VecModel::default()),
+            amp_units: Rc::new(VecModel::default()),
+            amp_knobs: Vec::new(),
+            amp_kinds: Vec::new(),
             side: Rc::new(VecModel::default()),
             queue: Rc::new(VecModel::default()),
             crumbs: Rc::new(VecModel::default()),
@@ -436,7 +449,7 @@ impl State {
                     Control::Action(_) if st.key == SettingKey::AddServer => (9, false),
                     Control::Action(_) if st.key == SettingKey::FindDlna => (10, false),
                     Control::Action(_) if st.key == SettingKey::MeasureLibrary => (11, false),
-                    Control::Action(_) if st.key.is_eq() => (11, false),
+                    Control::Action(_) if st.key.is_eq() || st.key.is_amp() => (11, false),
                     Control::Action(_) if st.key == SettingKey::LastFmLink => (11, false),
                     Control::Action(_) => (6, false),
                     Control::Info(_) => (7, false),
@@ -645,7 +658,7 @@ impl State {
                 vec![("refresh", "Refresh".into())],
             ),
             (Section::Downloads, _) => (0, vec![], vec![]),
-            (Section::Settings | Section::Eq, _) => (0, vec![], vec![]),
+            (Section::Settings | Section::Eq | Section::Amp, _) => (0, vec![], vec![]),
             // Mixed artists, albums and songs: the group headings label them.
             (_, Some(Source::Search(_))) => (0, vec![], vec![]),
             (_, Some(Source::Folder(_))) => (0, tracks_cols, vec![]),
@@ -703,6 +716,7 @@ impl State {
         ui.set_empty_text(ss(empty));
         ui.set_album_tracks(self.b.in_playlist().is_none());
         self.sync_eq_panel(ui);
+        self.sync_amp_panel(ui);
         ui.set_queue_mix_unsaved(
             self.b
                 .mix
@@ -864,6 +878,7 @@ impl State {
                         Section::Downloads => icons.get_downloads(),
                         Section::Settings => icons.get_settings(),
                         Section::Eq => icons.get_eq(),
+                        Section::Amp => icons.get_amp(),
                         Section::MostListened => icons.get_most_listened(),
                         Section::TopAlbums => icons.get_top_albums(),
                         Section::TopArtists => icons.get_top_artists(),
@@ -1458,6 +1473,8 @@ impl State {
             "eq-flat" => self.b.eq_flat(),
             "eq-import" => self.pick_eq_file(),
             "eq-save" => self.open_eq_save(ui),
+            "amp-toggle" => self.b.amp_toggle(),
+            "amp-save" => self.open_amp_save(ui),
             "pin" => self.b.toggle_pin_view(),
             "save-mix" => self.b.save_mix(),
             "genre-mix" => self.b.play_genre_mix(),
@@ -1625,7 +1642,7 @@ impl State {
             Control::Action(_) if st.key == SettingKey::AddServer => "add-server",
             Control::Action(_) if st.key == SettingKey::FindDlna => "find-dlna",
             Control::Action(_) if st.key == SettingKey::MeasureLibrary => "measure",
-            Control::Action(_) if st.key.is_eq() => "measure",
+            Control::Action(_) if st.key.is_eq() || st.key.is_amp() => "measure",
             Control::Action(_) if st.key == SettingKey::LastFmLink => "measure",
             Control::Action(_) => "browse",
             Control::Server(_) => "sync",
@@ -1652,6 +1669,14 @@ impl State {
             SettingKey::EqSavePreset => return self.open_eq_save(ui),
             SettingKey::EqImport => return self.pick_eq_file(),
             SettingKey::EqDevice | SettingKey::EqAddBand | SettingKey::EqDeletePreset => {
+                return self.b.change_setting(&key, Change::Toggle);
+            }
+            SettingKey::AmpSavePreset => return self.open_amp_save(ui),
+            SettingKey::AmpDevice
+            | SettingKey::AmpDeletePreset
+            | SettingKey::AmpMoveUp(_)
+            | SettingKey::AmpMoveDown(_)
+            | SettingKey::AmpRemove(_) => {
                 return self.b.change_setting(&key, Change::Toggle);
             }
             _ => {}
@@ -1880,6 +1905,126 @@ impl State {
             }
         }
         ui.set_eq_info(ss(info));
+    }
+
+    /// The rack above the Amp view's rows, and the AMP badge.
+    fn sync_amp_panel(&mut self, ui: &AppWindow) {
+        let a = self.b.amp_settings().clone();
+        ui.set_amp_lit(a.changes_sound());
+        let show = matches!(
+            self.b.level().map(|l| &l.source),
+            Some(Source::Section(Section::Amp))
+        );
+        ui.set_amp_panel(show);
+        if !show {
+            return;
+        }
+        ui.set_amp_on(a.on);
+        let knobs_of = |u: &patina_core::dsp::amp::Unit| -> Vec<AmpKnob> {
+            u.kind
+                .params()
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let pos = patina_core::browse::amp::knob_pos(s, u.p[i]);
+                    AmpKnob {
+                        label: ss(s.label),
+                        text: ss(patina_core::browse::amp::knob_text(s, u.p[i])),
+                        pos: pos as f32,
+                        arc: ss(dial_arc(pos)),
+                        choice: !s.choices.is_empty(),
+                    }
+                })
+                .collect()
+        };
+        let kinds: Vec<AmpKind> = a.units.iter().map(|u| u.kind).collect();
+        if kinds != self.amp_kinds {
+            self.amp_knobs = a
+                .units
+                .iter()
+                .map(|u| Rc::new(VecModel::from(knobs_of(u))))
+                .collect();
+            let rows: Vec<AmpUnit> = a
+                .units
+                .iter()
+                .zip(&self.amp_knobs)
+                .map(|(u, k)| AmpUnit {
+                    name: ss(u.kind.label()),
+                    on: u.on,
+                    knobs: ModelRc::from(k.clone()),
+                })
+                .collect();
+            self.amp_units.set_vec(rows);
+            self.amp_kinds = kinds;
+        } else {
+            for (i, u) in a.units.iter().enumerate() {
+                if let Some(mut row) = self.amp_units.row_data(i)
+                    && row.on != u.on
+                {
+                    row.on = u.on;
+                    self.amp_units.set_row_data(i, row);
+                }
+                let m = &self.amp_knobs[i];
+                for (j, k) in knobs_of(u).into_iter().enumerate() {
+                    if m.row_data(j).as_ref() != Some(&k) {
+                        m.set_row_data(j, k);
+                    }
+                }
+            }
+        }
+        let st = self.b.amp_state();
+        let mut info = format!("{} · {}x oversampling", st.preset_label(), a.oversample);
+        if let Some(d) = &st.device {
+            info.push_str(&format!(" · {}", d.name));
+            if st.linked.is_some() {
+                info.push_str(" (its own stack)");
+            }
+        }
+        ui.set_amp_info(ss(info));
+    }
+
+    /// A dial turned on the rack: its place 0 to 1, to the knob's value.
+    fn amp_knob(&mut self, i: usize, j: usize, pos: f64) {
+        let Some(u) = self.b.amp_settings().units.get(i).copied() else {
+            return;
+        };
+        let Some(s) = u.kind.params().get(j) else {
+            return;
+        };
+        let v = s.min + pos * (s.max - s.min);
+        if (v - u.p[j]).abs() >= s.step / 2.0 {
+            self.b.amp_set_param(u.kind, j, v);
+        }
+    }
+
+    /// A choice on the rack clicked: the next one.
+    fn amp_step(&mut self, i: usize, j: usize) {
+        let Some(u) = self.b.amp_settings().units.get(i).copied() else {
+            return;
+        };
+        let Some(s) = u.kind.params().get(j) else {
+            return;
+        };
+        let n = s.choices.len().max(1) as f64;
+        self.b.amp_set_param(u.kind, j, (u.p[j] + 1.0) % n);
+    }
+
+    fn open_amp_save(&mut self, ui: &AppWindow) {
+        let cur = self.b.amp_settings().preset.clone();
+        let name = if patina_core::amp::is_builtin(&cur) {
+            String::new()
+        } else {
+            cur
+        };
+        self.dlg = Dlg::AmpSave;
+        open_text(
+            ui,
+            "Save the amp stack as a preset",
+            "Name",
+            &name,
+            None,
+            "Save",
+        );
     }
 
     fn open_eq_save(&mut self, ui: &AppWindow) {
@@ -2125,6 +2270,7 @@ impl State {
             }
             Dlg::SetValue(key) => self.change_setting(ui, key, Change::Set(t1)),
             Dlg::EqSave => self.b.eq_save_preset(&t1),
+            Dlg::AmpSave => self.b.amp_save_preset(&t1),
             Dlg::EqImportPath => self
                 .b
                 .eq_import(&patina_core::config::expand_tilde(t1.trim())),
@@ -2227,6 +2373,7 @@ impl State {
                     let _ = slint::quit_event_loop();
                 }
                 "e" | "E" => self.b.switch(Section::Eq),
+                "a" | "A" => self.b.switch(Section::Amp),
                 "o" | "O" => self.pick_device(ui),
                 "f" | "F" => {
                     let q = self.b.start_search();
@@ -2451,6 +2598,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
         ui.set_side(ModelRc::from(s.side.clone()));
         ui.set_rows(ModelRc::from(s.rows.clone()));
         ui.set_eq_bands(ModelRc::from(s.eq_bands.clone()));
+        ui.set_amp_units(ModelRc::from(s.amp_units.clone()));
         ui.set_queue(ModelRc::from(s.queue.clone()));
         ui.set_crumbs(ModelRc::from(s.crumbs.clone()));
         ui.set_columns(ModelRc::from(s.columns.clone()));
@@ -2514,6 +2662,16 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
     on!(on_eq_point, |s, _u, i, x, g| s
         .eq_point(i as usize, x as f64, g as f64));
     on!(on_eq_chip, |s, _u| s.b.switch(Section::Eq));
+    on!(on_amp_chip, |s, _u| s.b.switch(Section::Amp));
+    on!(on_amp_knob, |s, _u, i, j, p| s
+        .amp_knob(i as usize, j as usize, p as f64));
+    on!(on_amp_step, |s, _u, i, j| s
+        .amp_step(i as usize, j as usize));
+    on!(on_amp_unit_toggle, |s, _u, i| {
+        if let Some(u) = s.b.amp_settings().units.get(i as usize).copied() {
+            s.b.amp_set_unit_on(u.kind, !u.on);
+        }
+    });
     on!(on_output_clicked, |s, u| s.pick_device(&u));
     on!(on_love_clicked, |s, _u| s.b.toggle_love());
     on!(on_level_clicked, |s, u| {
@@ -2666,4 +2824,22 @@ fn count_label(items: &[Item]) -> String {
         .map(|(n, c)| format!("{c} {n}{}", if *c == 1 { "" } else { "s" }))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The lit part of a rack dial: an arc from the bottom left, clockwise
+/// through the top, `pos` of the way to the bottom right, in a 100 x 100
+/// box. Matches the track drawn under it.
+fn dial_arc(pos: f64) -> String {
+    let pos = pos.clamp(0.0, 1.0);
+    let at = |deg: f64| {
+        let r = deg.to_radians();
+        (50.0 + 38.0 * r.cos(), 50.0 + 38.0 * r.sin())
+    };
+    let (x0, y0) = at(135.0);
+    if pos < 0.004 {
+        return format!("M {x0:.2} {y0:.2} L {x0:.2} {y0:.2}");
+    }
+    let (x, y) = at(135.0 + 270.0 * pos);
+    let large = if 270.0 * pos > 180.0 { 1 } else { 0 };
+    format!("M {x0:.2} {y0:.2} A 38 38 0 {large} 1 {x:.2} {y:.2}")
 }

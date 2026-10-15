@@ -131,6 +131,7 @@ impl Session {
                 podcast_trim: cfg.podcasts.trim_silence,
                 leveling: cfg.leveling.clone(),
                 eq: cfg.eq.settings.params(),
+                amp: cfg.amp.settings.params(),
                 limiter_on: cfg.limiter.on,
                 limiter_ceiling_db: cfg.limiter.ceiling_db,
             },
@@ -264,6 +265,7 @@ pub fn shutdown(browser: &mut Browser, fade_ms: u32) {
     browser.before_quit();
     // An EQ change from the last half second isn't written yet.
     browser.eq_save_now();
+    browser.amp_save_now();
     let player = &browser.player;
     player.send(Command::Quit);
     std::thread::sleep(Duration::from_millis(u64::from(fade_ms.min(300)) + 50));

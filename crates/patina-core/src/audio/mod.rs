@@ -119,6 +119,9 @@ pub struct Shared {
     pub resample_quality: AtomicU8,
     /// Crossfade between songs, in milliseconds. 0 is off.
     pub crossfade_ms: AtomicU32,
+    /// The amp stack, and its change counter, the same way as the EQ.
+    pub amp: std::sync::Mutex<crate::dsp::amp::AmpParams>,
+    pub amp_gen: AtomicU64,
 }
 
 impl Default for Shared {
@@ -148,6 +151,8 @@ impl Default for Shared {
             device_rate: AtomicU32::new(0),
             resample_quality: AtomicU8::new(crate::dsp::resample::Quality::Balanced.to_u8()),
             crossfade_ms: AtomicU32::new(0),
+            amp: std::sync::Mutex::new(crate::dsp::amp::AmpParams::default()),
+            amp_gen: AtomicU64::new(0),
         }
     }
 }
@@ -162,6 +167,13 @@ impl Shared {
             || self.out_rate.load(Ordering::Relaxed) != 0
             || self.crossfade_ms.load(Ordering::Relaxed) != 0
             || self.eq.lock().unwrap().changes_sound()
+            || self.amp.lock().unwrap().changes_sound()
+    }
+
+    /// A new amp stack for the renderer to pick up.
+    pub fn set_amp(&self, p: crate::dsp::amp::AmpParams) {
+        *self.amp.lock().unwrap() = p;
+        self.amp_gen.fetch_add(1, Ordering::Release);
     }
 
     /// New EQ settings for the renderer to pick up.

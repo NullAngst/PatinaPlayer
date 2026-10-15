@@ -175,6 +175,25 @@ export struct EqBand {
     has-gain: bool,
 }
 
+// One knob on a rack unit.
+export struct AmpKnob {
+    label: string,
+    text: string,
+    // 0 to 1 around the dial.
+    pos: float,
+    // The lit part of the dial, as path commands in a 100 x 100 box.
+    arc: string,
+    // A choice (tape speed, compressor style): click steps it.
+    choice: bool,
+}
+
+// One unit in the rack.
+export struct AmpUnit {
+    name: string,
+    on: bool,
+    knobs: [AmpKnob],
+}
+
 export struct Hero {
     show: bool,
     kicker: string,
@@ -225,6 +244,8 @@ export global Icons {
     out property <string> queue: "M3 7h18M3 12h18M3 17h12";
     out property <string> downloads: "M12 3v12M7 10l5 5 5-5M4 20h16";
     out property <string> eq: "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6";
+    // A valve: the glass envelope, the pins, and the glow inside.
+    out property <string> amp: "M8 20V8a4 4 0 0 1 8 0v12zM6 20h12M9 23v-3M12 23v-3M15 23v-3M10 15l2-4 2 4";
     out property <string> settings: "M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1";
     out property <string> back: "M15 6l-6 6 6 6";
     out property <string> forward: "M9 6l6 6-6 6";
@@ -984,6 +1005,190 @@ component AlbumTile inherits Rectangle {
 // ----- Main window -----
 
 
+// A dial for the rack. Drag up or down to turn it; a choice steps on a
+// click instead.
+component Knob inherits Rectangle {
+    in property <AmpKnob> k;
+    in property <bool> lit;
+    callback turned(float);
+    callback stepped();
+    width: 58px;
+    height: 76px;
+    property <float> grab-pos;
+    property <length> grab-y;
+    VerticalLayout {
+        spacing: 2px;
+        alignment: start;
+        Rectangle {
+            height: 42px;
+            if !root.k.choice: Rectangle {
+                width: 42px;
+                height: 42px;
+                border-radius: 21px;
+                background: P.raised;
+                border-width: 1px;
+                border-color: ta.has-hover || ta.pressed ? P.copper : P.border;
+                // The track, then the lit part over it.
+                Path {
+                    width: parent.width;
+                    height: parent.height;
+                    viewbox-width: 100;
+                    viewbox-height: 100;
+                    commands: "M 23.1 76.9 A 38 38 0 1 1 76.9 76.9";
+                    stroke: P.wave;
+                    stroke-width: 3px;
+                }
+                Path {
+                    width: parent.width;
+                    height: parent.height;
+                    viewbox-width: 100;
+                    viewbox-height: 100;
+                    commands: root.k.arc;
+                    stroke: root.lit ? P.copper : P.muted;
+                    stroke-width: 3px;
+                }
+            }
+            if root.k.choice: Rectangle {
+                y: 9px;
+                height: 24px;
+                width: 54px;
+                border-radius: 5px * P.round;
+                border-width: 1px;
+                border-color: ta.has-hover ? P.copper : P.border;
+                background: P.raised;
+                Text {
+                    text: root.k.text;
+                    font-size: 10.5px;
+                    color: root.lit ? P.copper : P.muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            ta := TouchArea {
+                mouse-cursor: root.k.choice ? pointer : ns-resize;
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                        root.grab-pos = root.k.pos;
+                        root.grab-y = self.mouse-y;
+                    }
+                }
+                moved => {
+                    if self.pressed && !root.k.choice {
+                        root.turned(max(0, min(1, root.grab-pos + (root.grab-y - self.mouse-y) / 140px)));
+                    }
+                }
+                clicked => {
+                    if root.k.choice { root.stepped(); }
+                }
+            }
+        }
+        Text {
+            text: root.k.label;
+            font-size: 10.5px;
+            color: P.text;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        if !root.k.choice: Text {
+            text: root.k.text;
+            font-family: P.mono;
+            font-size: 9.5px;
+            color: P.muted;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// The amp stack as a rack: one unit per device, in signal order, each
+// with its on light and dials. The rows under it hold everything else.
+component AmpPanel inherits Rectangle {
+    in property <[AmpUnit]> units;
+    in property <bool> on;
+    in property <string> info;
+    callback knob(int, int, float);
+    callback step(int, int);
+    callback unit-toggle(int);
+    callback act(string);
+    border-radius: 8px * P.round;
+    background: P.surface;
+    border-width: 1px;
+    border-color: P.border;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.info;
+                font-size: 12.5px;
+                color: P.muted;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Chip { h: 28px; text: root.on ? "On" : "Bypassed"; active: root.on; clicked => { root.act("amp-toggle"); } }
+            Chip { h: 28px; text: "Save as…"; clicked => { root.act("amp-save"); } }
+        }
+        Flickable {
+            height: 132px;
+            content-width: max(self.width, rack.preferred-width);
+            rack := HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                if root.units.length == 0: Text {
+                    text: "The rack is empty. Pick a preset or add a device below.";
+                    color: P.muted;
+                    vertical-alignment: center;
+                }
+                for u[i] in root.units: Rectangle {
+                    width: max(140px, u.knobs.length * 60px + 16px);
+                    border-radius: 6px * P.round;
+                    border-width: 1px;
+                    border-color: u.on && root.on ? P.copper-dim : P.border;
+                    background: P.raised.darker(0.15);
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            // The on light.
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                y: 3px;
+                                border-radius: 5px;
+                                background: u.on && root.on ? P.copper : P.wave;
+                                drop-shadow-blur: u.on && root.on ? 6px : 0px;
+                                drop-shadow-color: P.copper;
+                                TouchArea { mouse-cursor: pointer; clicked => { root.unit-toggle(i); } }
+                            }
+                            Text {
+                                text: u.name;
+                                font-family: P.serif;
+                                font-weight: 700;
+                                font-size: 12.5px;
+                                color: u.on && root.on ? P.text : P.muted;
+                                overflow: elide;
+                                TouchArea { mouse-cursor: pointer; clicked => { root.unit-toggle(i); } }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 2px;
+                            for k[j] in u.knobs: Knob {
+                                k: k;
+                                lit: u.on && root.on;
+                                turned(p) => { root.knob(i, j, p); }
+                                stepped => { root.step(i, j); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // The EQ's response curve, with a handle per band. Graphic bands drag up
 // and down; parametric ones drag anywhere (frequency and gain).
 component EqPanel inherits Rectangle {
@@ -1198,6 +1403,16 @@ export component AppWindow inherits Window {
     in property <string> eq-info;
     callback eq-point(int, float, float);
     in property <bool> eq-lit;
+    // The Amp view's rack, and the bottom bar's AMP badge.
+    in property <bool> amp-panel;
+    in property <[AmpUnit]> amp-units;
+    in property <bool> amp-on;
+    in property <string> amp-info;
+    in property <bool> amp-lit;
+    callback amp-knob(int, int, float);
+    callback amp-step(int, int);
+    callback amp-unit-toggle(int);
+    callback amp-chip;
     in property <string> limit-label;
     callback eq-chip;
     in property <string> level-label;
@@ -1742,6 +1957,16 @@ export component AppWindow inherits Window {
                                 act(a) => { root.view-action(a); keys.focus(); }
                             }
                             if root.eq-panel: Rectangle { height: 12px; }
+                            if root.amp-panel: AmpPanel {
+                                units: root.amp-units;
+                                on: root.amp-on;
+                                info: root.amp-info;
+                                knob(i, j, p) => { root.amp-knob(i, j, p); }
+                                step(i, j) => { root.amp-step(i, j); }
+                                unit-toggle(i) => { root.amp-unit-toggle(i); }
+                                act(a) => { root.view-action(a); keys.focus(); }
+                            }
+                            if root.amp-panel: Rectangle { height: 12px; }
 
                             // Column header.
                             if root.columns.length > 0: Rectangle {
@@ -2217,6 +2442,19 @@ export component AppWindow inherits Window {
                             TouchArea {
                                 mouse-cursor: pointer;
                                 clicked => { root.eq-chip(); }
+                            }
+                        }
+                        // The amp stack: lit copper when it's working.
+                        Rectangle {
+                            width: ampb.width;
+                            ampb := Badge {
+                                y: (parent.height - self.height) / 2;
+                                text: "AMP";
+                                fg: root.amp-lit ? P.copper : P.wave;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.amp-chip(); }
                             }
                         }
                         // Click it for where the gain came from.

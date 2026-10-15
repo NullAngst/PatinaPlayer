@@ -3,6 +3,7 @@
 //! and draw what it holds; neither one decides what a key does to the
 //! library, the queue or the config. That's how the two stay identical.
 
+pub mod amp;
 mod downloads;
 pub mod eq;
 pub mod lastfm;
@@ -107,6 +108,7 @@ pub struct Browser {
     radio_song: Option<lastfm::RadioSong>,
     /// The EQ: what plays, presets, device links.
     pub eq: eq::EqState,
+    pub amp: amp::AmpState,
     /// The songs last handed to the measuring thread.
     sent_ahead: Vec<Vec<u8>>,
     /// The mix playing, if one is.
@@ -221,6 +223,16 @@ impl Browser {
                         .unwrap_or_else(crate::eq::presets::dir),
                 ),
             ),
+            amp: amp::AmpState::new(
+                s.config.amp.clone(),
+                crate::amp::Presets::new(
+                    s.settings_info
+                        .config_path
+                        .parent()
+                        .map(|d| d.join("presets").join("amp"))
+                        .unwrap_or_else(crate::amp::dir),
+                ),
+            ),
             sent_ahead: Vec::new(),
             mix: None,
             mix_runs: 0,
@@ -306,6 +318,7 @@ impl Browser {
         self.poll_cache();
         self.poll_level();
         self.eq_tick();
+        self.amp_tick();
         if events.iter().any(|e| matches!(e, Event::Played(_))) {
             for s in Section::STATS {
                 self.refresh_section(s);
@@ -443,6 +456,7 @@ impl Browser {
         }
         s.push(SideEntry::Gap);
         s.push(SideEntry::Section(Section::Eq));
+        s.push(SideEntry::Section(Section::Amp));
         s.push(SideEntry::Section(Section::Settings));
         self.sidebar = s;
         self.sync_sidebar_sel();
@@ -543,6 +557,7 @@ impl Browser {
             servers: &self.servers,
             cache: self.cache.as_ref().map(|_| &self.cache_status),
             eq: &self.eq,
+            amp: &self.amp,
         }
     }
 
@@ -844,6 +859,7 @@ impl Browser {
                     | Section::Downloads
                     | Section::Settings
                     | Section::Eq
+                    | Section::Amp
                     | Section::Genres
                     | Section::Playlists
             ) | Source::Podcast { .. }
@@ -1225,6 +1241,7 @@ impl Browser {
             Section::Queue
                 | Section::Settings
                 | Section::Eq
+                | Section::Amp
                 | Section::Downloads
                 | Section::Radio
                 | Section::Podcasts
@@ -1331,6 +1348,9 @@ impl Browser {
     pub fn change_setting(&mut self, key: &Key, change: Change) {
         if key.is_eq() {
             return self.change_eq(key, change);
+        }
+        if key.is_amp() {
+            return self.change_amp(key, change);
         }
         let Some(row) = self.settings_row(key) else {
             return;

@@ -74,6 +74,7 @@ pub enum InputPurpose {
     AddFolder,
     /// A name to save the EQ under.
     EqPresetName,
+    AmpPresetName,
     /// An AutoEq or APO file to import.
     EqImport,
     /// A typed value for a setting.
@@ -313,6 +314,11 @@ impl App {
         }
         if ctrl && k.code == KeyCode::Char('e') && matches!(self.modal, Modal::None) {
             self.b.switch(Section::Eq);
+            self.focus = Focus::Content;
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('a') && matches!(self.modal, Modal::None) {
+            self.b.switch(Section::Amp);
             self.focus = Focus::Content;
             return;
         }
@@ -602,7 +608,11 @@ impl App {
         if self.media_key(k) {
             return;
         }
-        if matches!(self.b.section, Section::Settings | Section::Eq) && self.settings_key(k) {
+        if matches!(
+            self.b.section,
+            Section::Settings | Section::Eq | Section::Amp
+        ) && self.settings_key(k)
+        {
             return;
         }
         let queue = self.b.section == Section::Queue;
@@ -754,6 +764,25 @@ impl App {
                     },
                 };
             }
+            (KeyCode::Enter, Some(st)) if st.key == SettingKey::AmpSavePreset => {
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::AmpPresetName,
+                    buf: String::new(),
+                };
+            }
+            (KeyCode::Enter, Some(st))
+                if matches!(
+                    st.key,
+                    SettingKey::AmpDevice
+                        | SettingKey::AmpDeletePreset
+                        | SettingKey::AmpMoveUp(_)
+                        | SettingKey::AmpMoveDown(_)
+                        | SettingKey::AmpRemove(_)
+                ) =>
+            {
+                self.b.change_setting(&st.key, Change::Toggle);
+            }
+            (KeyCode::Char('o'), _) if self.b.section == Section::Amp => self.b.amp_toggle(),
             (KeyCode::Enter, Some(st)) if st.key == SettingKey::EqImport => {
                 self.modal = Modal::Input {
                     purpose: InputPurpose::EqImport,
@@ -1009,6 +1038,7 @@ impl App {
             }
             InputPurpose::SetValue { key, .. } => self.change_setting(key, Change::Set(text)),
             InputPurpose::EqPresetName => self.b.eq_save_preset(&text),
+            InputPurpose::AmpPresetName => self.b.amp_save_preset(&text),
             InputPurpose::EqImport => self
                 .b
                 .eq_import(&patina_core::config::expand_tilde(text.trim())),

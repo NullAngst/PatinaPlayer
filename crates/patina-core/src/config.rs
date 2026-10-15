@@ -97,6 +97,8 @@ pub struct Config {
     pub leveling: crate::level::LevelConfig,
     /// The EQ, and which output device gets which preset.
     pub eq: crate::eq::EqConfig,
+    /// The amp stack, and which output device gets which preset.
+    pub amp: crate::amp::AmpConfig,
     pub limiter: LimiterConfig,
 }
 
@@ -357,6 +359,7 @@ impl Default for Config {
             lastfm: LastFmConfig::default(),
             leveling: crate::level::LevelConfig::default(),
             eq: crate::eq::EqConfig::default(),
+            amp: crate::amp::AmpConfig::default(),
             limiter: LimiterConfig::default(),
         }
     }
@@ -379,6 +382,7 @@ struct RawConfig {
     lastfm: Option<RawLastFm>,
     leveling: Option<RawLeveling>,
     eq: Option<toml::Value>,
+    amp: Option<toml::Value>,
     limiter: Option<RawLimiter>,
 }
 
@@ -664,6 +668,12 @@ impl Config {
             }
             None => crate::eq::EqConfig::default(),
         };
+        let amp = match raw.amp {
+            Some(v) => v
+                .try_into()
+                .map_err(|e: toml::de::Error| parse_err(format!("amp: {}", e.message())))?,
+            None => crate::amp::AmpConfig::default(),
+        };
         let rlim = raw.limiter.unwrap_or_default();
         let limiter = LimiterConfig {
             on: rlim.on.unwrap_or(true),
@@ -780,6 +790,7 @@ impl Config {
             lastfm,
             leveling,
             eq,
+            amp,
             limiter,
         })
     }
@@ -1057,6 +1068,51 @@ pub fn set_eq(path: &Path, eq: &crate::eq::EqConfig) -> Result<bool, ConfigError
             );
         }
         doc.insert("eq", item);
+        Ok(doc.to_string() != before)
+    })
+}
+
+/// Write the amp stack: the `[amp]` table, rewritten whole, the same way
+/// as the EQ's.
+pub fn set_amp(path: &Path, amp: &crate::amp::AmpConfig) -> Result<bool, ConfigError> {
+    let text = toml::to_string(amp).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        msg: e.to_string(),
+    })?;
+    let fresh: toml_edit::DocumentMut =
+        text.parse()
+            .map_err(|e: toml_edit::TomlError| ConfigError::Parse {
+                path: path.to_path_buf(),
+                msg: e.to_string(),
+            })?;
+    edit(path, move |doc| {
+        let mut t = fresh.as_table().clone();
+        t.set_implicit(false);
+        let pos = doc
+            .get("amp")
+            .and_then(|i| i.as_table())
+            .and_then(|t| t.position())
+            .unwrap_or(1 << 20);
+        t.set_position(Some(pos));
+        for key in ["devices", "units"] {
+            match t.get_mut(key) {
+                Some(toml_edit::Item::Table(d)) => d.set_position(Some(pos)),
+                Some(toml_edit::Item::ArrayOfTables(a)) => {
+                    for d in a.iter_mut() {
+                        d.set_position(Some(pos));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let before = doc.to_string();
+        let mut item = toml_edit::Item::Table(t);
+        if let Some(tab) = item.as_table_mut() {
+            tab.decor_mut().set_prefix(
+                "\n# The amp stack, as the Amp view leaves it. The app rewrites this\n# table; presets live in presets/amp/ next to this file.\n",
+            );
+        }
+        doc.insert("amp", item);
         Ok(doc.to_string() != before)
     })
 }

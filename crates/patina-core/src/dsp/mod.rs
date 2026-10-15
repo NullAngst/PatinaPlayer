@@ -2,6 +2,7 @@
 //! Both run inside the renderer on the output thread, so nothing here
 //! allocates after construction, locks, or waits.
 
+pub mod amp;
 pub mod biquad;
 pub mod limiter;
 pub mod resample;

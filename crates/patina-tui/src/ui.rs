@@ -81,6 +81,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::ServerSecret(_) => "Password or API key",
                 InputPurpose::ServerPlaylist { .. } => "New playlist on the server",
                 InputPurpose::EqPresetName => "Save the EQ as a preset called",
+                InputPurpose::AmpPresetName => "Save the amp stack as a preset called",
                 InputPurpose::EqImport => "AutoEq or APO file (ParametricEQ.txt, GraphicEQ.txt)",
             };
             // Passwords show as dots.
@@ -368,6 +369,7 @@ fn hints(app: &App) -> &'static str {
         (Section::Eq, _) => {
             "Enter change · h/l ±0.5 dB · H/L move a band · o on/off · d remove a band · Ctrl+E here"
         }
+        (Section::Amp, _) => "Enter change · h/l turn a knob · o rack on/off · Ctrl+A here",
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
             "Enter open · v play all · V shuffle · e queue all · P playlist all"
         }
@@ -1022,6 +1024,36 @@ fn item_row<'a>(
                         if *on { accent } else { muted },
                     ),
                 ),
+                // The amp's knobs as sliders.
+                Control::Number {
+                    value, min, max, ..
+                } if matches!(
+                    st.key,
+                    patina_core::browse::Key::AmpParam(..)
+                        | patina_core::browse::Key::AmpTrimIn(_)
+                        | patina_core::browse::Key::AmpTrimOut(_)
+                ) =>
+                {
+                    let w = 14usize;
+                    let pos = if max > min {
+                        ((value - min) as f64 / (max - min) as f64).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let fill = (pos * w as f64).round() as usize;
+                    (
+                        Span::styled(format!("  {}", st.label), text),
+                        Span::styled(
+                            format!(
+                                "{}{} {}",
+                                "━".repeat(fill),
+                                "─".repeat(w - fill),
+                                st.control.display()
+                            ),
+                            accent,
+                        ),
+                    )
+                }
                 Control::Choice { .. } | Control::Number { .. } => (
                     Span::styled(st.label.clone(), text),
                     Span::styled(format!("‹ {} ›", st.control.display()), text),
@@ -1505,6 +1537,17 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         ));
         right.push(Span::raw(" "));
     }
+    // The amp stack, lit when it's on and a device in it is.
+    {
+        let lit = app.b.amp_settings().changes_sound();
+        right.push(Span::styled(
+            " AMP ",
+            Style::default()
+                .fg(if lit { t.copper } else { t.wave_raw })
+                .bg(t.raised),
+        ));
+        right.push(Span::raw(" "));
+    }
     // The leveling gain on what's playing: "-4.2 dB", "-6.0 dB?" while it's
     // a guess, "~-9.1 dB" under the live normalizer.
     if let Some(l) = s.level {
@@ -1797,6 +1840,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (
             "EQ (Ctrl+E)",
             "Enter change, h/l ±0.5 dB, H/L move a band, o on/off, d remove a band",
+        ),
+        (
+            "Amp (Ctrl+A)",
+            "Enter change, h/l turn a knob, o rack on/off; add, move and remove devices from their rows",
         ),
         ("Ctrl+O", "Pick the output device"),
         ("F5", "Check folders and podcast feeds for changes"),

@@ -97,11 +97,50 @@ pub enum Key {
     /// A parametric band, as text.
     EqBand(usize),
     EqAddBand,
+    // The Amp view's rows.
+    AmpOn,
+    AmpPreset,
+    AmpOversample,
+    /// Add a device to the rack.
+    AmpAdd,
+    AmpSavePreset,
+    AmpDeletePreset,
+    /// Give the output device its own stack, or take it away.
+    AmpDevice,
+    AmpUnitOn(crate::dsp::amp::Kind),
+    /// A device's knob, by its place in [`crate::dsp::amp::Kind::params`].
+    AmpParam(crate::dsp::amp::Kind, usize),
+    AmpTrimIn(crate::dsp::amp::Kind),
+    AmpTrimOut(crate::dsp::amp::Kind),
+    AmpMoveUp(crate::dsp::amp::Kind),
+    AmpMoveDown(crate::dsp::amp::Kind),
+    AmpRemove(crate::dsp::amp::Kind),
     /// Read-only facts: where files are.
     Info(&'static str),
 }
 
 impl Key {
+    /// A row of the Amp view.
+    pub fn is_amp(&self) -> bool {
+        matches!(
+            self,
+            Key::AmpOn
+                | Key::AmpPreset
+                | Key::AmpOversample
+                | Key::AmpAdd
+                | Key::AmpSavePreset
+                | Key::AmpDeletePreset
+                | Key::AmpDevice
+                | Key::AmpUnitOn(_)
+                | Key::AmpParam(..)
+                | Key::AmpTrimIn(_)
+                | Key::AmpTrimOut(_)
+                | Key::AmpMoveUp(_)
+                | Key::AmpMoveDown(_)
+                | Key::AmpRemove(_)
+        )
+    }
+
     /// A row of the EQ view rather than Settings.
     pub fn is_eq(&self) -> bool {
         matches!(
