@@ -93,6 +93,7 @@ fn browser(fx: &Fixture) -> Browser {
         pod: None,
         remote: None,
         cache: None,
+        mixes: None,
         config: Config {
             library: patina_core::config::LibraryConfig {
                 folders: vec![fx.root.clone()],

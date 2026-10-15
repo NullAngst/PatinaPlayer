@@ -601,6 +601,54 @@ impl Client for Subsonic {
         self.check(&r)
     }
 
+    fn similar_songs(&self, song_id: &str, count: usize) -> Result<Vec<String>> {
+        let s: super::Songs = self.call(
+            "getSimilarSongs",
+            &[("id", song_id.to_string()), ("count", count.to_string())],
+            "similarSongs",
+        )?;
+        Ok(s.song.into_iter().filter_map(|n| n.id).collect())
+    }
+
+    fn similar_artists(&self, artist: &str, count: usize) -> Result<Vec<String>> {
+        // Similarity is asked for by artist id; search finds it.
+        #[derive(Default, Deserialize)]
+        struct Hits {
+            #[serde(default, deserialize_with = "list")]
+            artist: Vec<super::Named>,
+        }
+        let hits: Hits = self.call(
+            "search3",
+            &[
+                ("query", artist.to_string()),
+                ("artistCount", "20".into()),
+                ("albumCount", "0".into()),
+                ("songCount", "0".into()),
+            ],
+            "searchResult3",
+        )?;
+        let Some(id) = hits
+            .artist
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(artist))
+            .and_then(|a| a.id)
+        else {
+            return Ok(Vec::new());
+        };
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Info {
+            #[serde(default, deserialize_with = "list")]
+            similar_artist: Vec<super::Named>,
+        }
+        let info: Info = self.call(
+            "getArtistInfo2",
+            &[("id", id), ("count", count.to_string())],
+            "artistInfo2",
+        )?;
+        Ok(info.similar_artist.into_iter().map(|a| a.name).collect())
+    }
+
     fn episode_url(&self, stream_id: &str) -> Result<String> {
         self.signed("stream", &[("id", stream_id.to_string())])
     }

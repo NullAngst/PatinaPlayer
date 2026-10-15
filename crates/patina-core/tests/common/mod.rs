@@ -226,6 +226,10 @@ pub struct State {
     pub stream_body: Option<Arc<Vec<u8>>>,
     /// The format each stream call asked for: "raw", "opus:128".
     pub streams: Vec<String>,
+    /// Who the server says is similar to an artist, by name.
+    pub similar_artists: HashMap<String, Vec<String>>,
+    /// Songs the server says are similar to a song, by id.
+    pub similar_songs: HashMap<String, Vec<String>>,
 }
 
 impl State {
@@ -346,6 +350,8 @@ pub fn library(gonic: bool) -> State {
         sessions: Vec::new(),
         stream_body: None,
         streams: Vec::new(),
+        similar_artists: HashMap::new(),
+        similar_songs: HashMap::new(),
     }
 }
 
@@ -402,7 +408,7 @@ fn child(flavor: Flavor, a: &MAlbum, s: &MSong) -> Value {
             "path": format!("{}/{}/{:02} - {}.flac", a.artist, a.name, s.track, s.title),
             "discNumber": 1, "albumId": a.id, "type": "music", "playCount": s.plays,
             "bitDepth": 16, "samplingRate": 44100, "channelCount": 2,
-            "genres": [{"name": a.genre}],
+            "genres": a.genre.split('|').map(|g| json!({"name": g})).collect::<Vec<_>>(),
             "replayGain": {"trackGain": -6.0, "albumGain": -7.0, "trackPeak": 0.9, "albumPeak": 1.0},
             "displayAlbumArtist": a.artist
         }),
@@ -410,7 +416,7 @@ fn child(flavor: Flavor, a: &MAlbum, s: &MSong) -> Value {
         Flavor::Gonic => json!({
             "id": s.id, "parent": a.id, "isDir": false, "title": s.title, "album": a.name,
             "albumId": a.id, "artist": s.artist, "coverArt": a.id, "duration": 1,
-            "genre": a.genre, "path": s.path, "size": s.size, "suffix": "flac",
+            "genre": a.genre.split('|').next().unwrap_or(""), "path": s.path, "size": s.size, "suffix": "flac",
             "track": s.track, "discNumber": 1, "type": "music", "year": a.year
         }),
     }
@@ -532,6 +538,52 @@ fn subsonic(
             None => fail(70, "Song not found"),
         },
         "getCoverArt" => Response::bytes("image/png", png()),
+        "search3" => {
+            let q = r.get("query").unwrap_or("").to_lowercase();
+            let mut seen = Vec::new();
+            let artists: Vec<Value> = s
+                .albums
+                .iter()
+                .filter(|a| a.artist.to_lowercase().contains(&q))
+                .filter(|a| {
+                    let new = !seen.contains(&a.artist);
+                    seen.push(a.artist.clone());
+                    new
+                })
+                .map(|a| json!({"id": format!("ar-{}", a.artist), "name": a.artist}))
+                .collect();
+            ok(
+                flavor,
+                json!({"searchResult3": {"artist": many(flavor, artists)}}),
+            )
+        }
+        "getArtistInfo2" => {
+            let name = r.get("id").unwrap_or("").trim_start_matches("ar-");
+            let sim: Vec<Value> = s
+                .similar_artists
+                .get(name)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| json!({"name": n}))
+                .collect();
+            ok(flavor, json!({"artistInfo2": {"similarArtist": sim}}))
+        }
+        "getSimilarSongs" => {
+            let ids = s
+                .similar_songs
+                .get(r.get("id").unwrap_or(""))
+                .cloned()
+                .unwrap_or_default();
+            let songs: Vec<Value> = ids
+                .iter()
+                .filter_map(|id| s.song(id).map(|(a, x)| child(flavor, a, x)))
+                .collect();
+            ok(
+                flavor,
+                json!({"similarSongs": {"song": many(flavor, songs)}}),
+            )
+        }
         "getPlaylists" => {
             let lists: Vec<Value> = s
                 .playlists

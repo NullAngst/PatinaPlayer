@@ -92,6 +92,22 @@ pub struct Config {
     pub servers: Vec<ServerConfig>,
     /// The track cache, prefetch and offline downloads.
     pub cache: CacheConfig,
+    pub mixes: MixConfig,
+    pub lastfm: LastFmConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MixConfig {
+    /// Genre mixes match each song's own genre tags instead of its
+    /// album's.
+    pub by_track: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LastFmConfig {
+    /// For finding similar artists and songs when a server can't. Free
+    /// from last.fm/api/account/create.
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -237,6 +253,8 @@ impl Default for Config {
             appearance: AppearanceConfig::default(),
             servers: Vec::new(),
             cache: CacheConfig::default(),
+            mixes: MixConfig::default(),
+            lastfm: LastFmConfig::default(),
         }
     }
 }
@@ -254,6 +272,20 @@ struct RawConfig {
     appearance: Option<RawAppearance>,
     server: Option<Vec<RawServer>>,
     cache: Option<RawCache>,
+    mixes: Option<RawMixes>,
+    lastfm: Option<RawLastFm>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawMixes {
+    genre_match: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLastFm {
+    api_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -423,6 +455,31 @@ impl Config {
             },
             bitrate: rc.bitrate.unwrap_or(dc.bitrate).clamp(32, 512),
         };
+        let mixes = MixConfig {
+            by_track: match raw
+                .mixes
+                .and_then(|m| m.genre_match)
+                .as_deref()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                None | Some("album") => false,
+                Some("track") => true,
+                Some(o) => {
+                    return Err(parse_err(format!(
+                        "mixes.genre_match: unknown \"{o}\" (album, track)"
+                    )));
+                }
+            },
+        };
+        let lastfm = LastFmConfig {
+            api_key: raw
+                .lastfm
+                .and_then(|l| l.api_key)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        };
         let theme = match look.theme {
             Some(t) => t.parse::<Theme>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -489,6 +546,8 @@ impl Config {
             appearance: AppearanceConfig { theme },
             servers,
             cache,
+            mixes,
+            lastfm,
         })
     }
 
@@ -591,6 +650,17 @@ pause_on_metered = true
 # bit-perfect.
 format = "raw"
 bitrate = 192
+
+[mixes]
+# Genre mixes take songs from albums tagged with every genre you pick
+# ("album"), or only songs tagged with them themselves ("track").
+genre_match = "album"
+
+[lastfm]
+# An API key from last.fm/api/account/create (free). Artist and track
+# mixes ask Last.fm who's similar when your server doesn't know, and it's
+# the only way besides your genre tags for local folders. Optional.
+api_key = ""
 
 # Music servers: Subsonic (Navidrome, Gonic and the like) or Ampache. Add
 # them in Settings, which checks the login and keeps the password in your

@@ -144,7 +144,7 @@ impl Browser {
             Item::Track(t) => t.remote_id.is_some(),
             Item::Album(a) => a.server().is_some(),
             Item::Dir { path, .. } | Item::Root { path, .. } => crate::remote::is_remote(path),
-            Item::Artist(_) | Item::Playlist(_) => true,
+            Item::Artist(_) | Item::Playlist(_) | Item::Mix(_) => true,
             _ => false,
         }
     }

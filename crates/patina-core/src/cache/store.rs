@@ -238,6 +238,8 @@ pub enum PinKind {
     Playlist,
     Folder,
     Song,
+    /// A saved mix, by its id.
+    Mix,
 }
 
 impl PinKind {
@@ -249,6 +251,7 @@ impl PinKind {
             PinKind::Playlist => "playlist",
             PinKind::Folder => "folder",
             PinKind::Song => "song",
+            PinKind::Mix => "mix",
         }
     }
 
@@ -259,6 +262,7 @@ impl PinKind {
             PinKind::Playlist => "Playlist",
             PinKind::Folder => "Folder",
             PinKind::Song => "Song",
+            PinKind::Mix => "Mix",
         }
     }
 
@@ -270,6 +274,7 @@ impl PinKind {
             "playlist" => PinKind::Playlist,
             "folder" => PinKind::Folder,
             "song" => PinKind::Song,
+            "mix" => PinKind::Mix,
             _ => return None,
         })
     }
@@ -388,6 +393,13 @@ pub fn resolve(lib: &Library, p: &Pin) -> Result<Vec<TrackRow>, LibError> {
             .track_by_path(&bytes_path(p.key.clone()))?
             .into_iter()
             .collect()),
+        PinKind::Mix => match key.parse::<i64>() {
+            Ok(id) => Ok(lib
+                .saved_mix(id)?
+                .map(|row| crate::mix::resolve_saved(lib, &row))
+                .unwrap_or_default()),
+            Err(_) => Ok(Vec::new()),
+        },
     }
 }
 

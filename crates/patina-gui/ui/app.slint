@@ -128,7 +128,8 @@ export struct SideItem {
 export struct Row {
     // 0 track, 1 album, 2 artist, 3 folder, 4 genre, 5 playlist, 6 station,
     // 7 podcast, 8 episode, 9 header, 10 info, 11 missing file, 12 setting,
-    // 13 pinned for offline, 14 a download, 15 a button in the list
+    // 13 pinned for offline, 14 a download, 15 a button in the list,
+    // 16 a saved mix
     kind: int,
     num: string,
     title: string,
@@ -151,6 +152,8 @@ export struct Row {
     // Pinned for offline, and whether it could be.
     pinned: bool,
     can-pin: bool,
+    // A mix can start from it.
+    can-mix: bool,
 }
 
 export struct QueueRow {
@@ -562,13 +565,13 @@ component ListRow inherits Rectangle {
             Text {
                 width: parent.width;
                 height: parent.height;
-                text: item.playing ? (P.kawaii ? "♪" : "▶") : item.num;
+                text: item.playing ? (P.kawaii ? "♪" : "▶") : (item.kind == 4 && item.on ? "✓" : (item.kind == 16 ? "∞" : item.num));
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 font-family: P.mono;
                 font-size: 12px;
                 font-weight: P.kawaii ? 700 : 400;
-                color: item.playing ? P.accent-text : (P.kawaii ? P.muted : P.wave);
+                color: item.playing || (item.kind == 4 && item.on) ? P.accent-text : (P.kawaii ? P.muted : P.wave);
             }
         }
         if item.kind == 1 || item.kind == 3: Rectangle {
@@ -629,9 +632,17 @@ component ListRow inherits Rectangle {
         enabled: item.selectable;
         Menu {
             // Things that play.
-            if item.kind <= 8 || item.kind == 13: MenuItem {
+            if item.kind <= 8 || item.kind == 13 || item.kind == 16: MenuItem {
                 title: item.kind == 8 ? "Play (resume)" : "Play";
                 activated => { root.act("play"); }
+            }
+            if item.can-mix: MenuItem {
+                title: item.kind == 0 ? "Track mix" : (item.kind == 4 ? "Genre mix" : "Artist mix");
+                activated => { root.act("mix"); }
+            }
+            if item.kind == 4: MenuItem {
+                title: item.on ? "Unmark for a mix" : "Mark for a mix";
+                activated => { root.act("mark"); }
             }
             if item.kind <= 8 || item.kind == 13: MenuItem {
                 title: "Play next";
@@ -678,6 +689,10 @@ component ListRow inherits Rectangle {
             }
             if item.kind == 13: MenuSeparator {}
             if item.kind == 13: MenuItem { title: "Unpin"; activated => { root.act("unpin"); } }
+            // Saved mixes.
+            if item.kind == 16: MenuSeparator {}
+            if item.kind == 16: MenuItem { title: "Rename…"; activated => { root.act("mix-rename"); } }
+            if item.kind == 16: MenuItem { title: "Delete…"; activated => { root.act("mix-delete"); } }
             // Downloads.
             if item.kind == 14: MenuItem {
                 title: item.on ? "Resume" : "Pause";
@@ -921,6 +936,7 @@ component AlbumTile inherits Rectangle {
             MenuItem { title: "Play next"; activated => { root.act("next"); } }
             MenuItem { title: "Add to queue"; activated => { root.act("queue"); } }
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
+            if item.can-mix: MenuItem { title: "Artist mix"; activated => { root.act("mix"); } }
             if item.can-pin: MenuSeparator {}
             if item.can-pin: MenuItem {
                 title: item.pinned ? "Stop keeping offline" : "Keep offline";
@@ -1015,6 +1031,8 @@ export component AppWindow inherits Window {
     callback queue-clear;
     // Servers that keep a play queue: "Queue from <name>" loads theirs.
     in property <[string]> queue-servers;
+    // A mix is playing that isn't saved yet.
+    in property <bool> queue-mix-unsaved;
     callback queue-load(string);
 
     // Now playing
@@ -1692,6 +1710,7 @@ export component AppWindow inherits Window {
                                     text: "Queue from " + srv;
                                     clicked => { root.queue-load(srv); keys.focus(); }
                                 }
+                                if root.queue-mix-unsaved: Chip { y: parent.height - self.height; text: "Save mix"; clicked => { root.view-action("save-mix"); keys.focus(); } }
                                 Chip { y: parent.height - self.height; text: "Add to playlist"; clicked => { root.queue-save(); } }
                                 Chip { y: parent.height - self.height; text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
                             }

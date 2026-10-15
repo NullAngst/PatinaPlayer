@@ -143,6 +143,8 @@ pub enum Item {
     Pinned(crate::cache::PinRow),
     /// A download, running or waiting, in Downloads.
     Job(JobRow),
+    /// A saved mix, in Playlists.
+    Mix(crate::library::mixes::SavedMixRow),
     /// A button that sits in a list, in Downloads.
     Action {
         action: ListAction,
@@ -252,6 +254,7 @@ impl Item {
                 },
             ),
             Item::Pinned(p) => p.pin.clone(),
+            Item::Mix(m) => Pin::new(PinKind::Mix, m.id.to_string(), m.name.clone()),
             _ => return None,
         })
     }
@@ -273,6 +276,7 @@ impl Item {
             Item::Info { label, .. } => format!("i:{label}"),
             Item::Setting(s) => format!("s:{:?}", s.key),
             Item::Pinned(p) => format!("pin:{}", p.pin.id),
+            Item::Mix(m) => format!("mix:{}", m.id),
             Item::Job(j) => format!("job:{:?}", j.key),
             Item::Action { action, .. } => format!("act:{action:?}"),
         }
@@ -712,10 +716,17 @@ fn build_library(
         }
         Source::Section(Section::Playlists) => {
             let rows = lib.playlists().map_err(err)?;
-            Ok((
-                "Playlists".into(),
-                rows.into_iter().map(Item::Playlist).collect(),
-            ))
+            let mixes = lib.saved_mixes().map_err(err)?;
+            let mut items = Vec::new();
+            if !mixes.is_empty() && !rows.is_empty() {
+                items.push(Item::Header("Playlists"));
+            }
+            items.extend(rows.into_iter().map(Item::Playlist));
+            if !mixes.is_empty() {
+                items.push(Item::Header("Saved mixes"));
+                items.extend(mixes.into_iter().map(Item::Mix));
+            }
+            Ok(("Playlists".into(), items))
         }
         Source::Playlist { id, name } => {
             let items = lib.playlist_items(*id).map_err(err)?;
@@ -794,6 +805,8 @@ pub fn open(item: &Item) -> Option<Source> {
                 }),
                 PinKind::Folder => Some(Source::Folder(path())),
                 PinKind::Song => path().parent().map(|d| Source::Folder(d.to_path_buf())),
+                // Saved mixes are listed in Playlists.
+                PinKind::Mix => Some(Source::Section(Section::Playlists)),
             }
         }
         _ => None,
@@ -850,6 +863,7 @@ pub fn tracks_of(lib: &Library, item: &Item, prefs: &ViewPrefs) -> Vec<TrackRow>
             .playlist_items(p.id)
             .map(|v| v.into_iter().filter_map(|(_, t)| t).collect()),
         Item::Pinned(p) => crate::cache::store::resolve(lib, &p.pin),
+        Item::Mix(m) => Ok(crate::mix::resolve_saved(lib, m)),
         _ => Ok(Vec::new()),
     };
     r.unwrap_or_default()

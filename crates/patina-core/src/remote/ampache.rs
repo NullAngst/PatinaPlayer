@@ -555,6 +555,44 @@ impl Client for Ampache {
         self.get("ping", &[]).map(|_| ())
     }
 
+    fn similar_songs(&self, song_id: &str, count: usize) -> Result<Vec<String>> {
+        let v = self.get(
+            "get_similar",
+            &[
+                ("type", "song".into()),
+                ("filter", song_id.into()),
+                ("limit", count.to_string()),
+            ],
+        )?;
+        let songs: Vec<super::Named> = self.items(v, "song")?;
+        Ok(songs.into_iter().filter_map(|n| n.id).collect())
+    }
+
+    fn similar_artists(&self, artist: &str, count: usize) -> Result<Vec<String>> {
+        let v = self.get(
+            "artists",
+            &[("filter", artist.into()), ("exact", "1".into())],
+        )?;
+        let hits: Vec<super::Named> = self.items(v, "artist")?;
+        let Some(id) = hits
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(artist))
+            .and_then(|a| a.id)
+        else {
+            return Ok(Vec::new());
+        };
+        let v = self.get(
+            "get_similar",
+            &[
+                ("type", "artist".into()),
+                ("filter", id),
+                ("limit", count.to_string()),
+            ],
+        )?;
+        let similar: Vec<super::Named> = self.items(v, "artist")?;
+        Ok(similar.into_iter().map(|a| a.name).collect())
+    }
+
     fn episode_url(&self, stream_id: &str) -> Result<String> {
         self.signed(&[
             ("action", "stream".into()),

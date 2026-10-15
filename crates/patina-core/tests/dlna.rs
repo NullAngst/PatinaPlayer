@@ -301,6 +301,7 @@ fn the_browser_finds_adds_renames_and_removes_one() {
         pod: None,
         remote: Some(RemoteService::start(&db, Vec::new(), secrets)),
         cache: None,
+        mixes: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),

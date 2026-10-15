@@ -184,6 +184,13 @@ impl Session {
                 }
             }
         };
+        let mixes = if opts.no_library {
+            None
+        } else {
+            crate::mix::MixService::start(&db_path, &cfg.lastfm.api_key)
+                .map_err(|e| log::warn!("mixes are unavailable: {e}"))
+                .ok()
+        };
         let browser = Browser::new(Startup {
             player,
             lib,
@@ -191,6 +198,7 @@ impl Session {
             pod,
             remote,
             cache,
+            mixes,
             config: cfg.clone(),
             settings_info: SettingsInfo {
                 config_path: config_path.clone(),

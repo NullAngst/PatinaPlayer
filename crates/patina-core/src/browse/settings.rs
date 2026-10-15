@@ -44,6 +44,9 @@ pub enum Key {
     PauseMetered,
     /// What songs are kept as: the original, or a conversion.
     CacheFormat,
+    /// Genre mixes match album tags or each song's tags.
+    GenreMatch,
+    LastFmKey,
     /// Read-only facts: where files are.
     Info(&'static str),
 }
@@ -386,6 +389,37 @@ pub fn rows(
                 label: "Keep songs as".into(),
                 help: "The original file, or a conversion the server makes to save space. Converted songs can't play bit-perfect.",
                 control: Control::Choice { options, index },
+            },
+        );
+    }
+
+    // Mixes
+    if !info.no_library {
+        push(
+            "Mixes",
+            Setting {
+                key: Key::GenreMatch,
+                label: "Genre mixes match".into(),
+                help: "Album tags keeps half-tagged albums out; each song's tags follows the songs themselves.",
+                control: Control::Choice {
+                    options: vec![
+                        ("album".into(), "Album tags".into()),
+                        ("track".into(), "Each song's tags".into()),
+                    ],
+                    index: usize::from(cfg.mixes.by_track),
+                },
+            },
+        );
+        push(
+            "Mixes",
+            Setting {
+                key: Key::LastFmKey,
+                label: "Last.fm API key".into(),
+                help: "Free from last.fm/api/account/create. Artist and track mixes ask Last.fm when your server can't say who's similar.",
+                control: Control::Text {
+                    value: cfg.lastfm.api_key.clone(),
+                    empty: "not set: mixes use your genre tags",
+                },
             },
         );
     }

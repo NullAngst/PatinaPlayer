@@ -33,6 +33,7 @@ enum Dlg {
     AddFolder,
     NewPlaylist(Vec<PathBuf>),
     RenamePlaylist(i64),
+    RenameMix(i64),
     Station(Option<usize>),
     Feed,
     /// Adding a server, or editing the one with this name.
@@ -59,6 +60,7 @@ enum Confirm {
     Unsubscribe(String),
     RemoveServer(String),
     ClearCache,
+    DeleteMix(i64),
 }
 
 pub struct State {
@@ -111,6 +113,8 @@ Backspace    back a level (Alt+Left / Alt+Right: back, forward)
 a / A        add to queue / play next
 p            add to a playlist
 f / F        keep the selection / this whole view offline, or stop
+X            mix from the selection: artist, album, song or genres
+M            mark a genre for a mix; in the Queue, save the mix
 Delete       remove from the queue, the open playlist, or Settings;
              in Downloads: cancel a download or unpin
 Enter        in Settings: flip, pick or edit the option
@@ -314,6 +318,7 @@ impl State {
             }
             Item::Genre(g) => {
                 r.kind = 4;
+                r.on = self.b.genre_marked(&g.norm);
                 r.title = ss(&g.name);
                 r.sub = ss(format!("{} album{}", g.albums, s_(g.albums)));
                 r.right = ss(format!("{} track{}", g.tracks, s_(g.tracks)));
@@ -455,8 +460,20 @@ impl State {
                 r.num = SharedString::new();
                 r.title = ss(label);
             }
+            Item::Mix(m) => {
+                r.kind = 16;
+                r.title = ss(&m.name);
+                r.sub = ss(match m.kind.as_str() {
+                    "genre" => "Genre mix",
+                    "artist" => "Artist mix",
+                    _ => "Track mix",
+                });
+                r.right = ss(if m.kind == "genre" { "" } else { "endless" });
+                r.playing = self.b.mix.as_ref().and_then(|x| x.saved) == Some(m.id);
+            }
         }
         r.off = !self.b.plays(item);
+        r.can_mix = self.b.can_mix(item) && !matches!(item, Item::Mix(_));
         r.can_pin = self.b.can_pin(item);
         r.pinned = r.can_pin && self.b.pinned(item).is_some();
         r
@@ -466,6 +483,30 @@ impl State {
     /// that can be played as a whole gets Play and Shuffle up front.
     fn chrome(&self) -> (i32, Vec<&'static str>, Vec<(&'static str, String)>) {
         let (layout, cols, mut acts) = self.chrome_base();
+        let src = self.b.level().map(|l| l.source.clone());
+        match (self.b.section, &src) {
+            (Section::Queue, _) if self.b.mix.as_ref().is_some_and(|m| m.saved.is_none()) => {
+                acts.push(("save-mix", "Save this mix".into()));
+            }
+            (Section::Genres, Some(Source::Section(_))) if !self.b.genre_marks.is_empty() => {
+                let n = self.b.genre_marks.len();
+                acts.push((
+                    "genre-mix",
+                    if n == 1 {
+                        "Play mix".into()
+                    } else {
+                        format!("Play mix of {n} genres")
+                    },
+                ));
+                acts.push(("clear-marks", "Clear marks".into()));
+            }
+            (_, Some(Source::Genre { .. } | Source::ArtistAlbums(_) | Source::Album { .. }))
+                if self.b.mixes.is_some() =>
+            {
+                acts.push(("mix", "Mix".into()));
+            }
+            _ => {}
+        }
         // An album, artist, playlist or folder with server songs in it can
         // be kept offline whole.
         if let Some(pinned) = self.b.view_pin_state() {
@@ -553,6 +594,9 @@ impl State {
                     },
                 )],
             ),
+            (Section::Genres, Some(Source::Section(_))) => {
+                (0, vec!["", "Genre", "Albums", "", "Tracks"], vec![])
+            }
             (Section::Playlists, Some(Source::Section(_))) => (
                 0,
                 vec!["", "Playlist", "", "", "Tracks"],
@@ -635,6 +679,12 @@ impl State {
         }
         ui.set_empty_text(ss(empty));
         ui.set_album_tracks(self.b.in_playlist().is_none());
+        ui.set_queue_mix_unsaved(
+            self.b
+                .mix
+                .as_ref()
+                .is_some_and(|m| m.started && m.saved.is_none()),
+        );
 
         let key = format!(
             "{:?}/{}/{:?}",
@@ -862,6 +912,15 @@ impl State {
                         },
                     }
                 }
+                SideEntry::Mix { id, name } => SideItem {
+                    kind: 0,
+                    label: ss(name),
+                    sub: SharedString::new(),
+                    icon: icons.get_radio(),
+                    active: self.b.mix.as_ref().and_then(|m| m.saved) == Some(*id),
+                    count: SharedString::new(),
+                    dot: 0,
+                },
                 SideEntry::Label(l) => SideItem {
                     kind: 2,
                     label: ss(l.to_uppercase()),
@@ -950,10 +1009,10 @@ impl State {
         self.queue_sel = self.queue_sel.min(n.saturating_sub(1));
         ui.set_queue_sel(if n == 0 { -1 } else { self.queue_sel as i32 });
         ui.set_queue_current(current);
-        ui.set_queue_summary(ss(if n == 0 {
-            String::new()
-        } else {
-            format!("{n} track{} · {}", s_(n as i64), fmt_length(total))
+        ui.set_queue_summary(ss(match (n, self.b.mix_title()) {
+            (0, _) => String::new(),
+            (_, Some(mix)) => format!("{mix} · {n} track{} so far", s_(n as i64)),
+            _ => format!("{n} track{} · {}", s_(n as i64), fmt_length(total)),
         }));
     }
 
@@ -1286,6 +1345,31 @@ impl State {
         }
     }
 
+    /// The Mix button at the top of a genre, artist or album page.
+    fn mix_view(&mut self) {
+        let lib = self.b.lib.as_ref();
+        let item = match self.b.level().map(|l| l.source.clone()) {
+            // A genre mix only needs the genre's name.
+            Some(Source::Genre { norm, name }) => {
+                Some(Item::Genre(patina_core::library::GenreRow {
+                    norm,
+                    name,
+                    albums: 0,
+                    tracks: 0,
+                }))
+            }
+            Some(Source::Album { key }) => lib
+                .and_then(|l| l.album(&key).ok().flatten())
+                .map(Item::Album),
+            Some(Source::ArtistAlbums(_)) => self.b.view_item(),
+            _ => None,
+        };
+        if let Some(it) = item {
+            self.b.mix_item(&it);
+            self.follow = true;
+        }
+    }
+
     fn play_view(&mut self, shuffle: bool) {
         self.b.play_view(shuffle);
         self.follow = true;
@@ -1321,6 +1405,10 @@ impl State {
             }
             "refresh" => self.b.rescan(),
             "pin" => self.b.toggle_pin_view(),
+            "save-mix" => self.b.save_mix(),
+            "genre-mix" => self.b.play_genre_mix(),
+            "clear-marks" => self.b.clear_genre_marks(),
+            "mix" => self.mix_view(),
             _ => {}
         }
     }
@@ -1684,6 +1772,33 @@ impl State {
                 }
             }
             "pin" => self.b.toggle_pin_selected(),
+            "mix" => {
+                if let Some(it) = item {
+                    self.b.mix_item(&it);
+                    self.follow = true;
+                }
+            }
+            "mark" => {
+                if let Some(Item::Genre(g)) = item {
+                    self.b.toggle_genre_mark(&g);
+                }
+            }
+            "mix-rename" => {
+                if let Some(Item::Mix(m)) = item {
+                    self.dlg = Dlg::RenameMix(m.id);
+                    open_text(ui, "Rename mix", "Name", &m.name, None, "Rename");
+                }
+            }
+            "mix-delete" => {
+                if let Some(Item::Mix(m)) = item {
+                    self.confirm(
+                        ui,
+                        format!("Delete the saved mix \"{}\"?", m.name),
+                        "Delete",
+                        Confirm::DeleteMix(m.id),
+                    );
+                }
+            }
             "unpin" => {
                 if let Some(Item::Pinned(p)) = item {
                     self.b.unpin(p.pin.id);
@@ -1752,6 +1867,7 @@ impl State {
             Dlg::SetValue(key) => self.change_setting(ui, key, Change::Set(t1)),
             Dlg::NewPlaylist(paths) => self.b.create_playlist(&t1, &paths),
             Dlg::RenamePlaylist(id) => self.b.rename_playlist(id, &t1),
+            Dlg::RenameMix(id) => self.b.rename_mix(id, &t1),
             Dlg::Station(edit) => {
                 if t1.is_empty() || t2.is_empty() {
                     self.b.error("A station needs a name and a URL");
@@ -1791,6 +1907,7 @@ impl State {
                 Confirm::Unsubscribe(url) => self.b.unsubscribe(&url),
                 Confirm::RemoveServer(n) => self.b.remove_server(&n),
                 Confirm::ClearCache => self.b.list_action(ListAction::ClearCache),
+                Confirm::DeleteMix(id) => self.b.delete_mix(id),
             },
             Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Dlna(_) | Dlg::Help | Dlg::None => {}
         }
@@ -1936,6 +2053,16 @@ impl State {
                 "z" => self.b.toggle_trim(),
                 "v" if !queue => self.play_view(false),
                 "V" if !queue => self.play_view(true),
+                "X" if !queue => {
+                    self.b.mix_selected();
+                    self.follow = true;
+                }
+                "M" if queue => self.b.save_mix(),
+                "M" => {
+                    if let Some(Item::Genre(g)) = self.b.selected_item() {
+                        self.b.toggle_genre_mark(&g);
+                    }
+                }
                 "f" if !queue => self.b.toggle_pin_selected(),
                 "F" if !queue => self.b.toggle_pin_view(),
                 "a" if !queue => self.b.add_selected_to_queue(false),
@@ -2246,6 +2373,7 @@ fn count_label(items: &[Item]) -> String {
             Item::Episode(_) => "episode",
             Item::Pinned(_) => "pin",
             Item::Job(_) => "download",
+            Item::Mix(_) => "mix",
             Item::Header(_) | Item::Info { .. } | Item::Setting(_) | Item::Action { .. } => {
                 continue;
             }

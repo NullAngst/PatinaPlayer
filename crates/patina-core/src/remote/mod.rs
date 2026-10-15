@@ -341,6 +341,32 @@ pub trait Client: Send + Sync {
     fn load_queue(&self) -> Result<Option<SavedQueue>>;
     /// Where a podcast episode was left, for other clients.
     fn bookmark(&self, id: &str, pos: Duration) -> Result<()>;
+
+    /// Songs like this one, by the server's ids, from its similarity data
+    /// (which servers mostly get from Last.fm). Empty when it has none.
+    fn similar_songs(&self, _song_id: &str, _count: usize) -> Result<Vec<String>> {
+        Err(RemoteError::Unsupported("similar songs"))
+    }
+
+    /// Artists like this one, by name. Empty when it has none.
+    fn similar_artists(&self, _artist: &str, _count: usize) -> Result<Vec<String>> {
+        Err(RemoteError::Unsupported("similar artists"))
+    }
+}
+
+/// Ids and names out of the similarity answers.
+#[derive(Debug, Default, serde::Deserialize)]
+struct Named {
+    #[serde(default, deserialize_with = "http::opt_id")]
+    id: Option<String>,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct Songs {
+    #[serde(default, deserialize_with = "http::list")]
+    song: Vec<Named>,
 }
 
 /// Connect to a server of a known kind.
@@ -476,6 +502,17 @@ impl Registry {
 
     pub fn set_client(&self, server: &str, client: Option<Arc<dyn Client>>) {
         *self.entry(server).client.write().unwrap() = client;
+    }
+
+    /// Servers that are connected right now.
+    pub fn connected(&self) -> Vec<String> {
+        self.servers
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| e.client.read().unwrap().is_some())
+            .map(|(n, _)| n.clone())
+            .collect()
     }
 
     pub fn remove(&self, server: &str) {

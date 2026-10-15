@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 4;
+pub const VERSION: i64 = 5;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -194,6 +194,19 @@ CREATE TABLE pins (
 );
 "#;
 
+/// Saved mixes. What a mix starts from, and the similar artists or songs
+/// found for it at the time, so it plays the same way offline.
+const V5: &str = r#"
+CREATE TABLE mixes (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL,          -- genre, artist or track
+    name        TEXT NOT NULL,
+    seed        TEXT NOT NULL,          -- JSON
+    similar     TEXT NOT NULL,          -- JSON
+    created_at  INTEGER NOT NULL
+);
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -219,6 +232,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 4 {
         tx.execute_batch(V4)?;
+    }
+    if current < 5 {
+        tx.execute_batch(V5)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

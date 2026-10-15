@@ -56,6 +56,9 @@ pub enum InputPurpose {
     NewPlaylist {
         add: Vec<PathBuf>,
     },
+    RenameMix {
+        id: i64,
+    },
     RenamePlaylist {
         id: i64,
     },
@@ -86,6 +89,7 @@ pub enum ConfirmAction {
     RemoveFolder(PathBuf),
     RemoveServer(String),
     ClearCache,
+    DeleteMix(i64),
 }
 
 pub enum Modal {
@@ -565,6 +569,29 @@ impl App {
             KeyCode::Char('a') if !queue => self.b.add_selected_to_queue(false),
             KeyCode::Char('A') if !queue => self.b.add_selected_to_queue(true),
             KeyCode::Char('p') => self.pick_playlist(),
+            KeyCode::Char('X') if !queue => self.b.mix_selected(),
+            KeyCode::Char('M') if queue => self.b.save_mix(),
+            KeyCode::Char('M') if self.b.section == Section::Genres => match self.b.selected_item()
+            {
+                Some(Item::Genre(g)) => self.b.toggle_genre_mark(&g),
+                _ => self.b.note("M marks a genre for a mix"),
+            },
+            KeyCode::Char('R') if lists && matches!(self.b.selected_item(), Some(Item::Mix(_))) => {
+                if let Some(Item::Mix(m)) = self.b.selected_item() {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::RenameMix { id: m.id },
+                        buf: m.name,
+                    }
+                }
+            }
+            KeyCode::Char('D') if lists && matches!(self.b.selected_item(), Some(Item::Mix(_))) => {
+                if let Some(Item::Mix(m)) = self.b.selected_item() {
+                    self.modal = Modal::Confirm {
+                        msg: format!("Delete the saved mix \"{}\"?", m.name),
+                        action: ConfirmAction::DeleteMix(m.id),
+                    }
+                }
+            }
             KeyCode::Char('f') if !queue => self.b.toggle_pin_selected(),
             KeyCode::Char('F') if !queue => {
                 if self.b.view_pin_state().is_some() {
@@ -879,6 +906,7 @@ impl App {
                 None => self.b.add_server(&f.name, &f.url, &f.user, &text),
             },
             InputPurpose::RenamePlaylist { id } => self.b.rename_playlist(id, &text),
+            InputPurpose::RenameMix { id } => self.b.rename_mix(id, &text),
         }
     }
 
@@ -937,6 +965,7 @@ impl App {
             ConfirmAction::RemoveFolder(p) => self.b.remove_folder(&p),
             ConfirmAction::RemoveServer(n) => self.b.remove_server(&n),
             ConfirmAction::ClearCache => self.b.list_action(ListAction::ClearCache),
+            ConfirmAction::DeleteMix(id) => self.b.delete_mix(id),
         }
     }
 
@@ -981,7 +1010,10 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) if inside(self.sidebar_area) => {
                 let row = (y - self.sidebar_area.y) as usize;
                 if let Some(e) = self.b.sidebar.get(row)
-                    && matches!(e, SideEntry::Section(_) | SideEntry::Source { .. })
+                    && matches!(
+                        e,
+                        SideEntry::Section(_) | SideEntry::Source { .. } | SideEntry::Mix { .. }
+                    )
                 {
                     self.b.activate_sidebar(row);
                     self.focus = Focus::Content;

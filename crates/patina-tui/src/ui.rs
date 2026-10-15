@@ -62,6 +62,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let title = match purpose {
                 InputPurpose::NewPlaylist { .. } => "New playlist",
                 InputPurpose::RenamePlaylist { .. } => "Rename playlist",
+                InputPurpose::RenameMix { .. } => "Rename mix",
                 InputPurpose::Search => "",
                 InputPurpose::StationName { edit: None } => "New station: name",
                 InputPurpose::StationName { .. } => "Edit station: name",
@@ -230,6 +231,26 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(format!(" {right} "), base.fg(t.muted)),
                 ])
             }
+            SideEntry::Mix { name, .. } => {
+                let playing = app
+                    .b
+                    .mix
+                    .as_ref()
+                    .and_then(|m| m.saved)
+                    .is_some_and(|id| matches!(e, SideEntry::Mix { id: x, .. } if *x == id));
+                let w = (area.width as usize).saturating_sub(3);
+                Line::from(vec![
+                    Span::styled(" ∞ ", base.fg(t.verdigris)),
+                    Span::styled(
+                        pad(&truncate(name, w), w),
+                        if playing {
+                            base.fg(t.verdigris).add_modifier(Modifier::BOLD)
+                        } else {
+                            base.fg(t.text)
+                        },
+                    ),
+                ])
+            }
             SideEntry::Label(l) => {
                 Line::from(Span::styled(format!(" {l}"), Style::default().fg(t.muted)))
             }
@@ -316,12 +337,15 @@ fn hints(app: &App) -> &'static str {
         (Section::Songs, _) => {
             "o sort · O reverse · v play all · V shuffle · e queue all · P playlist all"
         }
-        (Section::Artists, Some(Source::Section(_))) => "t album/track artist · a add",
-        (_, Some(Source::Genre { .. })) => "t albums/songs · a add · Esc back",
+        (Section::Artists, Some(Source::Section(_))) => {
+            "t album/track artist · a add · X artist mix"
+        }
+        (_, Some(Source::Genre { .. })) => "t albums/songs · a add · X genre mix · Esc back",
+        (Section::Genres, _) => "Enter open · M mark for a mix · X play the mix of marked genres",
         (_, Some(Source::Playlist { .. })) => {
             "v play all · e queue all · d remove · J/K move · Esc back"
         }
-        (Section::Playlists, _) => "N new · R rename · D delete",
+        (Section::Playlists, _) => "N new · R rename · D delete · Enter on a mix plays it",
         (Section::Radio, _) => "Enter play · N new · E edit · T test · D delete · J/K move",
         (_, Some(Source::Podcast { .. })) => {
             "Enter play · w download · x delete file · P played · [ ] speed · z trim"
@@ -336,7 +360,7 @@ fn hints(app: &App) -> &'static str {
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
             "Enter open · v play all · V shuffle · e queue all · P playlist all"
         }
-        _ => "v play all · V shuffle · e queue all · a add · p playlist · f keep offline",
+        _ => "v play all · V shuffle · e queue all · a add · p playlist · f keep offline · X mix",
     }
 }
 
@@ -727,7 +751,11 @@ fn item_row<'a>(
             Cell::from(Span::styled(format!("{tracks} track{}", s(*tracks)), muted)),
         ],
         Item::Genre(g) => vec![
-            Cell::from(" "),
+            if app.b.genre_marked(&g.norm) {
+                Cell::from(Span::styled("✓", Style::default().fg(t.verdigris)))
+            } else {
+                Cell::from(" ")
+            },
             Cell::from(""),
             Cell::from(Span::styled(g.name.clone(), text)),
             Cell::from(Span::styled(
@@ -882,6 +910,17 @@ fn item_row<'a>(
             Cell::from(""),
             Cell::from(""),
         ],
+        Item::Mix(m) => vec![
+            mark("∞"),
+            Cell::from(""),
+            Cell::from(Span::styled(m.name.clone(), text)),
+            Cell::from(Span::styled(format!("{} mix", capital(&m.kind)), muted)),
+            Cell::from(""),
+            Cell::from(Span::styled(
+                if m.kind == "genre" { "" } else { "endless" },
+                muted,
+            )),
+        ],
         Item::Pinned(p) => {
             let all = p.stored >= p.songs;
             vec![
@@ -1023,16 +1062,20 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .filter_map(|&id| q.get(id).and_then(|e| e.info.duration))
         .sum();
-    let title = if n == 0 {
-        "Queue".to_string()
-    } else {
-        format!(
+    let title = match (n, app.b.mix_title()) {
+        (0, _) => "Queue".to_string(),
+        (_, Some(mix)) => format!("Queue · {mix} · {n} tracks so far"),
+        _ => format!(
             "Queue · {n} track{} · {}",
             if n == 1 { "" } else { "s" },
             fmt_length(total)
-        )
+        ),
     };
-    let hint = "Enter play · d remove · J/K move · S add to playlist · C clear";
+    let hint = if app.b.mix.as_ref().is_some_and(|m| m.saved.is_none()) {
+        "Enter play · d remove · J/K move · S add to playlist · M save the mix · C clear"
+    } else {
+        "Enter play · d remove · J/K move · S add to playlist · C clear"
+    };
     let mut spans = vec![Span::styled(
         format!(" {title}"),
         Style::default().fg(t.text).add_modifier(Modifier::BOLD),
@@ -1534,6 +1577,14 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "f / F",
             "Keep the selection / the whole view offline, or stop",
         ),
+        (
+            "X",
+            "Mix from the selection: an artist, album, song, or the marked genres",
+        ),
+        (
+            "M",
+            "Genres: mark one for a genre mix. Queue: save the mix playing",
+        ),
         ("o / O", "Sort Albums or Songs / reverse Songs"),
         (
             "t",
@@ -1579,6 +1630,15 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     f.render_widget(Paragraph::new(lines).block(frame_block(app, "Keys")), r);
+}
+
+/// "artist" to "Artist".
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
 }
 
 fn pad(s: &str, w: usize) -> String {

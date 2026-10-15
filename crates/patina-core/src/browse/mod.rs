@@ -4,6 +4,7 @@
 //! library, the queue or the config. That's how the two stay identical.
 
 mod downloads;
+mod mixes;
 pub mod model;
 pub mod offline;
 mod servers;
@@ -48,6 +49,11 @@ pub enum SideEntry {
         /// A music server's state; None for a local folder.
         server: Option<ServerState>,
     },
+    /// A saved mix. Opening it plays it.
+    Mix {
+        id: i64,
+        name: String,
+    },
     Label(&'static str),
     Gap,
 }
@@ -70,6 +76,8 @@ pub struct Startup {
     pub remote: Option<RemoteService>,
     /// The song cache and download queue. None without the library.
     pub cache: Option<crate::cache::CacheService>,
+    /// Genre, artist and track mixes. None without the library.
+    pub mixes: Option<crate::mix::MixService>,
     /// The config as loaded. Settings edits it, and the file, together.
     pub config: Config,
     pub settings_info: SettingsInfo,
@@ -82,6 +90,12 @@ pub struct Browser {
     pub pod: Option<PodcastService>,
     pub remote: Option<RemoteService>,
     pub cache: Option<crate::cache::CacheService>,
+    pub mixes: Option<crate::mix::MixService>,
+    /// The mix playing, if one is.
+    pub mix: Option<mixes::MixRun>,
+    mix_runs: u64,
+    /// Genres marked for a genre mix.
+    pub genre_marks: Vec<crate::library::GenreRow>,
     /// The cache as of the last poll, for Downloads.
     pub cache_status: crate::cache::Status,
     /// The songs last handed to prefetch, so the same list isn't sent
@@ -171,6 +185,10 @@ impl Browser {
             remote: s.remote,
             cache_status: s.cache.as_ref().map(|c| c.status()).unwrap_or_default(),
             cache: s.cache,
+            mixes: s.mixes,
+            mix: None,
+            mix_runs: 0,
+            genre_marks: Vec::new(),
             sent_upcoming: Vec::new(),
             avail: offline::Availability::default(),
             avail_dirty: false,
@@ -240,8 +258,10 @@ impl Browser {
                 queue_moved = true;
             }
         }
+        self.poll_mixes();
         if queue_moved {
             self.feed_prefetch();
+            self.mix_tick();
         }
         self.poll_cache();
         if events.iter().any(|e| matches!(e, Event::Played(_))) {
@@ -327,6 +347,15 @@ impl Browser {
             s.push(SideEntry::Gap);
             s.push(SideEntry::Label("Listening"));
             s.extend(Section::STATS.iter().map(|&x| SideEntry::Section(x)));
+            let saved = self.saved_mixes();
+            if !saved.is_empty() {
+                s.push(SideEntry::Gap);
+                s.push(SideEntry::Label("Mixes"));
+                s.extend(saved.into_iter().map(|m| SideEntry::Mix {
+                    id: m.id,
+                    name: m.name,
+                }));
+            }
         }
         let sources = self
             .lib
@@ -398,10 +427,16 @@ impl Browser {
             }
             if matches!(
                 self.sidebar[i as usize],
-                SideEntry::Section(_) | SideEntry::Source { .. }
+                SideEntry::Section(_) | SideEntry::Source { .. } | SideEntry::Mix { .. }
             ) {
                 break;
             }
+        }
+        // Moving onto a saved mix selects it; Enter plays it.
+        if matches!(self.sidebar[i as usize], SideEntry::Mix { .. }) {
+            self.sidebar_sel = i as usize;
+            self.touch();
+            return;
         }
         self.activate_sidebar(i as usize);
     }
@@ -417,6 +452,10 @@ impl Browser {
                 }
                 self.push(Source::Folder(path));
                 self.sidebar_sel = index;
+            }
+            Some(SideEntry::Mix { id, .. }) => {
+                self.sidebar_sel = index;
+                self.play_saved_mix(id);
             }
             _ => return,
         }
@@ -671,6 +710,13 @@ impl Browser {
             self.push(src);
             return Activated::Opened;
         }
+        if matches!(
+            item,
+            Item::Station { .. } | Item::Episode(_) | Item::Track(_)
+        ) && self.section != Section::Queue
+        {
+            self.end_mix();
+        }
         let play = |b: &Self, tracks: Vec<TrackInfo>, start: usize, pos: Duration| {
             b.player
                 .send(Command::SetQueueTracks { tracks, start, pos });
@@ -723,6 +769,10 @@ impl Browser {
             Item::Action { action, .. } => {
                 self.list_action(*action);
                 Activated::Nothing
+            }
+            Item::Mix(m) => {
+                self.play_saved_mix(m.id);
+                Activated::Played
             }
             _ => Activated::Nothing,
         }
@@ -785,6 +835,7 @@ impl Browser {
             return self.note("Nothing here to play");
         }
         let n = tracks.len();
+        self.end_mix();
         self.player.send(Command::PlayAll { tracks, shuffle });
         self.note(format!(
             "{} {}",
@@ -813,7 +864,7 @@ impl Browser {
         };
         if matches!(
             item,
-            Item::Track(_) | Item::Station { .. } | Item::Episode(_)
+            Item::Track(_) | Item::Station { .. } | Item::Episode(_) | Item::Mix(_)
         ) {
             return self.activate();
         }
@@ -824,6 +875,7 @@ impl Browser {
             }
             return Activated::Nothing;
         }
+        self.end_mix();
         self.player.send(Command::SetQueueTracks {
             tracks,
             start: 0,
@@ -1039,7 +1091,8 @@ impl Browser {
         to
     }
 
-    pub fn clear_queue(&self) {
+    pub fn clear_queue(&mut self) {
+        self.end_mix();
         self.player.send(Command::ClearQueue);
     }
 
@@ -1301,6 +1354,7 @@ impl Browser {
                 (Key::PodcastTrim, Control::Toggle(on)) => {
                     self.set_podcast_playback(self.podcast_tempo, *on);
                 }
+                (Key::GenreMatch | Key::LastFmKey, _) => self.change_mix_setting(key, &new)?,
                 (
                     Key::CacheSize
                     | Key::Prefetch

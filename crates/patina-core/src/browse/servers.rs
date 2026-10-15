@@ -616,6 +616,7 @@ impl Browser {
             return self.note(format!("None of {server}'s queue is synced here yet"));
         }
         let n = tracks.len();
+        self.end_mix();
         self.player.send(Command::SetQueueTracks {
             tracks,
             start,
