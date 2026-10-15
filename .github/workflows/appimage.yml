@@ -64,6 +64,11 @@ jobs:
           SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
           VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           UPDATE_INFORMATION: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|PatinaPlayer-*x86_64.AppImage.zsync
+          # The built-in Last.fm key and secret, from the repository's
+          # secrets (Settings, Secrets and variables, Actions). Without
+          # them the AppImage builds fine and people set their own.
+          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
+          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
         run: bash packaging/build-appimage.sh
 
       - name: Smoke test
