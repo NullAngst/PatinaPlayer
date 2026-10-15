@@ -216,6 +216,9 @@ pub struct State {
     pub bookmarks: HashMap<String, u64>,
     /// Every call by method name, for checking what a sync asked for.
     pub calls: Vec<String>,
+    /// Plays reported (song id, submission), and stars (id, on).
+    pub reports: Vec<(String, bool)>,
+    pub stars: Vec<(String, bool)>,
     pub next_id: u32,
     pub tick: u64,
     /// Ampache: sessions die after this many calls (0: never).
@@ -343,6 +346,8 @@ pub fn library(gonic: bool) -> State {
         queue: None,
         bookmarks: HashMap::new(),
         calls: Vec::new(),
+        reports: Vec::new(),
+        stars: Vec::new(),
         next_id: 100,
         tick: 0,
         session_life: 0,
@@ -723,6 +728,17 @@ fn subsonic(
             let pos: u64 = r.get("position").and_then(|p| p.parse().ok()).unwrap_or(0);
             let id = r.get("id").unwrap_or("").to_string();
             s.bookmarks.insert(id, pos);
+            ok(flavor, json!({}))
+        }
+        "scrobble" => {
+            let id = r.get("id").unwrap_or("").to_string();
+            let sub = r.get("submission") != Some("false");
+            s.reports.push((id, sub));
+            ok(flavor, json!({}))
+        }
+        "star" | "unstar" => {
+            let id = r.get("id").unwrap_or("").to_string();
+            s.stars.push((id, method == "star"));
             ok(flavor, json!({}))
         }
         _ => fail(0, "unknown method"),

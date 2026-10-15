@@ -123,11 +123,91 @@ pub struct MixConfig {
     pub by_track: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastFmConfig {
-    /// For finding similar artists and songs when a server can't. Free
-    /// from last.fm/api/account/create.
+    /// Your own API key, in place of the built-in one (if this build has
+    /// one). Free from last.fm/api/account/create.
     pub api_key: String,
+    /// Its shared secret, which scrobbling signs with.
+    pub api_secret: String,
+    /// The Last.fm user linked. The session key is in the keyring.
+    pub user: String,
+    /// Scrobble at all. Linking turns it on.
+    pub scrobble: bool,
+    /// Scrobble radio from the stream's song titles. Station metadata is
+    /// often junk, so off by default.
+    pub scrobble_radio: bool,
+    /// Love also stars the song on its server.
+    pub love_stars: bool,
+    /// Per server: who tells Last.fm about its songs.
+    pub servers: std::collections::BTreeMap<String, ScrobbleMode>,
+}
+
+impl Default for LastFmConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            api_secret: String::new(),
+            user: String::new(),
+            scrobble: true,
+            scrobble_radio: false,
+            love_stars: false,
+            servers: Default::default(),
+        }
+    }
+}
+
+impl LastFmConfig {
+    pub fn mode(&self, server: &str) -> ScrobbleMode {
+        self.servers.get(server).copied().unwrap_or_default()
+    }
+}
+
+/// Who scrobbles a server's songs. Navidrome and others can pass plays on
+/// to Last.fm themselves when the player reports them; if both do it,
+/// every play counts twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrobbleMode {
+    /// The app scrobbles; the server isn't told (unless Last.fm isn't
+    /// linked here, when nothing can double up).
+    #[default]
+    App,
+    /// The server is told, and passes it on if it's set up to.
+    Server,
+    /// Both. Counts twice if the server also scrobbles.
+    Both,
+}
+
+impl ScrobbleMode {
+    pub const ALL: [ScrobbleMode; 3] =
+        [ScrobbleMode::App, ScrobbleMode::Server, ScrobbleMode::Both];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScrobbleMode::App => "app",
+            ScrobbleMode::Server => "server",
+            ScrobbleMode::Both => "both",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScrobbleMode::App => "This app scrobbles",
+            ScrobbleMode::Server => "The server scrobbles",
+            ScrobbleMode::Both => "Both (may count twice)",
+        }
+    }
+}
+
+impl std::str::FromStr for ScrobbleMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        ScrobbleMode::ALL
+            .into_iter()
+            .find(|m| m.as_str().eq_ignore_ascii_case(s.trim()))
+            .ok_or_else(|| format!("unknown \"{s}\" (app, server, both)"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -330,6 +410,12 @@ struct RawMixes {
 #[serde(deny_unknown_fields)]
 struct RawLastFm {
     api_key: Option<String>,
+    api_secret: Option<String>,
+    user: Option<String>,
+    scrobble: Option<bool>,
+    scrobble_radio: Option<bool>,
+    love_stars: Option<bool>,
+    servers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -516,13 +602,23 @@ impl Config {
                 }
             },
         };
+        let rlf = raw.lastfm.unwrap_or_default();
+        let mut modes = std::collections::BTreeMap::new();
+        for (name, m) in rlf.servers.unwrap_or_default() {
+            let mode = m
+                .parse::<ScrobbleMode>()
+                .map_err(|e| parse_err(format!("lastfm.servers.{name}: {e}")))?;
+            modes.insert(name, mode);
+        }
+        let t = |o: Option<String>| o.unwrap_or_default().trim().to_string();
         let lastfm = LastFmConfig {
-            api_key: raw
-                .lastfm
-                .and_then(|l| l.api_key)
-                .unwrap_or_default()
-                .trim()
-                .to_string(),
+            api_key: t(rlf.api_key),
+            api_secret: t(rlf.api_secret),
+            user: t(rlf.user),
+            scrobble: rlf.scrobble.unwrap_or(true),
+            scrobble_radio: rlf.scrobble_radio.unwrap_or(false),
+            love_stars: rlf.love_stars.unwrap_or(false),
+            servers: modes,
         };
         let rl = raw.leveling.unwrap_or_default();
         let dl = crate::level::LevelConfig::default();
@@ -767,10 +863,28 @@ bitrate = 192
 genre_match = "album"
 
 [lastfm]
-# An API key from last.fm/api/account/create (free). Artist and track
-# mixes ask Last.fm who's similar when your server doesn't know, and it's
-# the only way besides your genre tags for local folders. Optional.
+# Scrobbling, Now Playing and love. Link your account in Settings, Last.fm:
+# it opens Last.fm's approval page, and the session key goes in your
+# keyring, never here.
+# Your own API key and its secret (free from last.fm/api/account/create).
+# Builds from the project come with one; yours wins when set. Artist and
+# track mixes use the key too, to ask who's similar.
 api_key = ""
+api_secret = ""
+# The account linked. Settings fills this in.
+user = ""
+scrobble = true
+# Scrobble radio from the station's song titles ("Artist - Title"). Off by
+# default, since station metadata is often junk.
+scrobble_radio = false
+# Loving a server song also stars it on the server.
+love_stars = false
+
+# Per server, who tells Last.fm about its songs: app (the default), server
+# (if the server scrobbles for you, like Navidrome with its Last.fm agent),
+# or both, which counts every play twice if the server scrobbles too.
+# [lastfm.servers]
+# Home = "server"
 
 # Music servers: Subsonic (Navidrome, Gonic and the like) or Ampache. Add
 # them in Settings, which checks the login and keeps the password in your
@@ -877,6 +991,31 @@ pub fn set_eq(path: &Path, eq: &crate::eq::EqConfig) -> Result<bool, ConfigError
         }
         doc.insert("eq", item);
         Ok(doc.to_string() != before)
+    })
+}
+
+/// Who scrobbles one server's songs: `[lastfm.servers] name = "mode"`.
+pub fn set_scrobble_mode(
+    path: &Path,
+    server: &str,
+    mode: ScrobbleMode,
+) -> Result<bool, ConfigError> {
+    edit(path, |doc| {
+        let lf = table(doc, "lastfm")?;
+        let servers = lf
+            .entry("servers")
+            .or_insert(toml_edit::table())
+            .as_table_mut()
+            .ok_or("[lastfm.servers] is not a table")?;
+        let old = servers
+            .get(server)
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if old.as_deref() == Some(mode.as_str()) {
+            return Ok(false);
+        }
+        servers.insert(server, toml_edit::value(mode.as_str()));
+        Ok(true)
     })
 }
 

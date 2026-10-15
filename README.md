@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 10 of the build plan: everything from milestones 1 to 9 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, and volume leveling), plus the EQ and the true-peak limiter: a graphic EQ of 10, 15 or 31 bands, a parametric EQ of up to 20, presets, AutoEq and Equalizer APO imports, and an EQ of its own for each output device. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Last.fm scrobbling comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 11 of the build plan: everything from milestones 1 to 10 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, and the EQ and true-peak limiter), plus Last.fm: linking your account from Settings, Now Playing, scrobbling with an offline queue, love, and a choice per server of who scrobbles its songs, so nothing counts twice. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Output controls (device picker, sample rate modes, resampler, dither, crossfade) come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -44,6 +44,16 @@ This is milestone 10 of the build plan: everything from milestones 1 to 9 (the a
 - The bottom bar shows the gain on what's playing: `-4.2 dB`, `-6.0 dB?` while the song isn't measured yet, `~-9.1 dB` under the live normalizer. Click it in the desktop app for where it came from (the server, tags, or measured here).
 - Changes in Settings apply to the song playing too, within a couple of seconds, gliding to the new gain instead of jumping.
 - Bit-perfect skips leveling. With bit-perfect On, the leveling rows grey out and say why. Auto turns bit-perfect on only when leveling is Off, since leveling changes the sound.
+
+**Last.fm**
+- Link your account in Settings, under Last.fm: Link opens Last.fm's page in your browser, you approve PatinaPlayer there, and the app finishes on its own (it checks every few seconds for five minutes). The session key goes in your keyring, never config.toml. Unlink forgets it.
+- Now Playing goes out as a song starts. A song is scrobbled once you've listened to half of it or four minutes, whichever is first, and only if it's longer than 30 seconds: Last.fm's own rules. Seeking ahead doesn't count as listening.
+- Every scrobble goes into the library database first and leaves once Last.fm takes it. Offline, or with Last.fm down, they wait, and go out later in batches of 50, each with the time it was played. Settings shows how many are waiting.
+- If Last.fm stops accepting the session (you revoked the app on the site, say), it says so and the scrobbles wait for you to link again.
+- Love the song playing with `l` or the heart in the bottom bar. It's kept in the library and sent to Last.fm, and when a song starts, Last.fm is asked whether you'd already loved it. Love also stars it on the server, if you turn that on.
+- Who scrobbles a server's songs is set per server (Settings, Servers, `name: scrobbles`): this app (the default), the server, or both. Navidrome and others pass plays on to Last.fm themselves when the player reports them, so if yours does, pick the server, or every play counts twice. Picking both asks first, with that warning. When Last.fm isn't linked here, the server is always told, since nothing can double up, so the server's play counts keep going up.
+- Podcasts never scrobble. Radio can, from the station's song titles ("Artist - Title"), once a title has been on a minute; that's off by default, since station metadata is often junk.
+- A Last.fm API key and secret can be built in: the AppImage workflow takes them from the repository's `LASTFM_KEY` and `LASTFM_SECRET` secrets. Your own (free from last.fm/api/account/create) in Settings win over them. A source build without either needs your own to scrobble.
 
 **EQ**
 - An EQ view in the sidebar (`Ctrl+E` from anywhere, or click EQ in the bottom bar), with the response curve on top and every setting under it.
@@ -358,7 +368,15 @@ bitrate = 192            # kbps, for opus and mp3
 genre_match = "album"    # album (the album's tags) or track (each song's own)
 
 [lastfm]
-api_key = ""             # optional: for mixes when your server can't say who's similar
+api_key = ""             # your own key; empty uses the built-in one, if the build has it
+api_secret = ""          # its secret, which scrobbling signs with
+user = ""                # the account linked; Settings fills it in
+scrobble = true
+scrobble_radio = false   # from stream titles, once one's been on a minute
+love_stars = false       # love also stars the song on its server
+
+[lastfm.servers]         # who scrobbles each server's songs: app, server or both
+Home = "server"
 
 [[radio.station]]
 name = "Some Station"
@@ -394,7 +412,8 @@ Where everything else goes:
 | Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
 | EQ presets you saved or imported | `~/.config/patinaplayer/presets/eq/` |
 | Resized cover art, local and from servers | `~/.cache/patinaplayer/art/` |
-| Server passwords | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
+| Server passwords, the Last.fm session | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
+| Scrobbles waiting to be sent, loved songs | in the library index |
 
 The index lives in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists to that. The art cache and the song cache are safe to wipe. They refill as you play.
 
@@ -427,6 +446,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | X | Mix from the selection: an artist, album, song, or the marked genres |
 | M | Genres: mark a genre for a mix. Queue: save the mix playing |
 | q | Queue panel |
+| l | Love the song playing |
 | Ctrl+E | The EQ view |
 | . | Jump to the playing track in Queue |
 | F5 | Check folders for changes and refresh podcast feeds |
@@ -461,7 +481,8 @@ crates/
     src/level/          leveling: picking the gain, EBU R128 measuring, the live normalizer, the measuring thread
     src/dsp/            the real-time stages: biquad filters, the EQ as it runs, the true-peak limiter
     src/eq/             the EQ as you set it: graphic and parametric bands, presets, AutoEq and APO import
-    src/lastfm.rs       Last.fm, for now only for similar artists and songs
+    src/lastfm.rs       Last.fm calls: signing, linking, Now Playing, scrobbles, love, similar artists and songs
+    src/scrobble.rs     the Last.fm thread: linking, the scrobble queue, retries
     src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
     src/config.rs       config file and XDG paths
     src/player.rs       core thread: commands in, snapshots and events out
@@ -502,6 +523,8 @@ The DLNA tests run a stand-in media server that answers SSDP searches on a priva
 The leveling tests measure FFmpeg-made sine tones into a real index and play them through the player with a capturing output: two songs 6 dB apart come out level in Track mode and still 6 dB apart in Smart mode in album order, back to level on shuffle; an unknown song comes out 6 dB down; a podcast 12 dB too loud is ridden down to the target by the live normalizer. The cache test checks that songs landing in the cache from a stand-in Gonic get measured, and that a stand-in Navidrome's replayGain field is used as it is.
 
 The EQ tests play a 1 kHz tone through the player with a capturing output: a +6 dB band at 1 kHz comes out exactly twice as loud, a bypassed EQ comes out bit for bit, and a cut far away leaves it alone. The limiter test drives a tone 9 dB into the EQ and checks nothing passes -1 dBTP, that a lower ceiling holds, and that with the limiter off it's clipped at full scale rather than wrapped. Others drive the EQ view's rows, save and load presets, import AutoEq files, give the output its own EQ and check what config.toml holds after. One test runs against a real PipeWire with two outputs and switches the default between them; the CI starts a private PipeWire for it.
+
+The Last.fm tests run a stand-in Last.fm that checks every call's signature. They link through the approval page (waiting while it isn't approved yet), send scrobbles while it's down and check they arrive later in batches of 50 with their original times, drop a session it stops accepting while keeping the queue, love a song and ask if it's loved, and play a 32-second song in real time to see Now Playing at the start and the scrobble at the halfway mark, timed from when it started. Another checks, for each choice of who scrobbles, that a server song goes to Last.fm, to the stand-in Navidrome's scrobble endpoint, or both, exactly once each.
 
 To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
 
@@ -550,15 +573,16 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - Matching Last.fm's answers to your library goes by artist and title, exactly as tagged apart from case. "The Beatles" and "Beatles" don't match, and neither do titles with "(Remastered)" on one side.
 - The last 100 picks are remembered while the app runs, not between runs.
 - Genre mixes come from the index. Before a server's first sync finishes, its songs aren't in mixes yet.
-- A Last.fm API key goes in config.toml in the clear. It's an API key, not a password: it identifies the app, it can't touch your account. Scrobbling in milestone 11 needs a login, and that goes in the keyring.
+- A Last.fm API key and secret go in config.toml in the clear. They identify the app, not you: someone holding them can make calls as the app, never as your account. Your account's session key goes in the keyring.
+- Last.fm was tested here against the stand-in above, which follows Last.fm's API documents. This box can't reach Last.fm, so the first real link and scrobble are yours. The builds published from GitHub only have a built-in key if the repository's secrets are set; otherwise put your own in Settings.
+- Radio scrobbling was tested on its title parsing ("Artist - Title" in, anything else ignored), not end to end against a live station.
+- Ampache gets finished plays through its `record_play` call, which needs Ampache 5 or later; it has no Now Playing. DLNA servers can't be told about plays at all.
 - Server songs that aren't kept only play while the server can be reached.
-- Play counts from server songs count here, and the server's own counts are taken in at sync, but plays aren't reported back to the server yet. That comes with Last.fm in milestone 11, along with the choice of who scrobbles (the app, the server, or both) so a play isn't counted twice.
 - No ratings, lyrics or Favorites yet, and starring isn't synced. Those are milestone 14.
 - Folders for a server follow the paths the server reports. Navidrome makes those up from the tags (Artist/Album/01 - Title.flac) unless its `Subsonic.DefaultReportRealPath` option is on, so a Navidrome folder tree looks like that. Gonic reports the real paths. Ampache's are made relative to its catalog folder.
 - A tag edit on the server that leaves an album's song count, length and dates the same isn't seen by the half-hourly sync. Sync now in Settings reads every album and catches it.
 - Navidrome doesn't do podcasts, so its Podcasts view stays your own feeds. Gonic, Airsonic and Ampache share theirs. Only episodes the server has already downloaded are listed.
 - Ampache's API has no saved play queue, so Queue from only shows Subsonic servers.
-- Scrobbling radio titles comes with Last.fm in milestone 11, off by default since station metadata is often junk.
 - Podcast position at a sped-up or trimmed speed is tracked from markers the decoder sends a few times a second, so the saved spot can be off by a fraction of a second. Resume backs up five seconds anyway.
 - The radio and podcast code was tested against local servers, including a real HLS stream made by FFmpeg. It hasn't been run against live stations from here, since this build box has no general internet access. HTTPS streams go through FFmpeg's own TLS, so a source build needs an FFmpeg built with it (distro packages are). The AppImage's FFmpeg has GnuTLS.
 - inotify needs one watch per folder. A very large library can run past `fs.inotify.max_user_watches`. If it does, you'll see an error saying so, and raising the limit with `sysctl` fixes it.

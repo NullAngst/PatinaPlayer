@@ -375,25 +375,10 @@ impl Browser {
     pub(super) fn change_mix_setting(&mut self, key: &Key, new: &Control) -> Result<(), String> {
         let path = self.config_path.clone();
         let w = |r: Result<bool, config::ConfigError>| r.map(|_| ()).map_err(|e| e.to_string());
-        match (key, new) {
-            (Key::GenreMatch, Control::Choice { options, index }) => {
-                let v = &options[*index].0;
-                w(config::set_value(&path, "mixes", "genre_match", v.as_str()))?;
-                self.config.mixes.by_track = v == "track";
-            }
-            (Key::LastFmKey, Control::Text { value, .. }) => {
-                w(config::set_value(
-                    &path,
-                    "lastfm",
-                    "api_key",
-                    value.as_str(),
-                ))?;
-                self.config.lastfm.api_key = value.clone();
-                if let Some(svc) = &self.mixes {
-                    svc.set_lastfm_key(value);
-                }
-            }
-            _ => {}
+        if let (Key::GenreMatch, Control::Choice { options, index }) = (key, new) {
+            let v = &options[*index].0;
+            w(config::set_value(&path, "mixes", "genre_match", v.as_str()))?;
+            self.config.mixes.by_track = v == "track";
         }
         Ok(())
     }

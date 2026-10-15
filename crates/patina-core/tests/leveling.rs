@@ -331,7 +331,10 @@ fn settings_rows_and_bit_perfect() {
             false,
             &[],
             &[],
-            Some(false),
+            settings::Live {
+                measuring: Some(false),
+                lastfm: None,
+            },
         )
     };
     let lv: Vec<_> = rows(&cfg)

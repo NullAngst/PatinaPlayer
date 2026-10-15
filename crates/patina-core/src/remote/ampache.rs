@@ -755,6 +755,34 @@ impl Client for Ampache {
         )
         .map(|_| ())
     }
+
+    fn report_play(&self, id: &str, at: i64, submission: bool) -> Result<()> {
+        // Ampache has no "now playing" call; only finished plays count.
+        if !submission {
+            return Ok(());
+        }
+        self.get(
+            "record_play",
+            &[
+                ("id", id.into()),
+                ("client", super::CLIENT.into()),
+                ("date", at.to_string()),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn star(&self, id: &str, on: bool) -> Result<()> {
+        self.get(
+            "flag",
+            &[
+                ("type", "song".into()),
+                ("id", id.into()),
+                ("flag", if on { "1" } else { "0" }.into()),
+            ],
+        )
+        .map(|_| ())
+    }
 }
 
 #[cfg(test)]

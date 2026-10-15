@@ -47,6 +47,15 @@ pub enum Key {
     /// Genre mixes match album tags or each song's tags.
     GenreMatch,
     LastFmKey,
+    /// Link to Last.fm, or unlink.
+    LastFmLink,
+    LastFmSecret,
+    Scrobble,
+    ScrobbleRadio,
+    /// Love stars the song on its server too.
+    LoveStars,
+    /// Who scrobbles a server's songs.
+    ServerScrobble(String),
     LevelMode,
     /// Target loudness, LUFS.
     LevelTarget,
@@ -234,6 +243,15 @@ pub fn parse_stream(v: &str) -> (StreamFormat, Option<u32>) {
     (f.parse().unwrap_or_default(), k.parse().ok())
 }
 
+/// What the threads report that Settings shows.
+#[derive(Debug, Clone, Default)]
+pub struct Live {
+    /// A whole-library loudness run is going; None without the library.
+    pub measuring: Option<bool>,
+    /// Last.fm's status; None without the library.
+    pub lastfm: Option<crate::scrobble::ScrobbleStatus>,
+}
+
 /// Rows, grouped under headers, for the Settings view.
 pub fn rows(
     cfg: &Config,
@@ -242,8 +260,10 @@ pub fn rows(
     podcast_trim: bool,
     devices: &[HwDevice],
     servers: &[ServerStatus],
-    measuring: Option<bool>,
+    live: Live,
 ) -> Vec<(Option<&'static str>, Setting)> {
+    let Live { measuring, lastfm } = live;
+    let lastfm = lastfm.as_ref();
     let mut v: Vec<(Option<&'static str>, Setting)> = Vec::new();
     let mut push = |group: &'static str, s: Setting| v.push((Some(group), s));
 
@@ -338,6 +358,26 @@ pub fn rows(
                 ));
             }
             let index = options.iter().position(|o| o.0 == current).unwrap_or(0);
+            let mode = cfg.lastfm.mode(&sc.name);
+            push(
+                "Servers",
+                Setting {
+                    disabled: None,
+                    key: Key::ServerScrobble(sc.name.clone()),
+                    label: format!("{}: scrobbles", sc.name),
+                    help: "Who tells Last.fm about this server's songs. Pick the server if it scrobbles for you (Navidrome's Last.fm agent); both counts every play twice if it does.",
+                    control: Control::Choice {
+                        options: crate::config::ScrobbleMode::ALL
+                            .iter()
+                            .map(|m| (m.as_str().to_string(), m.label().to_string()))
+                            .collect(),
+                        index: crate::config::ScrobbleMode::ALL
+                            .iter()
+                            .position(|m| *m == mode)
+                            .unwrap_or(0),
+                    },
+                },
+            );
             push(
                 "Servers",
                 Setting {
@@ -486,17 +526,102 @@ pub fn rows(
                 },
             },
         );
+    }
+
+    // Last.fm
+    if let Some(st) = lastfm {
+        let lf = &cfg.lastfm;
+        let (label, action) = if !st.user.is_empty() {
+            (format!("Linked as {}", st.user), "Unlink")
+        } else if st.linking {
+            (
+                "Waiting for you to approve it on Last.fm".to_string(),
+                "Cancel",
+            )
+        } else {
+            ("Not linked".to_string(), "Link")
+        };
+        let mut label = label;
+        if st.waiting > 0 {
+            label.push_str(&format!(
+                " · {} scrobble{} waiting",
+                st.waiting,
+                if st.waiting == 1 { "" } else { "s" }
+            ));
+        }
         push(
-            "Mixes",
+            "Last.fm",
+            Setting {
+                disabled: None,
+                key: Key::LastFmLink,
+                label,
+                help: "Opens Last.fm's page to approve PatinaPlayer, and finishes on its own once you do. The session key goes in your keyring.",
+                control: Control::Action(action),
+            },
+        );
+        let has_builtin = crate::lastfm::builtin().0.is_some();
+        push(
+            "Last.fm",
             Setting {
                 disabled: None,
                 key: Key::LastFmKey,
-                label: "Last.fm API key".into(),
-                help: "Free from last.fm/api/account/create. Artist and track mixes ask Last.fm when your server can't say who's similar.",
+                label: "API key".into(),
+                help: "Your own, from last.fm/api/account/create (free). Mixes use it to ask who's similar, and scrobbling needs it with its secret.",
                 control: Control::Text {
-                    value: cfg.lastfm.api_key.clone(),
-                    empty: "not set: mixes use your genre tags",
+                    value: lf.api_key.clone(),
+                    empty: if has_builtin { "built in" } else { "not set" },
                 },
+            },
+        );
+        push(
+            "Last.fm",
+            Setting {
+                disabled: None,
+                key: Key::LastFmSecret,
+                label: "API secret".into(),
+                help: "The shared secret that came with your API key. Scrobbling signs its calls with it.",
+                control: Control::Text {
+                    value: if lf.api_secret.is_empty() {
+                        String::new()
+                    } else {
+                        "••••••••".into()
+                    },
+                    empty: if has_builtin && lf.api_key.is_empty() {
+                        "built in"
+                    } else {
+                        "not set"
+                    },
+                },
+            },
+        );
+        push(
+            "Last.fm",
+            Setting {
+                disabled: None,
+                key: Key::Scrobble,
+                label: "Scrobble".into(),
+                help: "Send plays to Last.fm: half a song or four minutes, whichever is first, for songs over 30 seconds. Podcasts never.",
+                control: Control::Toggle(lf.scrobble),
+            },
+        );
+        push(
+            "Last.fm",
+            Setting {
+                disabled: None,
+                key: Key::ScrobbleRadio,
+                label: "Scrobble radio".into(),
+                help: "From the station's song titles (\"Artist - Title\"), once a song has been on a minute. Station metadata is often junk.",
+                control: Control::Toggle(lf.scrobble_radio),
+            },
+        );
+        push(
+            "Last.fm",
+            Setting {
+                disabled: None,
+                key: Key::LoveStars,
+                label: "Love also stars it".into(),
+                help: "Loving a song from a server (l, or the heart) also stars it there.",
+                control: Control::Toggle(lf.love_stars),
             },
         );
     }

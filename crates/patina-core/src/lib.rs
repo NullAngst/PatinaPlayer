@@ -17,6 +17,7 @@ pub mod podcast;
 pub mod queue;
 pub mod radio;
 pub mod remote;
+pub mod scrobble;
 pub mod secrets;
 pub mod session;
 pub mod track;

@@ -371,6 +371,7 @@ impl App {
             KeyCode::Char('m') => p.send(Command::ToggleMute),
             KeyCode::Char('s') => p.send(Command::ToggleShuffle),
             KeyCode::Char('r') => p.send(Command::CycleRepeat),
+            KeyCode::Char('l') => self.b.toggle_love(),
             KeyCode::Char('q') => self.queue_panel = !self.queue_panel,
             KeyCode::Char('?') => self.modal = Modal::Help,
             KeyCode::Char('/') if self.b.lib.is_some() => {
@@ -712,7 +713,10 @@ impl App {
             (KeyCode::Enter, Some(st))
                 if matches!(
                     st.key,
-                    SettingKey::EqDevice | SettingKey::EqAddBand | SettingKey::EqDeletePreset
+                    SettingKey::EqDevice
+                        | SettingKey::EqAddBand
+                        | SettingKey::EqDeletePreset
+                        | SettingKey::LastFmLink
                 ) =>
             {
                 self.b.change_setting(&st.key, Change::Toggle);
@@ -753,12 +757,18 @@ impl App {
                     };
                 }
                 Control::Text { value, .. } => {
+                    // A secret is typed fresh, never shown.
+                    let buf = if st.key == SettingKey::LastFmSecret {
+                        String::new()
+                    } else {
+                        value.clone()
+                    };
                     self.modal = Modal::Input {
                         purpose: InputPurpose::SetValue {
                             key: st.key,
                             label: st.label,
                         },
-                        buf: value.clone(),
+                        buf,
                     };
                 }
                 Control::Action(_) if st.key == SettingKey::FindDlna => self.b.find_dlna(),

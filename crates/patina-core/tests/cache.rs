@@ -652,6 +652,7 @@ fn settings_keep_prefetch_inside_the_cache_and_views_pin_whole() {
         cache: Some(cache),
         mixes: None,
         level: None,
+        scrobble: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),

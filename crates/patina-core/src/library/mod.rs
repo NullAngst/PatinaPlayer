@@ -10,6 +10,7 @@ pub mod mixes;
 pub mod podcasts;
 pub mod scan;
 mod schema;
+pub mod scrobbles;
 pub mod service;
 pub mod tags;
 

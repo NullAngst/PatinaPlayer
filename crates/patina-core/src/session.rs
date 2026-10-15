@@ -191,9 +191,12 @@ impl Session {
         let mixes = if opts.no_library {
             None
         } else {
-            crate::mix::MixService::start(&db_path, &cfg.lastfm.api_key)
-                .map_err(|e| log::warn!("mixes are unavailable: {e}"))
-                .ok()
+            crate::mix::MixService::start(
+                &db_path,
+                &crate::lastfm::effective_key(&cfg.lastfm.api_key),
+            )
+            .map_err(|e| log::warn!("mixes are unavailable: {e}"))
+            .ok()
         };
         // Leveling: the decoder's own read connection for gains, and the
         // thread that measures songs with none.
@@ -206,6 +209,23 @@ impl Session {
                 .map_err(|e| log::warn!("leveling can't measure songs: {e}"))
                 .ok()
         };
+        // Last.fm: the scrobble queue lives in the library database.
+        let scrobble = if opts.no_library {
+            None
+        } else {
+            let c = &cfg.lastfm;
+            crate::scrobble::ScrobbleService::start(
+                &db_path,
+                crate::scrobble::LastFmSetup {
+                    key: crate::lastfm::effective_key(&c.api_key),
+                    secret: crate::lastfm::effective_secret(&c.api_key, &c.api_secret),
+                    user: c.user.clone(),
+                },
+                Arc::new(crate::secrets::Secrets::open()),
+            )
+            .map_err(|e| log::warn!("Last.fm is unavailable: {e}"))
+            .ok()
+        };
         let browser = Browser::new(Startup {
             player,
             lib,
@@ -215,6 +235,7 @@ impl Session {
             cache,
             mixes,
             level,
+            scrobble,
             config: cfg.clone(),
             settings_info: SettingsInfo {
                 config_path: config_path.clone(),

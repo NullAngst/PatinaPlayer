@@ -189,6 +189,7 @@ fn browser(f: &Fx, cfg: Config) -> Browser {
         cache: None,
         mixes: None,
         level: None,
+        scrobble: None,
         config: cfg,
         settings_info: SettingsInfo {
             config_path: f.config.clone(),

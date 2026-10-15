@@ -5,6 +5,7 @@
 
 mod downloads;
 pub mod eq;
+pub mod lastfm;
 mod leveling;
 mod mixes;
 pub mod model;
@@ -82,6 +83,8 @@ pub struct Startup {
     pub mixes: Option<crate::mix::MixService>,
     /// Loudness measuring for leveling. None without the library.
     pub level: Option<crate::level::LevelService>,
+    /// Last.fm. None without the library, which holds the scrobble queue.
+    pub scrobble: Option<crate::scrobble::ScrobbleService>,
     /// The config as loaded. Settings edits it, and the file, together.
     pub config: Config,
     pub settings_info: SettingsInfo,
@@ -96,6 +99,12 @@ pub struct Browser {
     pub cache: Option<crate::cache::CacheService>,
     pub mixes: Option<crate::mix::MixService>,
     pub level: Option<crate::level::LevelService>,
+    pub scrobble: Option<crate::scrobble::ScrobbleService>,
+    /// Whether the song playing is loved. None for no song, or radio.
+    pub loved_now: Option<bool>,
+    /// Love was clicked on this song, so Last.fm's earlier answer is stale.
+    love_by_hand: bool,
+    radio_song: Option<lastfm::RadioSong>,
     /// The EQ: what plays, presets, device links.
     pub eq: eq::EqState,
     /// The songs last handed to the measuring thread.
@@ -196,6 +205,10 @@ impl Browser {
             cache: s.cache,
             mixes: s.mixes,
             level: s.level,
+            scrobble: s.scrobble,
+            loved_now: None,
+            love_by_hand: false,
+            radio_song: None,
             eq: eq::EqState::new(
                 s.config.eq.clone(),
                 crate::eq::presets::Presets::new(
@@ -279,6 +292,8 @@ impl Browser {
                 queue_moved = true;
             }
         }
+        self.lastfm_events(&events);
+        self.poll_lastfm();
         self.poll_mixes();
         if queue_moved {
             self.feed_prefetch();
@@ -516,6 +531,7 @@ impl Browser {
                 podcast_tempo: self.podcast_tempo,
                 podcast_trim: self.podcast_trim,
                 measuring: self.measuring_library(),
+                lastfm: self.scrobble.as_ref().map(|s| s.status()),
             },
             stations: &self.stations,
             checks: &self.checks,
@@ -1267,6 +1283,15 @@ impl Browser {
     /// one: turning bit-perfect on takes the sound card away from other
     /// apps.
     pub fn setting_warning(&self, key: &Key, change: &Change) -> Option<&'static str> {
+        if let Key::ServerScrobble(_) = key {
+            let s = self.settings_row(key)?;
+            return match settings::stepped(&s.control, change)? {
+                Control::Choice { options, index } if options[index].0 == "both" => {
+                    Some(lastfm::BOTH_WARNING)
+                }
+                _ => None,
+            };
+        }
         if *key != Key::BitPerfect || self.config.output.bit_perfect != BitPerfect::Off {
             return None;
         }
@@ -1285,7 +1310,10 @@ impl Browser {
             self.podcast_trim,
             &self.devices,
             &self.servers,
-            self.measuring_library(),
+            settings::Live {
+                measuring: self.measuring_library(),
+                lastfm: self.scrobble.as_ref().map(|s| s.status()),
+            },
         )
         .into_iter()
         .map(|(_, s)| s)
@@ -1306,6 +1334,9 @@ impl Browser {
         }
         if *key == Key::MeasureLibrary {
             return self.toggle_measure_library();
+        }
+        if *key == Key::LastFmLink {
+            return self.lastfm_link();
         }
         let Some(new) = settings::stepped(&row.control, &change) else {
             return;
@@ -1393,7 +1424,16 @@ impl Browser {
                 (Key::PodcastTrim, Control::Toggle(on)) => {
                     self.set_podcast_playback(self.podcast_tempo, *on);
                 }
-                (Key::GenreMatch | Key::LastFmKey, _) => self.change_mix_setting(key, &new)?,
+                (Key::GenreMatch, _) => self.change_mix_setting(key, &new)?,
+                (
+                    Key::LastFmKey
+                    | Key::LastFmSecret
+                    | Key::Scrobble
+                    | Key::ScrobbleRadio
+                    | Key::LoveStars
+                    | Key::ServerScrobble(_),
+                    _,
+                ) => self.change_lastfm_setting(key, &new)?,
                 (Key::Limiter | Key::LimiterCeiling, _) => self.change_limiter(key, &new)?,
                 (
                     Key::LevelMode

@@ -824,6 +824,28 @@ impl Client for Subsonic {
         )
         .map(|_| ())
     }
+
+    fn report_play(&self, id: &str, at: i64, submission: bool) -> Result<()> {
+        self.call::<Value>(
+            "scrobble",
+            &[
+                ("id", id.into()),
+                ("time", (at * 1000).to_string()),
+                ("submission", submission.to_string()),
+            ],
+            "scrobble",
+        )
+        .map(|_| ())
+    }
+
+    fn star(&self, id: &str, on: bool) -> Result<()> {
+        self.call::<Value>(
+            if on { "star" } else { "unstar" },
+            &[("id", id.into())],
+            "star",
+        )
+        .map(|_| ())
+    }
 }
 
 #[cfg(test)]

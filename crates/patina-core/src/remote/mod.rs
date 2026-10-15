@@ -352,6 +352,18 @@ pub trait Client: Send + Sync {
     fn similar_artists(&self, _artist: &str, _count: usize) -> Result<Vec<String>> {
         Err(RemoteError::Unsupported("similar artists"))
     }
+
+    /// Tell the server a song was played (`submission`), or is playing
+    /// now. `at` is when it started, in Unix seconds. Servers set up to
+    /// pass plays on to Last.fm do that from here.
+    fn report_play(&self, _id: &str, _at: i64, _submission: bool) -> Result<()> {
+        Err(RemoteError::Unsupported("play reporting"))
+    }
+
+    /// Star or unstar a song (a favourite on the server).
+    fn star(&self, _id: &str, _on: bool) -> Result<()> {
+        Err(RemoteError::Unsupported("stars"))
+    }
 }
 
 /// Ids and names out of the similarity answers.

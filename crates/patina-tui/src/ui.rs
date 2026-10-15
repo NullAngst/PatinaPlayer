@@ -1396,6 +1396,11 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         PlayState::Stopped => ("■", Style::default().fg(t.wave_raw)),
     };
     let mut left = vec![Span::styled(format!(" {glyph} "), gstyle)];
+    match app.b.loved_now {
+        Some(true) => left.push(Span::styled("♥ ", Style::default().fg(t.copper))),
+        Some(false) => left.push(Span::styled("♡ ", Style::default().fg(t.wave_raw))),
+        None => {}
+    }
     match &s.track {
         Some(info) => {
             left.push(Span::styled(
@@ -1782,6 +1787,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (
             "Mouse",
             "Click, double-click to play, right-click back, drag bars",
+        ),
+        (
+            "l",
+            "Love the song playing (Last.fm, and a star on its server if set)",
         ),
         ("Ctrl+Q", "Quit"),
     ];

@@ -341,6 +341,13 @@ impl Browser {
             return self.error(format!("couldn't save the server: {e}"));
         }
         self.config.servers = list;
+        // Who scrobbles its songs follows a renamed server too.
+        if let Some(old) = replaces.as_ref().filter(|o| **o != cfg.name)
+            && let Some(m) = self.config.lastfm.servers.remove(old)
+        {
+            let _ = config::set_scrobble_mode(&self.config_path, &cfg.name, m);
+            self.config.lastfm.servers.insert(cfg.name.clone(), m);
+        }
         if let Some(c) = &self.cache {
             // Kept songs and pins follow a renamed server, before the old
             // name is forgotten.

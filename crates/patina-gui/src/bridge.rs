@@ -130,6 +130,7 @@ Delete       remove from the queue, the open playlist, or Settings;
 Enter        in Settings: flip, pick or edit the option
 [ ]  z       podcast speed, silence trimming
 q            queue panel
+l            love the song playing
 Ctrl+E       the EQ (o in it: on or bypassed)
 F5           check folders and feeds for changes
 Ctrl+Q       quit
@@ -435,6 +436,7 @@ impl State {
                     Control::Action(_) if st.key == SettingKey::FindDlna => (10, false),
                     Control::Action(_) if st.key == SettingKey::MeasureLibrary => (11, false),
                     Control::Action(_) if st.key.is_eq() => (11, false),
+                    Control::Action(_) if st.key == SettingKey::LastFmLink => (11, false),
                     Control::Action(_) => (6, false),
                     Control::Info(_) => (7, false),
                     Control::Server(_) => (8, false),
@@ -1594,6 +1596,7 @@ impl State {
             Control::Action(_) if st.key == SettingKey::FindDlna => "find-dlna",
             Control::Action(_) if st.key == SettingKey::MeasureLibrary => "measure",
             Control::Action(_) if st.key.is_eq() => "measure",
+            Control::Action(_) if st.key == SettingKey::LastFmLink => "measure",
             Control::Action(_) => "browse",
             Control::Server(_) => "sync",
             Control::Folder | Control::Info(_) => return,
@@ -1611,6 +1614,9 @@ impl State {
         let key = st.key.clone();
         if key == SettingKey::MeasureLibrary {
             return self.b.toggle_measure_library();
+        }
+        if key == SettingKey::LastFmLink {
+            return self.b.lastfm_link();
         }
         match key {
             SettingKey::EqSavePreset => return self.open_eq_save(ui),
@@ -1681,6 +1687,8 @@ impl State {
                     Control::Number { value, scale, .. } => {
                         format!("{:.1}", *value as f64 / *scale as f64)
                     }
+                    // A secret is typed fresh, never shown.
+                    Control::Text { .. } if key == SettingKey::LastFmSecret => String::new(),
                     Control::Text { value, .. } => value.clone(),
                     _ => return,
                 };
@@ -1765,6 +1773,11 @@ impl State {
     fn sync_eq_panel(&self, ui: &AppWindow) {
         let eq = self.b.eq_settings();
         ui.set_eq_lit(eq.on && !eq.is_flat());
+        ui.set_love_state(match self.b.loved_now {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        });
         let show = matches!(
             self.b.level().map(|l| &l.source),
             Some(Source::Section(Section::Eq))
@@ -2257,6 +2270,7 @@ impl State {
                 "m" => p.send(Command::ToggleMute),
                 "s" => p.send(Command::ToggleShuffle),
                 "r" => p.send(Command::CycleRepeat),
+                "l" => self.b.toggle_love(),
                 "q" => ui.set_queue_panel(!ui.get_queue_panel()),
                 "/" => {
                     let q = self.b.start_search();
@@ -2469,6 +2483,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
     on!(on_eq_point, |s, _u, i, x, g| s
         .eq_point(i as usize, x as f64, g as f64));
     on!(on_eq_chip, |s, _u| s.b.switch(Section::Eq));
+    on!(on_love_clicked, |s, _u| s.b.toggle_love());
     on!(on_level_clicked, |s, u| {
         let tip = u.get_level_tip().to_string();
         if !tip.is_empty() {

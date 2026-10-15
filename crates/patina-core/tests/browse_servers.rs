@@ -45,6 +45,7 @@ fn setup() -> Setup {
         cache: None,
         mixes: None,
         level: None,
+        scrobble: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),

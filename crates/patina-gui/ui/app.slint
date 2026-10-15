@@ -1170,6 +1170,9 @@ export component AppWindow inherits Window {
     // Now playing
     in property <string> np-title;
     in property <string> np-sub;
+    // Love on the song playing: 0 none (no song, radio), 1 not loved, 2 loved.
+    in property <int> love-state;
+    callback love-clicked;
     in property <image> np-art;
     in property <bool> np-has-art;
     in property <bool> playing;
@@ -2040,6 +2043,13 @@ export component AppWindow inherits Window {
                                 font-size: 11.5px;
                                 color: root.status-warn ? P.copper : P.verdigris;
                             }
+                        }
+                        if root.love-state > 0: IconButton {
+                            y: (parent.height - self.height) / 2;
+                            icon: Icons.heart;
+                            tip: root.love-state == 2 ? "Loved (l)" : "Love (l)";
+                            active: root.love-state == 2;
+                            clicked => { root.love-clicked(); keys.focus(); }
                         }
                     }
 

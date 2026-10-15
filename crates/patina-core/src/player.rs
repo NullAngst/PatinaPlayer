@@ -129,6 +129,13 @@ pub enum Event {
     NowPlaying(String),
     /// A track was listened to long enough to count as a play.
     Played(PathBuf),
+    /// A song listened to long enough to scrobble: half of it or four
+    /// minutes, and longer than 30 seconds. Never a podcast or radio.
+    /// `started` is when it began, Unix seconds.
+    Scrobble {
+        info: Box<TrackInfo>,
+        started: i64,
+    },
 }
 
 /// What the frontends draw. Cloned out on every read; it's small.
@@ -1006,6 +1013,17 @@ impl Core {
             // After the hook, so anything that reloads on this event sees
             // the new count.
             self.emit(Event::Played(info.path.clone()));
+            let long_enough = info.duration.is_none_or(|d| d > Duration::from_secs(30));
+            if info.kind == crate::track::MediaKind::File && long_enough {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                self.emit(Event::Scrobble {
+                    info: Box::new(info.clone()),
+                    started: now - pos.as_secs() as i64,
+                });
+            }
         }
     }
 

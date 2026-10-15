@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 6;
+pub const VERSION: i64 = 7;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -226,6 +226,29 @@ CREATE TABLE loudness (
 );
 "#;
 
+/// Last.fm: scrobbles waiting to be sent (offline, or Last.fm down), with
+/// the time each play started, and the songs you love.
+const V7: &str = r#"
+CREATE TABLE scrobbles (
+    id            INTEGER PRIMARY KEY,
+    artist        TEXT NOT NULL,
+    track         TEXT NOT NULL,
+    album         TEXT,
+    album_artist  TEXT,
+    track_no      INTEGER,
+    duration      INTEGER,
+    played_at     INTEGER NOT NULL,     -- when the play started, Unix seconds
+    tries         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE loves (
+    artist      TEXT NOT NULL COLLATE NOCASE,
+    track       TEXT NOT NULL COLLATE NOCASE,
+    loved_at    INTEGER NOT NULL,
+    PRIMARY KEY (artist, track)
+);
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -257,6 +280,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 6 {
         tx.execute_batch(V6)?;
+    }
+    if current < 7 {
+        tx.execute_batch(V7)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()
