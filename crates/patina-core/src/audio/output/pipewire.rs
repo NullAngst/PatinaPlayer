@@ -6,6 +6,7 @@
 //! the ALSA hw path earns that badge.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
@@ -23,6 +24,16 @@ pub struct PwOutput {
     thread: Option<JoinHandle<()>>,
     error: Arc<Mutex<Option<String>>>,
     target: Option<String>,
+    sinks: Arc<Mutex<Sinks>>,
+}
+
+/// What the graph says about where sound goes: the default sink (which
+/// follows the device you pick in Plasma or GNOME, and so where this
+/// stream plays when no device is set), and every sink's description.
+#[derive(Debug, Default)]
+struct Sinks {
+    default: Option<String>,
+    names: HashMap<String, String>,
 }
 
 type StartResult = Result<(), (String, Option<Renderer>)>;
@@ -43,12 +54,14 @@ impl PwOutput {
         let (quit_tx, quit_rx) = pw::channel::channel::<()>();
         let error = Arc::new(Mutex::new(None));
         let error2 = error.clone();
+        let sinks = Arc::new(Mutex::new(Sinks::default()));
+        let sinks2 = sinks.clone();
         let cfg2 = cfg.clone();
         // The renderer goes to the PipeWire thread and comes back through
         // the ready channel if startup fails.
         let thread = std::thread::Builder::new()
             .name("patina-pw-main".into())
-            .spawn(move || run(cfg2, renderer, ready_tx, quit_rx, error2))
+            .spawn(move || run(cfg2, renderer, ready_tx, quit_rx, error2, sinks2))
             .expect("spawn PipeWire thread");
 
         match ready_rx.recv() {
@@ -57,6 +70,7 @@ impl PwOutput {
                 thread: Some(thread),
                 error,
                 target: cfg.device.clone(),
+                sinks,
             }),
             Ok(Err((msg, renderer))) => {
                 let _ = thread.join();
@@ -76,6 +90,7 @@ fn run(
     ready: mpsc::Sender<StartResult>,
     quit: pw::channel::Receiver<()>,
     error: Arc<Mutex<Option<String>>>,
+    sinks: Arc<Mutex<Sinks>>,
 ) {
     pw::init();
     let fmt = renderer.format();
@@ -97,6 +112,61 @@ fn run(
         Ok(c) => c,
         Err(e) => return fail(format!("can't reach the PipeWire daemon ({e})"), &slot),
     };
+
+    // Follow the default sink and the sinks' names, for per-device EQ.
+    // Failing here costs only that, never playback.
+    let registry = core.get_registry_rc().ok();
+    let held: Rc<RefCell<Vec<Box<dyn std::any::Any>>>> = Rc::new(RefCell::new(Vec::new()));
+    let _reg_listener = registry.as_ref().map(|reg| {
+        let reg2 = reg.clone();
+        let held2 = held.clone();
+        let sinks_g = sinks.clone();
+        reg.add_listener_local()
+            .global(move |g| {
+                let props = g.props;
+                match g.type_ {
+                    pw::types::ObjectType::Node => {
+                        let Some(p) = props else { return };
+                        if p.get("media.class") != Some("Audio/Sink") {
+                            return;
+                        }
+                        if let Some(name) = p.get("node.name") {
+                            let desc = p
+                                .get("node.description")
+                                .or_else(|| p.get("node.nick"))
+                                .unwrap_or(name);
+                            sinks_g
+                                .lock()
+                                .unwrap()
+                                .names
+                                .insert(name.to_string(), desc.to_string());
+                        }
+                    }
+                    pw::types::ObjectType::Metadata => {
+                        if props.and_then(|p| p.get("metadata.name")) != Some("default") {
+                            return;
+                        }
+                        let Ok(md) = reg2.bind::<pw::metadata::Metadata, _>(g) else {
+                            return;
+                        };
+                        let sinks_m = sinks_g.clone();
+                        let l = md
+                            .add_listener_local()
+                            .property(move |_subject, key, _type, value| {
+                                if key == Some("default.audio.sink") {
+                                    sinks_m.lock().unwrap().default = value.and_then(sink_name);
+                                }
+                                0
+                            })
+                            .register();
+                        held2.borrow_mut().push(Box::new(l));
+                        held2.borrow_mut().push(Box::new(md));
+                    }
+                    _ => {}
+                }
+            })
+            .register()
+    });
 
     let mut props = pw::properties::PropertiesBox::new();
     props.insert(*pw::keys::MEDIA_TYPE, "Audio");
@@ -215,6 +285,15 @@ fn run(
     let _ = stream.disconnect();
 }
 
+/// The sink name out of a metadata value like `{ "name": "alsa_output..." }`.
+fn sink_name(v: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(v)
+        .ok()?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// FFmpeg AV_CH_* bit order mapped to SPA channel positions.
 fn positions(mask: u64, channels: u16) -> [u32; spa::param::audio::MAX_CHANNELS] {
     const MAP: [u32; 18] = [
@@ -268,6 +347,12 @@ impl Output for PwOutput {
     }
     fn error(&self) -> Option<String> {
         self.error.lock().unwrap().clone()
+    }
+    fn device(&self) -> Option<crate::eq::OutputDevice> {
+        let s = self.sinks.lock().unwrap();
+        let key = self.target.clone().or_else(|| s.default.clone())?;
+        let name = s.names.get(&key).cloned().unwrap_or_else(|| key.clone());
+        Some(crate::eq::OutputDevice { key, name })
     }
 }
 

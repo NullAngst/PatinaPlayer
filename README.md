@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 9 of the build plan: everything from milestones 1 to 8 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, and mixes), plus volume leveling: ReplayGain from your server or your tags, EBU R128 measurement for songs that have neither, and a live normalizer for radio and podcasts. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The EQ comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 10 of the build plan: everything from milestones 1 to 9 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, and volume leveling), plus the EQ and the true-peak limiter: a graphic EQ of 10, 15 or 31 bands, a parametric EQ of up to 20, presets, AutoEq and Equalizer APO imports, and an EQ of its own for each output device. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Last.fm scrobbling comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -38,12 +38,33 @@ This is milestone 9 of the build plan: everything from milestones 1 to 8 (the au
 - A server song is measured from its cached file, so nothing is downloaded twice. That file is checked for ReplayGain tags first, since some servers (Gonic, for one) don't pass them on.
 - An album with no album gain in its tags gets one worked out from its songs once every song on it is known.
 - A song nothing is known about yet plays at -6 dB (Gain before measuring, in Settings), and plays at its measured gain from the next time on. Since prefetch downloads and measures ahead, that's mostly the first song you play.
-- Keep peaks from clipping (on by default) holds a song's gain down so its loudest peak stays under full scale. It matters when you raise the target.
+- Keep peaks from clipping (on by default) holds a song's gain down so its loudest peak stays under full scale. It matters when you raise the target. The limiter catches whatever's left.
 - The live normalizer follows the sound as it plays: the last 3 seconds of loudness, moving the gain about a dB a second (faster for the first few seconds), holding still through silence. It's on for radio and podcasts, which can't be measured ahead of time, and off for music, since a measured gain sounds better. Turn it on for music and it takes over for songs that aren't measured yet, instead of the fixed -6 dB.
 - The gain switches at the exact sample where one song becomes the next, so gapless albums stay gapless. A test plays a FLAC cut into three parts with leveling on and checks the output is the original, scaled, sample for sample.
 - The bottom bar shows the gain on what's playing: `-4.2 dB`, `-6.0 dB?` while the song isn't measured yet, `~-9.1 dB` under the live normalizer. Click it in the desktop app for where it came from (the server, tags, or measured here).
 - Changes in Settings apply to the song playing too, within a couple of seconds, gliding to the new gain instead of jumping.
 - Bit-perfect skips leveling. With bit-perfect On, the leveling rows grey out and say why. Auto turns bit-perfect on only when leveling is Off, since leveling changes the sound.
+
+**EQ**
+- An EQ view in the sidebar (`Ctrl+E` from anywhere, or click EQ in the bottom bar), with the response curve on top and every setting under it.
+- Graphic mode: 10 bands an octave apart (31 Hz to 16 kHz), or 15 (two-thirds octaves) or 31 (third octaves), ±12 dB each. Switching between them keeps the curve. In the desktop app, drag a band up or down on the curve; in the TUI, `h` and `l` move the selected band half a dB, or Enter and type a value.
+- Parametric mode: up to 20 bands, each a peak, low shelf, high shelf, low pass, high pass or notch, with its own frequency, gain and Q. Drag a band's dot anywhere on the curve in the desktop app. In the TUI, type a band the way AutoEq writes them (`PK 105 Hz 6.7 dB Q 0.7`, or just `LS 100 4`), `h`/`l` move its gain, `H`/`L` its frequency, `d` removes it.
+- The curve is drawn from the same filter coefficients that play, so where neighbouring bands overlap and add up, you see that too.
+- Preamp, plus an auto preamp (on by default) that takes the biggest boost off, so the EQ can't push the sound into the limiter. The row says how much it's taking off right now.
+- On and bypassed is one switch (`o` in the TUI, the On chip on the curve) for quick A/B. It glides over 20 ms, so it doesn't click.
+- Presets: Flat and a dozen built-in genre curves as starting points, and your own. Save as keeps what you have under a name, as a TOML file in `~/.config/patinaplayer/presets/eq/`, easy to copy or share. A preset you've changed shows as "Rock (changed)".
+- Import takes an AutoEq ParametricEQ.txt or GraphicEQ.txt, or an Equalizer APO config. Parametric filters come in exactly, with AutoEq's preamp. A GraphicEQ curve (hundreds of points) is fitted to the 31-band graphic EQ. The import becomes a preset named after the file ("Sennheiser HD 650 ParametricEQ.txt" is "Sennheiser HD 650"). Whatever APO does that this EQ can't (per-channel filters, includes) is skipped, and a note says so.
+- Per-device EQ: on the Device row, Keep this EQ for it gives the device playing now an EQ of its own, saved as a preset named after it. From then on, whenever the sound goes to that device, its EQ comes back; every other device gets your usual EQ. Changes you make while it plays are saved to its preset. On PipeWire this follows the default output, so switching from headphones to speakers in Plasma's volume applet switches the EQ with it, mid-song. With a device set in Settings, or on ALSA, it goes by that device.
+- Changes are heard within one output block (a few milliseconds) and saved half a second after you stop, to `[eq]` in config.toml.
+- The bottom bar's EQ chip is lit while the EQ is on and changing something.
+
+**Limiter**
+- A true-peak limiter last in the chain, after the EQ and the volume, so EQ boosts and leveling never clip. On by default, with a -1 dBTP ceiling (Settings, Limiter).
+- It catches peaks between samples too, the ones a DAC's reconstruction filter makes, by looking at the signal 4x oversampled.
+- It looks 2 ms ahead in the buffer, so it's already down when a peak arrives, and lets go over about a tenth of a second. Looking ahead adds no delay: it reads further into audio that's already decoded.
+- Below the ceiling it doesn't touch a single sample. The gapless test plays through it and still matches the source bit for bit.
+- While it's working, the bottom bar shows how much it's taking off (`LIM -2.2 dB`, in copper), held for a moment so you can see it.
+- Bit-perfect playback skips it, along with everything else.
 
 **Cache and offline**
 - Server songs are kept on disk in three ways. Prefetch downloads the songs coming up in the queue, nearest first. The cache keeps what you've played, so a replay doesn't hit the server, and drops the least recently played songs once it's full. Pinned songs stay until you unpin them.
@@ -100,8 +121,8 @@ This is milestone 9 of the build plan: everything from milestones 1 to 8 (the au
 - The bottom bar shows BIT-PERFECT while it's happening. NOT BIT-PERFECT in copper means it was refused; click it for the reason. EXCLUSIVE means a lossy source (MP3, AAC) going out untouched as integers, which is as good as it gets for those.
 - Volume goes to the DAC's own volume control if it has one. If it doesn't, volume is fixed at 100% and the slider greys out. Mute still mutes.
 - Radio and podcasts never play bit-perfect. Radio isn't a file, and a sped-up podcast is processed by definition.
-- Auto mode means "bit-perfect whenever nothing would change the sound". With leveling on (the default), that's never, so Auto is for people who set leveling to Off. There's no EQ yet.
-- With bit-perfect On, leveling is skipped and its settings grey out.
+- Auto mode means "bit-perfect whenever nothing would change the sound": leveling Off, and the EQ bypassed or flat. With leveling on (the default), that's never, so Auto is for people who set leveling to Off.
+- With bit-perfect On, leveling, the EQ and the limiter are skipped, and the leveling and EQ settings grey out with the reason.
 - Pick the card under Bit-perfect device. The list comes from ALSA when you open Settings, so a USB DAC you just plugged in shows up.
 
 **Settings**
@@ -302,6 +323,23 @@ clip_guard = true        # keep the gain under the song's peak
 live_music = false       # the live normalizer for unmeasured music
 live_radio = true        # the live normalizer for radio and podcasts
 
+[limiter]
+on = true                # the true-peak limiter, last in the chain
+ceiling_db = -1.0        # -6 to 0 dBTP
+
+[eq]                     # the app writes this table; the EQ view is easier
+on = true
+mode = "parametric"      # graphic or parametric
+graphic_bands = 10       # 10, 15 or 31
+graphic = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+preamp = -6.4
+auto_preamp = false
+preset = "Sennheiser HD 650"
+parametric = [{ type = "lowshelf", freq = 105.0, gain = 6.7, q = 0.7 }]
+
+[eq.devices]             # output device to the preset it gets
+"alsa_output.usb-Sennheiser-00.analog-stereo" = "HD 650"
+
 [podcasts]
 feeds = ["https://example.com/feed.xml"]
 speed = 1.0              # 0.5 to 3, podcasts only
@@ -354,6 +392,7 @@ Where everything else goes:
 | Downloaded podcast episodes | `~/.local/share/patinaplayer/offline/podcasts/` |
 | Songs pinned for offline | `~/.local/share/patinaplayer/offline/tracks/` |
 | Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
+| EQ presets you saved or imported | `~/.config/patinaplayer/presets/eq/` |
 | Resized cover art, local and from servers | `~/.cache/patinaplayer/art/` |
 | Server passwords | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
 
@@ -388,6 +427,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | X | Mix from the selection: an artist, album, song, or the marked genres |
 | M | Genres: mark a genre for a mix. Queue: save the mix playing |
 | q | Queue panel |
+| Ctrl+E | The EQ view |
 | . | Jump to the playing track in Queue |
 | F5 | Check folders for changes and refresh podcast feeds |
 | ? | Help |
@@ -395,7 +435,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
 
-In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`. In Downloads: Enter opens a pinned item, `w` pauses or resumes a download, `x` cancels it or unpins, `W` pauses all downloads, `C` clears the cache.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`. In the EQ: Enter flips, cycles or edits, `h`/`l` move a band half a dB, `H`/`L` move a parametric band's frequency, `o` turns the EQ on or off, `d` removes a parametric band. In Downloads: Enter opens a pinned item, `w` pauses or resumes a download, `x` cancels it or unpins, `W` pauses all downloads, `C` clears the cache.
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
@@ -419,6 +459,8 @@ crates/
     src/cache/          the song cache: downloads, reading a song while it downloads, prefetch, pins, eviction
     src/mix.rs          genre, artist and track mixes, and who's similar
     src/level/          leveling: picking the gain, EBU R128 measuring, the live normalizer, the measuring thread
+    src/dsp/            the real-time stages: biquad filters, the EQ as it runs, the true-peak limiter
+    src/eq/             the EQ as you set it: graphic and parametric bands, presets, AutoEq and APO import
     src/lastfm.rs       Last.fm, for now only for similar artists and songs
     src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
     src/config.rs       config file and XDG paths
@@ -459,6 +501,8 @@ The DLNA tests run a stand-in media server that answers SSDP searches on a priva
 
 The leveling tests measure FFmpeg-made sine tones into a real index and play them through the player with a capturing output: two songs 6 dB apart come out level in Track mode and still 6 dB apart in Smart mode in album order, back to level on shuffle; an unknown song comes out 6 dB down; a podcast 12 dB too loud is ridden down to the target by the live normalizer. The cache test checks that songs landing in the cache from a stand-in Gonic get measured, and that a stand-in Navidrome's replayGain field is used as it is.
 
+The EQ tests play a 1 kHz tone through the player with a capturing output: a +6 dB band at 1 kHz comes out exactly twice as loud, a bypassed EQ comes out bit for bit, and a cut far away leaves it alone. The limiter test drives a tone 9 dB into the EQ and checks nothing passes -1 dBTP, that a lower ceiling holds, and that with the limiter off it's clipped at full scale rather than wrapped. Others drive the EQ view's rows, save and load presets, import AutoEq files, give the output its own EQ and check what config.toml holds after. One test runs against a real PipeWire with two outputs and switches the default between them; the CI starts a private PipeWire for it.
+
 To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
 
 The network tests run a small HTTP server inside the test itself: an ICY stream that hangs up on purpose to check reconnects, a `.pls` with a dead first mirror, real HLS segments, an RSS feed, and a download that breaks halfway to check resume. No internet needed.
@@ -478,7 +522,11 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - When the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 12.
 - Built from source the normal way, both binaries link your system's FFmpeg, PipeWire and ALSA. The AppImage links its own FFmpeg in.
 - 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
-- There's no true-peak limiter yet. Keep peaks from clipping uses each song's stored peak, which covers ReplayGain the way it's meant to work, but with it turned off and a high target, a loud song can clip, and the live normalizer has no peak to go by. Until the limiter lands with the EQ in milestone 10, anything over full scale is hard-clipped.
+- Graphic bands are peak filters, and neighbours overlap, so two adjacent bands at +6 dB make a bump a little over 6 dB between them. The curve shows what you get. Imports fitted to the 31-band EQ come within about a dB of the AutoEq curve in the tests, and a curve past ±12 dB stops at 12.
+- The EQ's filters are recalculated on every change and keep their memory, without a crossfade between old and new settings. A very fast drag of a big boost can make a faint zipper sound while you drag. Bypass and on do crossfade.
+- Per-device EQ was tested here against a real PipeWire 1.0 with two stand-in outputs (null sinks), switching the default between them, and the CI runs the same. It hasn't met real headphones, Bluetooth or HDMI outputs from this box. Bluetooth headsets that change profile (A2DP to headset mode) show up as a different device, so they'd want an EQ each.
+- The limiter's oversampling uses an 8-tap interpolator. Peaks between samples are caught to within a few tenths of a dB at the very top of the audio band; the samples themselves never go over the ceiling.
+- The GUI's Import button uses the desktop's file picker. Without one (no xdg-desktop-portal), it asks for the file's path instead.
 - An album gain worked out from measured songs averages their loudness by energy, weighted by length. That's the R128 album figure without the gating across songs, so on an album with long near-silent stretches it can differ from a tagger's by a few tenths of a dB. Album gains in tags are used as they are.
 - Opus files tagged with R128_TRACK_GAIN (opusgain style) and no REPLAYGAIN tags get measured rather than read.
 - A song that changed on disk (a new size) is measured again. A server song that changed on the server keeps its old measurement until its cached copy is dropped and fetched again.

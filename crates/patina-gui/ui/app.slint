@@ -166,6 +166,15 @@ export struct QueueRow {
     has-art: bool,
 }
 
+// One EQ band as the EQ panel draws it.
+export struct EqBand {
+    // Across the graph, 0 to 1 (20 Hz to 20 kHz on a log scale).
+    x: float,
+    gain: float,
+    label: string,
+    has-gain: bool,
+}
+
 export struct Hero {
     show: bool,
     kicker: string,
@@ -215,6 +224,7 @@ export global Icons {
     out property <string> podcasts: "M12 3a3 3 0 0 0 -3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0 -3 -3M5 11a7 7 0 0 0 14 0M12 18v3";
     out property <string> queue: "M3 7h18M3 12h18M3 17h12";
     out property <string> downloads: "M12 3v12M7 10l5 5 5-5M4 20h16";
+    out property <string> eq: "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6";
     out property <string> settings: "M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1";
     out property <string> back: "M15 6l-6 6 6 6";
     out property <string> forward: "M9 6l6 6-6 6";
@@ -973,6 +983,115 @@ component AlbumTile inherits Rectangle {
 
 // ----- Main window -----
 
+
+// The EQ's response curve, with a handle per band. Graphic bands drag up
+// and down; parametric ones drag anywhere (frequency and gain).
+component EqPanel inherits Rectangle {
+    in property <string> curve;
+    in property <[EqBand]> bands;
+    in property <float> range: 12;
+    in property <bool> on;
+    in property <bool> graphic;
+    in property <string> info;
+    callback point(int, float, float);
+    callback act(string);
+    border-radius: 8px * P.round;
+    background: P.surface;
+    border-width: 1px;
+    border-color: P.border;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.info;
+                font-size: 12.5px;
+                color: P.muted;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Chip { h: 28px; text: root.on ? "On" : "Bypassed"; active: root.on; clicked => { root.act("eq-toggle"); } }
+            Chip { h: 28px; text: "Flat"; clicked => { root.act("eq-flat"); } }
+            Chip { h: 28px; text: "Import…"; clicked => { root.act("eq-import"); } }
+            Chip { h: 28px; text: "Save as…"; clicked => { root.act("eq-save"); } }
+        }
+        graph := Rectangle {
+            vertical-stretch: 1;
+            min-height: 150px;
+            clip: true;
+            // Grid: 100 Hz, 1 kHz, 10 kHz, and 0 dB.
+            // log10(f / 20) / 3 across: 100 Hz, 1 kHz, 10 kHz.
+            for f in [0.233, 0.566, 0.899]: Rectangle {
+                x: parent.width * f;
+                width: 1px;
+                background: P.border;
+            }
+            Rectangle { y: parent.height / 2; height: 1px; background: P.wave; }
+            Text { x: 4px; y: 2px; text: "+" + round(root.range) + " dB"; font-size: 10.5px; color: P.muted; }
+            Text { x: 4px; y: parent.height - 14px; text: "-" + round(root.range) + " dB"; font-size: 10.5px; color: P.muted; }
+            Text { x: parent.width * 0.233 + 3px; y: 2px; text: "100 Hz"; font-size: 10.5px; color: P.muted; }
+            Text { x: parent.width * 0.566 + 3px; y: 2px; text: "1 kHz"; font-size: 10.5px; color: P.muted; }
+            Text { x: parent.width * 0.899 + 3px; y: 2px; text: "10 kHz"; font-size: 10.5px; color: P.muted; }
+            Path {
+                width: parent.width;
+                height: parent.height;
+                viewbox-width: 1000;
+                viewbox-height: 200;
+                commands: root.curve;
+                stroke: root.on ? (P.kawaii ? P.mint : P.verdigris) : P.wave;
+                stroke-width: 2px;
+            }
+            for b[i] in root.bands: Rectangle {
+                // Graphic: the whole column is the slider.
+                x: root.graphic ? parent.width * b.x - (parent.width / root.bands.length) / 2 : parent.width * b.x - 9px;
+                y: root.graphic ? 0px : parent.height * (0.5 - b.gain / (2 * root.range)) - 9px;
+                width: root.graphic ? parent.width / root.bands.length : 18px;
+                height: root.graphic ? parent.height : 18px;
+                Rectangle {
+                    x: (parent.width - 12px) / 2;
+                    y: root.graphic ? parent.height * (0.5 - b.gain / (2 * root.range)) - 6px : 3px;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 6px;
+                    background: ta.pressed || ta.has-hover ? P.copper : (root.on ? P.verdigris : P.wave);
+                    border-width: 2px;
+                    border-color: P.surface;
+                }
+                if root.graphic: Text {
+                    y: parent.height - 28px;
+                    width: parent.width;
+                    horizontal-alignment: center;
+                    text: b.label;
+                    font-size: 10px;
+                    color: P.muted;
+                    visible: root.bands.length <= 15 || mod(i, 2) == 0;
+                }
+                ta := TouchArea {
+                    mouse-cursor: root.graphic ? ns-resize : move;
+                    // Where the pointer is on the graph, as frequency
+                    // (0 to 1 across) and gain.
+                    function at(mx: length, my: length) {
+                        root.point(
+                            i,
+                            max(0, min(1, (parent.x + mx) / graph.width)),
+                            max(-root.range, min(root.range, (0.5 - (parent.y + my) / graph.height) * 2 * root.range)));
+                    }
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                            self.at(self.mouse-x, self.mouse-y);
+                        }
+                    }
+                    moved => {
+                        if self.pressed { self.at(self.mouse-x, self.mouse-y); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "PatinaPlayer";
     icon: @image-url("../../../assets/patinaplayer.png");
@@ -1066,6 +1185,18 @@ export component AppWindow inherits Window {
     in property <string> bp-tip;
     callback bp-clicked;
     // The leveling gain on what's playing ("-4.2 dB"), and where it's from.
+    // The EQ view's panel, and the bottom bar's EQ and limiter chips.
+    in property <bool> eq-panel;
+    in property <string> eq-curve;
+    in property <[EqBand]> eq-bands;
+    in property <float> eq-range: 12;
+    in property <bool> eq-on;
+    in property <bool> eq-graphic;
+    in property <string> eq-info;
+    callback eq-point(int, float, float);
+    in property <bool> eq-lit;
+    in property <string> limit-label;
+    callback eq-chip;
     in property <string> level-label;
     in property <string> level-tip;
     callback level-clicked;
@@ -1592,6 +1723,19 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            if root.eq-panel: EqPanel {
+                                height: 280px;
+                                curve: root.eq-curve;
+                                bands: root.eq-bands;
+                                range: root.eq-range;
+                                on: root.eq-on;
+                                graphic: root.eq-graphic;
+                                info: root.eq-info;
+                                point(i, x, g) => { root.eq-point(i, x, g); }
+                                act(a) => { root.view-action(a); keys.focus(); }
+                            }
+                            if root.eq-panel: Rectangle { height: 12px; }
+
                             // Column header.
                             if root.columns.length > 0: Rectangle {
                                 height: 30px;
@@ -2040,6 +2184,25 @@ export component AppWindow inherits Window {
                             TouchArea {
                                 mouse-cursor: pointer;
                                 clicked => { root.bp-clicked(); }
+                            }
+                        }
+                        if root.limit-label != "": Badge {
+                            y: (parent.height - self.height) / 2;
+                            text: root.limit-label;
+                            fg: P.copper;
+                        }
+                        // The EQ: lit when it's on and shaping the sound.
+                        // Click it for the EQ view.
+                        Rectangle {
+                            width: eqb.width;
+                            eqb := Badge {
+                                y: (parent.height - self.height) / 2;
+                                text: "EQ";
+                                fg: root.eq-lit ? (P.kawaii ? P.mint : P.verdigris) : P.wave;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.eq-chip(); }
                             }
                         }
                         // Click it for where the gain came from.

@@ -6,6 +6,8 @@ pub mod audio;
 pub mod browse;
 pub mod cache;
 pub mod config;
+pub mod dsp;
+pub mod eq;
 pub mod lastfm;
 pub mod level;
 pub mod library;

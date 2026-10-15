@@ -60,7 +60,8 @@ impl AtomicF64 {
 }
 
 /// State shared between the core thread, the decoder thread and the
-/// real-time render callback. Only atomics live here.
+/// real-time render callback. Atomics, plus the EQ settings behind a mutex
+/// the renderer only ever `try_lock`s, so it never waits on it.
 #[derive(Debug)]
 pub struct Shared {
     /// Linear volume gain applied in the render callback.
@@ -97,6 +98,15 @@ pub struct Shared {
     pub bit_perfect: AtomicU8,
     /// Leveling settings, read by the decoder as it opens each track.
     pub level: crate::level::LevelShared,
+    /// EQ settings, and a counter bumped on every change so the renderer
+    /// knows to pick them up.
+    pub eq: std::sync::Mutex<crate::dsp::EqParams>,
+    pub eq_gen: AtomicU64,
+    /// The true-peak limiter: on, and its ceiling as a linear gain.
+    pub limiter_on: AtomicBool,
+    pub limiter_ceiling: AtomicF64,
+    /// Deepest gain reduction since the core last looked, in dB.
+    pub limiter_gr: AtomicF64,
 }
 
 impl Default for Shared {
@@ -117,11 +127,30 @@ impl Default for Shared {
             podcast_trim: AtomicBool::new(false),
             bit_perfect: AtomicU8::new(0),
             level: crate::level::LevelShared::default(),
+            eq: std::sync::Mutex::new(crate::dsp::EqParams::default()),
+            eq_gen: AtomicU64::new(0),
+            limiter_on: AtomicBool::new(true),
+            limiter_ceiling: AtomicF64::new(10f64.powf(-1.0 / 20.0)),
+            limiter_gr: AtomicF64::new(0.0),
         }
     }
 }
 
 pub type SharedRef = Arc<Shared>;
+
+impl Shared {
+    /// Whether anything in the chain would change the sound, which keeps
+    /// Auto bit-perfect off.
+    pub fn dsp_active(&self) -> bool {
+        self.level.mode() != crate::level::LevelMode::Off || self.eq.lock().unwrap().changes_sound()
+    }
+
+    /// New EQ settings for the renderer to pick up.
+    pub fn set_eq(&self, p: crate::dsp::EqParams) {
+        *self.eq.lock().unwrap() = p;
+        self.eq_gen.fetch_add(1, Ordering::Release);
+    }
+}
 
 /// Volume slider position (0.0 to 1.0) to linear gain. Cubic, which tracks
 /// perceived loudness closely enough and is what PulseAudio uses too.

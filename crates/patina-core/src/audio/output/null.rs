@@ -68,6 +68,12 @@ impl Output for NullOutput {
     fn describe(&self) -> String {
         "no output".into()
     }
+    fn device(&self) -> Option<crate::eq::OutputDevice> {
+        Some(crate::eq::OutputDevice {
+            key: "null".into(),
+            name: "No output".into(),
+        })
+    }
     fn error(&self) -> Option<String> {
         None
     }

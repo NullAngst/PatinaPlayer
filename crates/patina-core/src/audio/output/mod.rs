@@ -143,6 +143,11 @@ pub trait Output: Send {
     fn set_hw_volume(&self, _slider: f64) -> bool {
         false
     }
+    /// The device the sound is going to, for per-device EQ. None while
+    /// that isn't known yet.
+    fn device(&self) -> Option<crate::eq::OutputDevice> {
+        None
+    }
 }
 
 /// Open an output for this renderer's format.

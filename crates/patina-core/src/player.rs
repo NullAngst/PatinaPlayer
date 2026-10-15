@@ -106,6 +106,14 @@ pub enum Command {
     /// A mix is playing, or stopped: Smart leveling treats a mix like
     /// shuffle.
     SetMixing(bool),
+    /// EQ settings, as the renderer runs them. Heard within one output
+    /// block.
+    SetEq(Box<crate::dsp::EqParams>),
+    /// The true-peak limiter: on or off, and its ceiling in dBTP.
+    SetLimiter {
+        on: bool,
+        ceiling_db: f64,
+    },
     Quit,
 }
 
@@ -160,6 +168,12 @@ pub struct Snapshot {
     pub volume_locked: bool,
     /// The leveling gain on what's playing, and where it came from.
     pub level: Option<LevelView>,
+    /// Where the sound is going, for per-device EQ. Kept from the last
+    /// output while nothing is open.
+    pub output_device: Option<crate::eq::OutputDevice>,
+    /// How hard the limiter worked lately, in dB of gain reduction. Held
+    /// for a moment after it lets go, so it can be seen.
+    pub limiting_db: f64,
 }
 
 /// The leveling gain for the bottom bar: "-4.2 dB album".
@@ -208,6 +222,10 @@ pub struct PlayerConfig {
     pub podcast_tempo: f64,
     pub podcast_trim: bool,
     pub leveling: crate::level::LevelConfig,
+    pub eq: crate::dsp::EqParams,
+    pub limiter_on: bool,
+    /// dBTP, -6 to 0.
+    pub limiter_ceiling_db: f64,
 }
 
 impl Default for PlayerConfig {
@@ -219,6 +237,9 @@ impl Default for PlayerConfig {
             podcast_tempo: 1.0,
             podcast_trim: false,
             leveling: crate::level::LevelConfig::default(),
+            eq: crate::dsp::EqParams::default(),
+            limiter_on: true,
+            limiter_ceiling_db: -1.0,
         }
     }
 }
@@ -328,6 +349,9 @@ struct Core {
     probe_tx: Sender<Vec<(u64, PathBuf)>>,
     /// The reason the last exclusive open failed, while that track plays.
     exclusive_refused: Option<String>,
+    last_device: Option<crate::eq::OutputDevice>,
+    /// The limiter's deepest reduction lately, and when it was seen.
+    limit_hold: (f64, Instant),
 }
 
 impl Core {
@@ -352,6 +376,11 @@ impl Core {
             .bit_perfect
             .store(cfg.output.bit_perfect.to_u8(), Ordering::Relaxed);
         shared.level.set(&cfg.leveling);
+        shared.set_eq(cfg.eq);
+        shared.limiter_on.store(cfg.limiter_on, Ordering::Relaxed);
+        shared
+            .limiter_ceiling
+            .store(10f64.powf(cfg.limiter_ceiling_db.clamp(-6.0, 0.0) / 20.0));
         let (feed_tx, feed_cmd_rx) = unbounded();
         let (feed_msg_tx, feed_rx) = unbounded();
         feeder::spawn(shared.clone(), queue.clone(), feed_cmd_rx, feed_msg_tx);
@@ -387,6 +416,8 @@ impl Core {
             last_error: None,
             probe_tx,
             exclusive_refused: None,
+            last_device: None,
+            limit_hold: (0.0, Instant::now()),
         }
     }
 
@@ -769,6 +800,24 @@ impl Core {
                     self.restart_here();
                 }
             }
+            Command::SetEq(p) => {
+                let before = self.shared.dsp_active();
+                self.shared.set_eq(*p);
+                // Auto bit-perfect goes on and off with what changes the
+                // sound.
+                if before != self.shared.dsp_active()
+                    && self.cfg.output.bit_perfect == BitPerfect::Auto
+                {
+                    self.exclusive_refused = None;
+                    self.restart_here();
+                }
+            }
+            Command::SetLimiter { on, ceiling_db } => {
+                self.shared.limiter_on.store(on, Ordering::Relaxed);
+                self.shared
+                    .limiter_ceiling
+                    .store(10f64.powf(ceiling_db.clamp(-6.0, 0.0) / 20.0));
+            }
             Command::SetMixing(on) => {
                 let l = &self.shared.level;
                 if l.mixing.swap(on, Ordering::Relaxed) != on {
@@ -1080,6 +1129,19 @@ impl Core {
         snap.bit_perfect = self.cfg.output.bit_perfect;
         snap.exclusive = self.output.as_ref().and_then(|o| o.exclusive());
         snap.volume_locked = snap.exclusive.as_ref().is_some_and(|e| !e.hw_volume);
+        if let Some(d) = self.output.as_ref().and_then(|o| o.device()) {
+            self.last_device = Some(d);
+        }
+        snap.output_device = self.last_device.clone();
+        let gr = self.shared.limiter_gr.load();
+        self.shared.limiter_gr.store(0.0);
+        let now = Instant::now();
+        if gr >= self.limit_hold.0
+            || now.duration_since(self.limit_hold.1) > Duration::from_millis(1500)
+        {
+            self.limit_hold = (gr, now);
+        }
+        snap.limiting_db = self.limit_hold.0;
         snap.level = playing_level.map(|l| LevelView {
             gain_db: if l.source == crate::level::Source::Live {
                 self.shared.level.live_db.load()

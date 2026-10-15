@@ -95,6 +95,25 @@ pub struct Config {
     pub mixes: MixConfig,
     pub lastfm: LastFmConfig,
     pub leveling: crate::level::LevelConfig,
+    /// The EQ, and which output device gets which preset.
+    pub eq: crate::eq::EqConfig,
+    pub limiter: LimiterConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LimiterConfig {
+    pub on: bool,
+    /// dBTP, -6 to 0.
+    pub ceiling_db: f64,
+}
+
+impl Default for LimiterConfig {
+    fn default() -> Self {
+        Self {
+            on: true,
+            ceiling_db: -1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -257,6 +276,8 @@ impl Default for Config {
             mixes: MixConfig::default(),
             lastfm: LastFmConfig::default(),
             leveling: crate::level::LevelConfig::default(),
+            eq: crate::eq::EqConfig::default(),
+            limiter: LimiterConfig::default(),
         }
     }
 }
@@ -277,6 +298,15 @@ struct RawConfig {
     mixes: Option<RawMixes>,
     lastfm: Option<RawLastFm>,
     leveling: Option<RawLeveling>,
+    eq: Option<toml::Value>,
+    limiter: Option<RawLimiter>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLimiter {
+    on: Option<bool>,
+    ceiling_db: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -515,6 +545,21 @@ impl Config {
             live_music: rl.live_music.unwrap_or(dl.live_music),
             live_streams: rl.live_radio.unwrap_or(dl.live_streams),
         };
+        let eq = match raw.eq {
+            Some(v) => {
+                let mut e: crate::eq::EqConfig = v
+                    .try_into()
+                    .map_err(|e: toml::de::Error| parse_err(format!("eq: {}", e.message())))?;
+                e.settings = e.settings.normalized();
+                e
+            }
+            None => crate::eq::EqConfig::default(),
+        };
+        let rlim = raw.limiter.unwrap_or_default();
+        let limiter = LimiterConfig {
+            on: rlim.on.unwrap_or(true),
+            ceiling_db: rlim.ceiling_db.unwrap_or(-1.0).clamp(-6.0, 0.0),
+        };
         let theme = match look.theme {
             Some(t) => t.parse::<Theme>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -584,6 +629,8 @@ impl Config {
             mixes,
             lastfm,
             leveling,
+            eq,
+            limiter,
         })
     }
 
@@ -677,6 +724,14 @@ clip_guard = true
 # off by default. For radio and podcasts it's all there is.
 live_music = false
 live_radio = true
+
+[limiter]
+# The true-peak limiter, last in the chain, so EQ boosts and leveling never
+# clip. Below the ceiling it doesn't touch the sound at all.
+on = true
+# How high peaks may go, -6 to 0 dBTP. -1 leaves room for lossy encoders
+# and cheap DACs that clip a little early.
+ceiling_db = -1.0
 
 [podcasts]
 # Feed URLs. The Podcasts view adds to this list for you.
@@ -784,6 +839,45 @@ fn table<'a>(
     // An implicit table (only sub-tables, like [[radio.station]]) is fine.
     t.as_table_mut()
         .ok_or_else(|| format!("[{name}] is not a table"))
+}
+
+/// Write the EQ: the `[eq]` table, rewritten whole. The EQ view changes it
+/// often (every drag), so the app owns this table; everything else in the
+/// file stays as you wrote it.
+pub fn set_eq(path: &Path, eq: &crate::eq::EqConfig) -> Result<bool, ConfigError> {
+    let text = toml::to_string(eq).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        msg: e.to_string(),
+    })?;
+    let fresh: toml_edit::DocumentMut =
+        text.parse()
+            .map_err(|e: toml_edit::TomlError| ConfigError::Parse {
+                path: path.to_path_buf(),
+                msg: e.to_string(),
+            })?;
+    edit(path, move |doc| {
+        let mut t = fresh.as_table().clone();
+        t.set_implicit(false);
+        // Where [eq] already is, or at the end of the file the first time.
+        let pos = doc
+            .get("eq")
+            .and_then(|i| i.as_table())
+            .and_then(|t| t.position())
+            .unwrap_or(1 << 20);
+        t.set_position(Some(pos));
+        if let Some(d) = t.get_mut("devices").and_then(|i| i.as_table_mut()) {
+            d.set_position(Some(pos));
+        }
+        let before = doc.to_string();
+        let mut item = toml_edit::Item::Table(t);
+        if let Some(tab) = item.as_table_mut() {
+            tab.decor_mut().set_prefix(
+                "\n# The EQ, as the EQ view leaves it. The app rewrites this table;\n# presets live in presets/eq/ next to this file.\n",
+            );
+        }
+        doc.insert("eq", item);
+        Ok(doc.to_string() != before)
+    })
 }
 
 /// Replace the station list with `stations`, in order.

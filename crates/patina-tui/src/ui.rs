@@ -80,6 +80,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 }
                 InputPurpose::ServerSecret(_) => "Password or API key",
                 InputPurpose::ServerPlaylist { .. } => "New playlist on the server",
+                InputPurpose::EqPresetName => "Save the EQ as a preset called",
+                InputPurpose::EqImport => "AutoEq or APO file (ParametricEQ.txt, GraphicEQ.txt)",
             };
             // Passwords show as dots.
             let shown = if matches!(purpose, InputPurpose::ServerSecret(_)) {
@@ -357,6 +359,9 @@ fn hints(app: &App) -> &'static str {
         (Section::Settings, _) => {
             "Enter change (or sync a server) · h/l step · N add folder · E edit server · d remove"
         }
+        (Section::Eq, _) => {
+            "Enter change · h/l ±0.5 dB · H/L move a band · o on/off · d remove a band · Ctrl+E here"
+        }
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
             "Enter open · v play all · V shuffle · e queue all · P playlist all"
         }
@@ -493,6 +498,15 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         Kind::Stations => vec!["", "", "Station", "Last test", "", ""],
         Kind::Episodes => vec!["", "", "Episode", "Published", "Progress", "Length"],
         Kind::Downloads => vec!["", "", "", "", "", ""],
+    };
+    // The EQ view: its response curve above the rows.
+    let body = if matches!(level.source, Source::Section(Section::Eq)) && body.height > 16 {
+        let [curve, rest] =
+            Layout::vertical([Constraint::Length(10), Constraint::Min(0)]).areas(body);
+        draw_eq_curve(f, app, curve);
+        rest
+    } else {
+        body
     };
     // In Settings, the selected option's help sits under the list.
     let help = match level.items.get(level.selected) {
@@ -1010,9 +1024,9 @@ fn item_row<'a>(
                     Span::styled(st.label.clone(), text),
                     Span::styled(
                         if st.key == patina_core::browse::Key::AddFolder {
-                            format!("Enter or N: {}", a.to_lowercase())
+                            format!("Enter or N: {}", lower_first(a))
                         } else {
-                            format!("Enter: {}", a.to_lowercase())
+                            format!("Enter: {}", lower_first(a))
                         },
                         accent,
                     ),
@@ -1053,6 +1067,113 @@ fn item_row<'a>(
         }
     };
     Row::new(cells)
+}
+
+/// The EQ's response, 20 Hz to 20 kHz on a log axis, with a dot at each
+/// band. Braille dots, so it's smooth enough to read in a terminal.
+fn draw_eq_curve(f: &mut Frame, app: &App, area: Rect) {
+    use ratatui::widgets::canvas::{Canvas, Line as CLine, Points};
+    let t = &app.theme;
+    let eq = app.b.eq_settings();
+    let pts = eq.curve(160);
+    let bands = eq.bands();
+    let top = pts
+        .iter()
+        .map(|p| p.1.abs())
+        .chain(
+            bands
+                .iter()
+                .filter(|b| b.kind.has_gain())
+                .map(|b| b.gain.abs()),
+        )
+        .fold(12.0f64, f64::max)
+        .ceil();
+    let lx = |hz: f64| hz.max(20.0).log10();
+    let on = eq.on;
+    let curve_color = if on { t.verdigris } else { t.wave_raw };
+    let title = format!(
+        " {} · {} · preamp {:+.1} dB ",
+        if on { "on" } else { "bypassed" },
+        app.b.eq.preset_label(),
+        eq.total_preamp()
+    );
+    let canvas = Canvas::default()
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(t.border))
+                .title(Span::styled(title, Style::default().fg(t.muted))),
+        )
+        .x_bounds([lx(20.0), lx(20000.0)])
+        .y_bounds([-top, top])
+        .marker(ratatui::symbols::Marker::Braille)
+        .paint(move |ctx| {
+            for hz in [100.0, 1000.0, 10000.0] {
+                ctx.draw(&CLine {
+                    x1: lx(hz),
+                    y1: -top,
+                    x2: lx(hz),
+                    y2: top,
+                    color: t.border,
+                });
+            }
+            ctx.draw(&CLine {
+                x1: lx(20.0),
+                y1: 0.0,
+                x2: lx(20000.0),
+                y2: 0.0,
+                color: t.wave_raw,
+            });
+            for w in pts.windows(2) {
+                ctx.draw(&CLine {
+                    x1: lx(w[0].0),
+                    y1: w[0].1,
+                    x2: lx(w[1].0),
+                    y2: w[1].1,
+                    color: curve_color,
+                });
+            }
+            let dots: Vec<(f64, f64)> = bands
+                .iter()
+                .filter(|b| b.freq >= 20.0 && b.freq <= 20000.0)
+                .map(|b| (lx(b.freq), if b.kind.has_gain() { b.gain } else { 0.0 }))
+                .collect();
+            ctx.draw(&Points {
+                coords: &dots,
+                color: t.copper,
+            });
+            ctx.print(
+                lx(100.0),
+                -top,
+                Span::styled("100", Style::default().fg(t.muted)),
+            );
+            ctx.print(
+                lx(1000.0),
+                -top,
+                Span::styled("1k", Style::default().fg(t.muted)),
+            );
+            ctx.print(
+                lx(10000.0),
+                -top,
+                Span::styled("10k", Style::default().fg(t.muted)),
+            );
+            ctx.print(
+                lx(20.0),
+                top,
+                Span::styled(format!("+{top}"), Style::default().fg(t.muted)),
+            );
+        });
+    f.render_widget(canvas, area);
+}
+
+/// "Use my usual EQ here" as "use my usual EQ here": only the first
+/// letter, so names and abbreviations keep their capitals.
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_lowercase().chain(c).collect(),
+        None => String::new(),
+    }
 }
 
 fn s(n: i64) -> &'static str {
@@ -1353,6 +1474,26 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         }
         _ => {}
     }
+    // The limiter at work, in copper: how much it's taking off.
+    if s.limiting_db >= 0.1 {
+        right.push(Span::styled(
+            format!(" LIM -{:.1} dB ", s.limiting_db),
+            Style::default().fg(t.copper).bg(t.raised),
+        ));
+        right.push(Span::raw(" "));
+    }
+    // The EQ, lit when it's on and doing something.
+    {
+        let eq = app.b.eq_settings();
+        let lit = eq.on && !eq.is_flat();
+        right.push(Span::styled(
+            " EQ ",
+            Style::default()
+                .fg(if lit { t.verdigris } else { t.wave_raw })
+                .bg(t.raised),
+        ));
+        right.push(Span::raw(" "));
+    }
     // The leveling gain on what's playing: "-4.2 dB", "-6.0 dB?" while it's
     // a guess, "~-9.1 dB" under the live normalizer.
     if let Some(l) = s.level {
@@ -1632,6 +1773,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (
             "Downloads",
             "w pause or resume, x cancel or unpin, W pause all, C clear the cache",
+        ),
+        (
+            "EQ (Ctrl+E)",
+            "Enter change, h/l ±0.5 dB, H/L move a band, o on/off, d remove a band",
         ),
         ("F5", "Check folders and podcast feeds for changes"),
         (

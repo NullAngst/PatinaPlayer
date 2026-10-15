@@ -22,7 +22,8 @@ use slint::platform::Key;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::art::{ArtCache, LARGE, Req, THUMB};
-use crate::{AppWindow, Hero, Icons, P, QueueRow, Row, SideItem};
+use crate::{AppWindow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem};
+use patina_core::eq::Mode as EqMode;
 
 enum Dlg {
     None,
@@ -30,6 +31,10 @@ enum Dlg {
     Choose(SettingKey),
     /// Typing a setting's value.
     SetValue(SettingKey),
+    /// Naming an EQ preset.
+    EqSave,
+    /// Typing the path of an EQ file, when there's no file picker.
+    EqImportPath,
     AddFolder,
     NewPlaylist(Vec<PathBuf>),
     RenamePlaylist(i64),
@@ -68,6 +73,9 @@ pub struct State {
     art: ArtCache,
     snap: Snapshot,
     rows: Rc<VecModel<Row>>,
+    /// The EQ panel's band handles. Kept and updated in place, so a handle
+    /// being dragged isn't torn down under the pointer.
+    eq_bands: Rc<VecModel<EqBand>>,
     side: Rc<VecModel<SideItem>>,
     queue: Rc<VecModel<QueueRow>>,
     crumbs: Rc<VecModel<SharedString>>,
@@ -95,6 +103,8 @@ pub struct State {
     /// A native folder picker running on its own thread, and when it was
     /// opened.
     folder_pick: Option<(crossbeam_channel::Receiver<Option<PathBuf>>, Instant)>,
+    /// An EQ file being picked to import.
+    eq_pick: Option<(crossbeam_channel::Receiver<Option<PathBuf>>, Instant)>,
     /// The theme on screen, so a change in Settings redraws.
     theme: Option<Theme>,
 }
@@ -120,6 +130,7 @@ Delete       remove from the queue, the open playlist, or Settings;
 Enter        in Settings: flip, pick or edit the option
 [ ]  z       podcast speed, silence trimming
 q            queue panel
+Ctrl+E       the EQ (o in it: on or bypassed)
 F5           check folders and feeds for changes
 Ctrl+Q       quit
 
@@ -150,6 +161,7 @@ fn jp_section(s: Section) -> &'static str {
         Section::Queue => "キュー",
         Section::Downloads => "ダウンロード",
         Section::Settings => "せってい",
+        Section::Eq => "イコライザー",
         Section::MostListened => "いちばん",
         Section::TopAlbums => "ベスト",
         Section::TopArtists => "スター",
@@ -201,6 +213,7 @@ impl State {
             art: ArtCache::new(),
             snap: Snapshot::default(),
             rows: Rc::new(VecModel::default()),
+            eq_bands: Rc::new(VecModel::default()),
             side: Rc::new(VecModel::default()),
             queue: Rc::new(VecModel::default()),
             crumbs: Rc::new(VecModel::default()),
@@ -221,6 +234,7 @@ impl State {
             row_shown: Vec::new(),
             queue_shown: Vec::new(),
             folder_pick: None,
+            eq_pick: None,
             theme: None,
         }
     }
@@ -420,6 +434,7 @@ impl State {
                     Control::Action(_) if st.key == SettingKey::AddServer => (9, false),
                     Control::Action(_) if st.key == SettingKey::FindDlna => (10, false),
                     Control::Action(_) if st.key == SettingKey::MeasureLibrary => (11, false),
+                    Control::Action(_) if st.key.is_eq() => (11, false),
                     Control::Action(_) => (6, false),
                     Control::Info(_) => (7, false),
                     Control::Server(_) => (8, false),
@@ -627,7 +642,7 @@ impl State {
                 vec![("refresh", "Refresh".into())],
             ),
             (Section::Downloads, _) => (0, vec![], vec![]),
-            (Section::Settings, _) => (0, vec![], vec![]),
+            (Section::Settings | Section::Eq, _) => (0, vec![], vec![]),
             // Mixed artists, albums and songs: the group headings label them.
             (_, Some(Source::Search(_))) => (0, vec![], vec![]),
             (_, Some(Source::Folder(_))) => (0, tracks_cols, vec![]),
@@ -684,6 +699,7 @@ impl State {
         }
         ui.set_empty_text(ss(empty));
         ui.set_album_tracks(self.b.in_playlist().is_none());
+        self.sync_eq_panel(ui);
         ui.set_queue_mix_unsaved(
             self.b
                 .mix
@@ -844,6 +860,7 @@ impl State {
                         Section::Queue => icons.get_queue(),
                         Section::Downloads => icons.get_downloads(),
                         Section::Settings => icons.get_settings(),
+                        Section::Eq => icons.get_eq(),
                         Section::MostListened => icons.get_most_listened(),
                         Section::TopAlbums => icons.get_top_albums(),
                         Section::TopArtists => icons.get_top_artists(),
@@ -1061,6 +1078,11 @@ impl State {
                 ui.set_bp_badge(ss(bp));
                 ui.set_bp_tone(tone);
                 ui.set_bp_tip(ss(tip));
+                ui.set_limit_label(ss(if s.limiting_db >= 0.1 {
+                    format!("LIM -{:.1} dB", s.limiting_db)
+                } else {
+                    String::new()
+                }));
                 match s.level {
                     Some(l) => {
                         ui.set_level_label(ss(l.short()));
@@ -1173,6 +1195,7 @@ impl State {
         }
         self.snap = self.b.player.snapshot();
         self.poll_folder_pick();
+        self.poll_eq_pick(ui);
         if let Some(found) = self.b.take_dlna_found() {
             self.open_dlna(ui, found);
         }
@@ -1424,6 +1447,10 @@ impl State {
                 );
             }
             "refresh" => self.b.rescan(),
+            "eq-toggle" => self.b.eq_toggle(),
+            "eq-flat" => self.b.eq_flat(),
+            "eq-import" => self.pick_eq_file(),
+            "eq-save" => self.open_eq_save(ui),
             "pin" => self.b.toggle_pin_view(),
             "save-mix" => self.b.save_mix(),
             "genre-mix" => self.b.play_genre_mix(),
@@ -1566,6 +1593,7 @@ impl State {
             Control::Action(_) if st.key == SettingKey::AddServer => "add-server",
             Control::Action(_) if st.key == SettingKey::FindDlna => "find-dlna",
             Control::Action(_) if st.key == SettingKey::MeasureLibrary => "measure",
+            Control::Action(_) if st.key.is_eq() => "measure",
             Control::Action(_) => "browse",
             Control::Server(_) => "sync",
             Control::Folder | Control::Info(_) => return,
@@ -1583,6 +1611,14 @@ impl State {
         let key = st.key.clone();
         if key == SettingKey::MeasureLibrary {
             return self.b.toggle_measure_library();
+        }
+        match key {
+            SettingKey::EqSavePreset => return self.open_eq_save(ui),
+            SettingKey::EqImport => return self.pick_eq_file(),
+            SettingKey::EqDevice | SettingKey::EqAddBand | SettingKey::EqDeletePreset => {
+                return self.b.change_setting(&key, Change::Toggle);
+            }
+            _ => {}
         }
         match a {
             "toggle" => self.change_setting(ui, key, Change::Toggle),
@@ -1699,6 +1735,159 @@ impl State {
             let _ = tx.send(picked);
         });
         self.folder_pick = Some((rx, Instant::now()));
+    }
+
+    /// A band handle dragged on the EQ panel: `x` is 0 to 1 across the
+    /// graph (20 Hz to 20 kHz), `gain` in dB.
+    fn eq_point(&mut self, i: usize, x: f64, gain: f64) {
+        // Close to 0 dB snaps to it, so flat is easy to find again.
+        let gain = if gain.abs() < 0.25 {
+            0.0
+        } else {
+            (gain * 10.0).round() / 10.0
+        };
+        let s = self.b.eq_settings();
+        match s.mode {
+            EqMode::Graphic => self.b.eq_set_gain(i, gain),
+            EqMode::Parametric => {
+                if let Some(mut b) = s.parametric.get(i).copied() {
+                    b.freq = (20.0 * 1000f64.powf(x.clamp(0.0, 1.0))).round();
+                    if b.kind.has_gain() {
+                        b.gain = gain;
+                    }
+                    self.b.eq_set_band(i, b);
+                }
+            }
+        }
+    }
+
+    /// The EQ panel: curve, band handles, the line above them.
+    fn sync_eq_panel(&self, ui: &AppWindow) {
+        let eq = self.b.eq_settings();
+        ui.set_eq_lit(eq.on && !eq.is_flat());
+        let show = matches!(
+            self.b.level().map(|l| &l.source),
+            Some(Source::Section(Section::Eq))
+        );
+        ui.set_eq_panel(show);
+        if !show {
+            return;
+        }
+        let eq = self.b.eq_settings();
+        let bands = eq.bands();
+        let curve = eq.curve(240);
+        let range = match eq.mode {
+            EqMode::Graphic => 12.0,
+            EqMode::Parametric => {
+                let m = curve
+                    .iter()
+                    .map(|p| p.1.abs())
+                    .chain(
+                        bands
+                            .iter()
+                            .filter(|b| b.kind.has_gain())
+                            .map(|b| b.gain.abs()),
+                    )
+                    .fold(12.0f64, f64::max);
+                (m / 6.0).ceil() * 6.0
+            }
+        };
+        let xf = |f: f64| ((f.max(20.0).log10() - 20f64.log10()) / 3.0).clamp(0.0, 1.0);
+        let mut cmd = String::new();
+        for (k, (f, db)) in curve.iter().enumerate() {
+            let x = xf(*f) * 1000.0;
+            let y = ((0.5 - db / (2.0 * range)) * 200.0).clamp(-5.0, 205.0);
+            cmd.push_str(&format!("{}{x:.1} {y:.1} ", if k == 0 { "M" } else { "L" }));
+        }
+        ui.set_eq_curve(ss(cmd));
+        ui.set_eq_range(range as f32);
+        ui.set_eq_on(eq.on);
+        ui.set_eq_graphic(eq.mode == EqMode::Graphic);
+        let views: Vec<EqBand> = bands
+            .iter()
+            .map(|b| EqBand {
+                x: xf(b.freq) as f32,
+                gain: if b.kind.has_gain() {
+                    b.gain as f32
+                } else {
+                    0.0
+                },
+                label: ss(patina_core::eq::freq_label(b.freq)),
+                has_gain: b.kind.has_gain(),
+            })
+            .collect();
+        if self.eq_bands.row_count() == views.len() {
+            for (i, v) in views.into_iter().enumerate() {
+                if self.eq_bands.row_data(i).as_ref() != Some(&v) {
+                    self.eq_bands.set_row_data(i, v);
+                }
+            }
+        } else {
+            self.eq_bands.set_vec(views);
+        }
+        let mut info = format!(
+            "{} · preamp {:+.1} dB",
+            self.b.eq.preset_label(),
+            eq.total_preamp()
+        );
+        if let Some(d) = &self.b.eq.device {
+            info.push_str(&format!(" · {}", d.name));
+            if self.b.eq.linked.is_some() {
+                info.push_str(" (its own EQ)");
+            }
+        }
+        ui.set_eq_info(ss(info));
+    }
+
+    fn open_eq_save(&mut self, ui: &AppWindow) {
+        let cur = self.b.eq_settings().preset.clone();
+        let name = if patina_core::eq::presets::is_builtin(&cur) {
+            String::new()
+        } else {
+            cur
+        };
+        self.dlg = Dlg::EqSave;
+        open_text(ui, "Save the EQ as a preset", "Name", &name, None, "Save");
+    }
+
+    fn pick_eq_file(&mut self) {
+        if self.eq_pick.is_some() {
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Import an AutoEq or Equalizer APO file")
+                .add_filter("EQ settings", &["txt"])
+                .pick_file();
+            let _ = tx.send(picked);
+        });
+        self.eq_pick = Some((rx, Instant::now()));
+    }
+
+    fn poll_eq_pick(&mut self, ui: &AppWindow) {
+        let Some((rx, opened)) = &self.eq_pick else {
+            return;
+        };
+        let Ok(picked) = rx.try_recv() else { return };
+        let quick = opened.elapsed() < Duration::from_millis(700);
+        self.eq_pick = None;
+        match picked {
+            Some(p) => self.b.eq_import(&p),
+            // Back that fast means no picker showed up: type the path.
+            None if quick => {
+                self.dlg = Dlg::EqImportPath;
+                open_text(
+                    ui,
+                    "Import an AutoEq or APO file",
+                    "Path to ParametricEQ.txt or GraphicEQ.txt",
+                    "~/",
+                    None,
+                    "Import",
+                );
+            }
+            None => {}
+        }
     }
 
     fn poll_folder_pick(&mut self) {
@@ -1892,6 +2081,10 @@ impl State {
                 }
             }
             Dlg::SetValue(key) => self.change_setting(ui, key, Change::Set(t1)),
+            Dlg::EqSave => self.b.eq_save_preset(&t1),
+            Dlg::EqImportPath => self
+                .b
+                .eq_import(&patina_core::config::expand_tilde(t1.trim())),
             Dlg::NewPlaylist(paths) => self.b.create_playlist(&t1, &paths),
             Dlg::RenamePlaylist(id) => self.b.rename_playlist(id, &t1),
             Dlg::RenameMix(id) => self.b.rename_mix(id, &t1),
@@ -1990,6 +2183,7 @@ impl State {
                 "q" | "Q" => {
                     let _ = slint::quit_event_loop();
                 }
+                "e" | "E" => self.b.switch(Section::Eq),
                 "f" | "F" => {
                     let q = self.b.start_search();
                     ui.set_search_text(ss(q));
@@ -2211,6 +2405,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
         let s = st.borrow();
         ui.set_side(ModelRc::from(s.side.clone()));
         ui.set_rows(ModelRc::from(s.rows.clone()));
+        ui.set_eq_bands(ModelRc::from(s.eq_bands.clone()));
         ui.set_queue(ModelRc::from(s.queue.clone()));
         ui.set_crumbs(ModelRc::from(s.crumbs.clone()));
         ui.set_columns(ModelRc::from(s.columns.clone()));
@@ -2271,6 +2466,9 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
             s.activate_in(&u);
         }
     });
+    on!(on_eq_point, |s, _u, i, x, g| s
+        .eq_point(i as usize, x as f64, g as f64));
+    on!(on_eq_chip, |s, _u| s.b.switch(Section::Eq));
     on!(on_level_clicked, |s, u| {
         let tip = u.get_level_tip().to_string();
         if !tip.is_empty() {

@@ -4,6 +4,7 @@
 //! library, the queue or the config. That's how the two stay identical.
 
 mod downloads;
+pub mod eq;
 mod leveling;
 mod mixes;
 pub mod model;
@@ -95,6 +96,8 @@ pub struct Browser {
     pub cache: Option<crate::cache::CacheService>,
     pub mixes: Option<crate::mix::MixService>,
     pub level: Option<crate::level::LevelService>,
+    /// The EQ: what plays, presets, device links.
+    pub eq: eq::EqState,
     /// The songs last handed to the measuring thread.
     sent_ahead: Vec<Vec<u8>>,
     /// The mix playing, if one is.
@@ -193,6 +196,16 @@ impl Browser {
             cache: s.cache,
             mixes: s.mixes,
             level: s.level,
+            eq: eq::EqState::new(
+                s.config.eq.clone(),
+                crate::eq::presets::Presets::new(
+                    s.settings_info
+                        .config_path
+                        .parent()
+                        .map(|d| d.join("presets").join("eq"))
+                        .unwrap_or_else(crate::eq::presets::dir),
+                ),
+            ),
             sent_ahead: Vec::new(),
             mix: None,
             mix_runs: 0,
@@ -274,6 +287,7 @@ impl Browser {
         }
         self.poll_cache();
         self.poll_level();
+        self.eq_tick();
         if events.iter().any(|e| matches!(e, Event::Played(_))) {
             for s in Section::STATS {
                 self.refresh_section(s);
@@ -410,6 +424,7 @@ impl Browser {
             s.extend(entries);
         }
         s.push(SideEntry::Gap);
+        s.push(SideEntry::Section(Section::Eq));
         s.push(SideEntry::Section(Section::Settings));
         self.sidebar = s;
         self.sync_sidebar_sel();
@@ -506,6 +521,7 @@ impl Browser {
             checks: &self.checks,
             servers: &self.servers,
             cache: self.cache.as_ref().map(|_| &self.cache_status),
+            eq: &self.eq,
         }
     }
 
@@ -806,6 +822,7 @@ impl Browser {
                     | Section::Queue
                     | Section::Downloads
                     | Section::Settings
+                    | Section::Eq
                     | Section::Genres
                     | Section::Playlists
             ) | Source::Podcast { .. }
@@ -1186,6 +1203,7 @@ impl Browser {
             self.section,
             Section::Queue
                 | Section::Settings
+                | Section::Eq
                 | Section::Downloads
                 | Section::Radio
                 | Section::Podcasts
@@ -1277,6 +1295,9 @@ impl Browser {
     /// Apply a change from the Settings view: write it to config.toml
     /// (comments kept) and put it into effect now where that's possible.
     pub fn change_setting(&mut self, key: &Key, change: Change) {
+        if key.is_eq() {
+            return self.change_eq(key, change);
+        }
         let Some(row) = self.settings_row(key) else {
             return;
         };
@@ -1373,6 +1394,7 @@ impl Browser {
                     self.set_podcast_playback(self.podcast_tempo, *on);
                 }
                 (Key::GenreMatch | Key::LastFmKey, _) => self.change_mix_setting(key, &new)?,
+                (Key::Limiter | Key::LimiterCeiling, _) => self.change_limiter(key, &new)?,
                 (
                     Key::LevelMode
                     | Key::LevelTarget

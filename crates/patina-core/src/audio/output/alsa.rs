@@ -141,6 +141,12 @@ impl Output for AlsaOutput {
         };
         format!("ALSA {} {f}", self.device)
     }
+    fn device(&self) -> Option<crate::eq::OutputDevice> {
+        Some(crate::eq::OutputDevice {
+            key: format!("alsa:{}", self.device),
+            name: format!("ALSA {}", self.device),
+        })
+    }
     fn error(&self) -> Option<String> {
         self.error.lock().unwrap().clone()
     }

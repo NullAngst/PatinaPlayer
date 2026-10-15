@@ -514,7 +514,7 @@ impl Feeder {
         // Bit-perfect is for local files played as they are: never radio,
         // never a sped-up or trimmed podcast.
         let mode = BitPerfect::from_u8(self.shared.bit_perfect.load(Ordering::Relaxed));
-        let dsp = self.shared.level.mode() != LevelMode::Off;
+        let dsp = self.shared.dsp_active();
         let exclusive =
             (mode.wanted(dsp) && original && src.source_position().is_none()).then(|| src.depth());
         if self.format != Some(fmt) || self.exclusive != exclusive {

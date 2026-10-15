@@ -59,8 +59,51 @@ pub enum Key {
     LiveRadio,
     /// Measure every untagged song now, or stop.
     MeasureLibrary,
+    /// The true-peak limiter, and its ceiling.
+    Limiter,
+    LimiterCeiling,
+    // The EQ view's rows.
+    EqOn,
+    EqMode,
+    /// Graphic band count.
+    EqBands,
+    EqPreset,
+    EqPreamp,
+    EqAutoPreamp,
+    /// Give the output device its own EQ, or take it away.
+    EqDevice,
+    EqSavePreset,
+    EqImport,
+    EqDeletePreset,
+    /// A graphic band's gain.
+    EqGraphic(usize),
+    /// A parametric band, as text.
+    EqBand(usize),
+    EqAddBand,
     /// Read-only facts: where files are.
     Info(&'static str),
+}
+
+impl Key {
+    /// A row of the EQ view rather than Settings.
+    pub fn is_eq(&self) -> bool {
+        matches!(
+            self,
+            Key::EqOn
+                | Key::EqMode
+                | Key::EqBands
+                | Key::EqPreset
+                | Key::EqPreamp
+                | Key::EqAutoPreamp
+                | Key::EqDevice
+                | Key::EqSavePreset
+                | Key::EqImport
+                | Key::EqDeletePreset
+                | Key::EqGraphic(_)
+                | Key::EqBand(_)
+                | Key::EqAddBand
+        )
+    }
 }
 
 /// How a row is edited.
@@ -601,6 +644,35 @@ pub fn rows(
             },
         );
     }
+
+    // Limiter
+    push(
+        "Limiter",
+        Setting {
+            key: Key::Limiter,
+            label: "True-peak limiter".into(),
+            help: "Last in the chain, so EQ boosts and leveling never clip. Below the ceiling it leaves the sound alone, bit for bit.",
+            control: Control::Toggle(cfg.limiter.on),
+            disabled: None,
+        },
+    );
+    push(
+        "Limiter",
+        Setting {
+            key: Key::LimiterCeiling,
+            label: "Ceiling".into(),
+            help: "How high peaks may go, between samples included. -1 dBTP leaves room for DACs that clip a little early.",
+            control: Control::Number {
+                value: (cfg.limiter.ceiling_db * 10.0).round() as i64,
+                min: -60,
+                max: 0,
+                step: 1,
+                scale: 10,
+                unit: " dBTP",
+            },
+            disabled: None,
+        },
+    );
 
     // Output
     let backends = [

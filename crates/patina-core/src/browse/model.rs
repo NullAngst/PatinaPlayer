@@ -28,6 +28,8 @@ pub enum Section {
     Queue,
     Downloads,
     Settings,
+    /// The EQ view.
+    Eq,
     /// Your top five songs, albums and artists.
     MostListened,
     TopAlbums,
@@ -79,6 +81,7 @@ impl Section {
             Section::Queue => "Queue",
             Section::Downloads => "Downloads",
             Section::Settings => "Settings",
+            Section::Eq => "EQ",
             Section::MostListened => "Most listened",
             Section::TopAlbums => "Top albums",
             Section::TopArtists => "Top artists",
@@ -354,6 +357,7 @@ pub struct Ctx<'a> {
     pub servers: &'a [crate::remote::ServerStatus],
     /// The cache, for Downloads.
     pub cache: Option<&'a crate::cache::Status>,
+    pub eq: &'a super::eq::EqState,
 }
 
 /// Queue entry for one of your stations.
@@ -472,6 +476,28 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 items.push(Item::Setting(setting));
             }
             Ok(("Settings".into(), items))
+        }
+        Source::Section(Section::Eq) => {
+            let greyed =
+                ctx.settings.config.output.bit_perfect == crate::audio::output::BitPerfect::On;
+            let mut items = Vec::new();
+            if greyed {
+                items.push(Item::Info {
+                    label: "Bit-perfect is on".into(),
+                    value: "the EQ is skipped while it is. Set bit-perfect to Off or Auto in Settings to use it.".into(),
+                });
+            }
+            let mut last = None;
+            for (group, setting) in super::eq::eq_rows(ctx.eq, greyed) {
+                if group != last
+                    && let Some(g) = group
+                {
+                    items.push(Item::Header(g));
+                }
+                last = group;
+                items.push(Item::Setting(setting));
+            }
+            Ok(("EQ".into(), items))
         }
         Source::Section(Section::Downloads) => {
             let eps = lib
@@ -766,6 +792,7 @@ fn build_library(
             Section::Radio
             | Section::Podcasts
             | Section::Settings
+            | Section::Eq
             | Section::Downloads
             | Section::Queue,
         )

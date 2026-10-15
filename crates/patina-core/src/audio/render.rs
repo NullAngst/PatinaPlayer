@@ -2,16 +2,21 @@
 //! [`Renderer::render`] from their audio thread. Nothing in here locks,
 //! allocates (after construction) or waits.
 //!
-//! Stages live here in the order from the design doc. Milestone 1 runs the
-//! fade gain and volume; leveling, the transition mixer, amp stack, EQ,
-//! channel tools, resampler, limiter and dither slot in at their marked
-//! places as their milestones land.
+//! Stages live here in the order from the design doc: EQ, then fade and
+//! volume, then the true-peak limiter. Leveling runs earlier, in the
+//! decoder thread; the transition mixer, amp stack, channel tools and
+//! resampler slot in at their marked places as their milestones land.
+//!
+//! The limiter looks ahead by peeking further into the ring than the block
+//! it takes, so it adds no delay and the stream's timing is untouched.
 
 use std::sync::atomic::Ordering;
 
 use rtrb::Consumer;
 
 use super::{SharedRef, StreamFormat};
+use crate::dsp::EqRt;
+use crate::dsp::limiter::{Limiter, MAX_LOOKAHEAD, TAPS_HALF};
 
 pub struct Renderer {
     ring: Consumer<f64>,
@@ -27,6 +32,11 @@ pub struct Renderer {
     last_from_ring: usize,
     last_len: usize,
     last_flush: bool,
+    eq: EqRt,
+    eq_gen: u64,
+    limiter: Limiter,
+    /// Audio past the block, peeked from the ring for the limiter.
+    ahead: Vec<f64>,
 }
 
 /// Largest block a backend asks for in one go. PipeWire quanta top out at
@@ -36,16 +46,29 @@ pub const MAX_BLOCK_FRAMES: usize = 16384;
 impl Renderer {
     pub fn new(ring: Consumer<f64>, shared: SharedRef, format: StreamFormat) -> Self {
         let volume = shared.volume.load();
+        let ch = format.channels as usize;
+        let mut eq = EqRt::new(
+            ch,
+            format.rate,
+            (MAX_BLOCK_FRAMES + MAX_LOOKAHEAD + 2 * TAPS_HALF) * ch,
+        );
+        let eq_gen = shared.eq_gen.load(Ordering::Acquire);
+        eq.set(&shared.eq.lock().unwrap());
+        eq.reset();
         Self {
             ring,
-            shared,
             format,
-            buf: vec![0.0; MAX_BLOCK_FRAMES * format.channels as usize],
+            buf: vec![0.0; MAX_BLOCK_FRAMES * ch],
             fade: 0.0,
             volume,
             last_from_ring: 0,
             last_len: 0,
             last_flush: false,
+            eq,
+            eq_gen,
+            limiter: Limiter::new(ch, format.rate, MAX_BLOCK_FRAMES),
+            ahead: vec![0.0; (MAX_LOOKAHEAD + 2 * TAPS_HALF) * ch],
+            shared,
         }
     }
 
@@ -97,6 +120,17 @@ impl Renderer {
         let ch = self.format.channels as usize;
         let mut frames = frames.min(MAX_BLOCK_FRAMES);
         let shared = &*self.shared;
+        if !exact {
+            let g = shared.eq_gen.load(Ordering::Acquire);
+            if g != self.eq_gen
+                && let Ok(p) = shared.eq.try_lock()
+            {
+                // try_lock: if the core is writing right now, the next
+                // block picks it up. Never wait on the output thread.
+                self.eq.set(&p);
+                self.eq_gen = g;
+            }
+        }
         self.last_from_ring = 0;
         self.last_flush = false;
         if exact {
@@ -126,6 +160,8 @@ impl Renderer {
                 .fetch_add((avail / ch) as u64, Ordering::Relaxed);
             shared.flush_ack.store(req, Ordering::Release);
             self.fade = 0.0;
+            self.eq.reset();
+            self.limiter.reset();
             shared.silent.store(true, Ordering::Relaxed);
             self.last_flush = true;
             if exact {
@@ -152,14 +188,28 @@ impl Renderer {
             return n;
         }
 
-        // Pull whole frames only.
-        let avail = (self.ring.slots() / ch * ch).min(n);
-        let got = match self.ring.read_chunk(avail) {
+        // Pull whole frames only, and peek past them for the limiter.
+        let look = if exact {
+            0
+        } else {
+            self.limiter.lookahead() * ch
+        };
+        let slots = self.ring.slots() / ch * ch;
+        let avail = slots.min(n);
+        let peek = slots.min(n + look);
+        let mut ahead_len = 0;
+        let got = match self.ring.read_chunk(peek) {
             Ok(chunk) => {
                 let (a, b) = chunk.as_slices();
-                self.buf[..a.len()].copy_from_slice(a);
-                self.buf[a.len()..a.len() + b.len()].copy_from_slice(b);
-                chunk.commit_all();
+                for (i, s) in a.iter().chain(b.iter()).enumerate() {
+                    if i < avail {
+                        self.buf[i] = *s;
+                    } else {
+                        self.ahead[i - avail] = *s;
+                    }
+                }
+                ahead_len = peek - avail;
+                chunk.commit(avail);
                 avail
             }
             Err(_) => 0,
@@ -179,9 +229,12 @@ impl Renderer {
 
         // 2. Leveling gain: applied by the decoder thread before the ring,
         //    so it switches at the exact sample one track becomes the next.
-        // 3. Transition mixer, crossfade          (milestone 10)
-        // 4. Amp stack                            (milestone 11)
-        // 5. EQ                                   (milestone 8)
+        // 3. Transition mixer, crossfade          (later)
+        // 4. Amp stack                            (milestone 13)
+        // 5. EQ
+        if !exact {
+            self.eq.process(&mut self.buf[..n]);
+        }
         // 6. Channel tools                        (later)
 
         // Fade (pause, resume, seek, stop) and 7. Volume, as one gain ramp.
@@ -210,9 +263,27 @@ impl Renderer {
         self.volume = vol_target;
         shared.silent.store(self.fade <= 0.0, Ordering::Relaxed);
 
-        // 8. Resample                             (milestone 10)
-        // 9. True-peak limiter                    (milestone 8)
-        // Until the limiter exists, hard-clip so a hot master never wraps.
+        // 8. Resample                             (milestone 12)
+        // 9. True-peak limiter. It sees what's coming through the same EQ
+        //    and gain, so it can be down by the time a peak arrives.
+        if !exact && shared.limiter_on.load(Ordering::Relaxed) {
+            let ahead = &mut self.ahead[..ahead_len];
+            self.eq.preview(ahead);
+            let fg = (self.fade * std::f64::consts::FRAC_PI_2).sin();
+            let g = fg * fg * vol_target;
+            if g != 1.0 {
+                for s in ahead.iter_mut() {
+                    *s *= g;
+                }
+            }
+            let ceiling = shared.limiter_ceiling.load();
+            let gr = self.limiter.process(&mut self.buf[..n], ahead, ceiling);
+            if gr > shared.limiter_gr.load() {
+                shared.limiter_gr.store(gr);
+            }
+        }
+        // Whatever's left over full scale (limiter off) is clipped, never
+        // wrapped.
         for s in &mut self.buf[..n] {
             *s = s.clamp(-1.0, 1.0);
         }

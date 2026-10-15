@@ -72,6 +72,10 @@ pub enum InputPurpose {
     },
     FeedUrl,
     AddFolder,
+    /// A name to save the EQ under.
+    EqPresetName,
+    /// An AutoEq or APO file to import.
+    EqImport,
     /// A typed value for a setting.
     SetValue {
         key: SettingKey,
@@ -297,6 +301,11 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(k.code, KeyCode::Char('q') | KeyCode::Char('c')) {
             self.quit = true;
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('e') && matches!(self.modal, Modal::None) {
+            self.b.switch(Section::Eq);
+            self.focus = Focus::Content;
             return;
         }
         match std::mem::replace(&mut self.modal, Modal::None) {
@@ -542,7 +551,7 @@ impl App {
         if self.media_key(k) {
             return;
         }
-        if self.b.section == Section::Settings && self.settings_key(k) {
+        if matches!(self.b.section, Section::Settings | Section::Eq) && self.settings_key(k) {
             return;
         }
         let queue = self.b.section == Section::Queue;
@@ -682,6 +691,49 @@ impl App {
             }
             (KeyCode::Enter, Some(st)) if st.key == SettingKey::MeasureLibrary => {
                 self.b.toggle_measure_library();
+            }
+            (KeyCode::Enter, Some(st)) if st.key == SettingKey::EqSavePreset => {
+                let cur = self.b.eq_settings().preset.clone();
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::EqPresetName,
+                    buf: if patina_core::eq::presets::is_builtin(&cur) {
+                        String::new()
+                    } else {
+                        cur
+                    },
+                };
+            }
+            (KeyCode::Enter, Some(st)) if st.key == SettingKey::EqImport => {
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::EqImport,
+                    buf: "~/".into(),
+                };
+            }
+            (KeyCode::Enter, Some(st))
+                if matches!(
+                    st.key,
+                    SettingKey::EqDevice | SettingKey::EqAddBand | SettingKey::EqDeletePreset
+                ) =>
+            {
+                self.b.change_setting(&st.key, Change::Toggle);
+            }
+            (KeyCode::Char('o'), _) if self.b.section == Section::Eq => self.b.eq_toggle(),
+            (KeyCode::Char('H'), Some(st)) if matches!(st.key, SettingKey::EqBand(_)) => {
+                if let SettingKey::EqBand(i) = st.key {
+                    self.b.eq_nudge_freq(i, -1.0);
+                }
+            }
+            (KeyCode::Char('L'), Some(st)) if matches!(st.key, SettingKey::EqBand(_)) => {
+                if let SettingKey::EqBand(i) = st.key {
+                    self.b.eq_nudge_freq(i, 1.0);
+                }
+            }
+            (KeyCode::Char('d') | KeyCode::Delete, Some(st))
+                if matches!(st.key, SettingKey::EqBand(_)) =>
+            {
+                if let SettingKey::EqBand(i) = st.key {
+                    self.b.eq_remove_band(i);
+                }
             }
             (KeyCode::Enter, Some(st)) => match &st.control {
                 Control::Toggle(_) => self.change_setting(st.key, Change::Toggle),
@@ -868,6 +920,10 @@ impl App {
                 }
             }
             InputPurpose::SetValue { key, .. } => self.change_setting(key, Change::Set(text)),
+            InputPurpose::EqPresetName => self.b.eq_save_preset(&text),
+            InputPurpose::EqImport => self
+                .b
+                .eq_import(&patina_core::config::expand_tilde(text.trim())),
             // Enter keeps the results on screen for browsing.
             InputPurpose::Search => {}
             InputPurpose::NewPlaylist { add } => self.b.create_playlist(&text, &add),
