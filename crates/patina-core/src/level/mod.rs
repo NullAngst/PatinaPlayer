@@ -431,6 +431,17 @@ fn same_album(a: &TrackInfo, b: &TrackInfo) -> bool {
     }
 }
 
+/// Whether `b` is the next song on `a`'s album: same album, and the track
+/// number one up (or not known). Crossfade stays out of such joins, and a
+/// rate change there is resampled rather than left as a gap.
+pub fn follows_on(a: &TrackInfo, b: &TrackInfo) -> bool {
+    same_album(a, b)
+        && match (track_number(a), track_number(b)) {
+            (Some(x), Some(y)) => y == x + 1,
+            _ => true,
+        }
+}
+
 /// Smart mode's question: is this song part of an album playing in order?
 /// It is when a neighbour in the queue is the same album and the track
 /// numbers run on (or the numbers are missing). The first song of a

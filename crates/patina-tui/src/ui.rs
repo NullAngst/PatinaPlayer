@@ -116,6 +116,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             };
             draw_pick(f, app, area, title, &names, *selected, false);
         }
+        Modal::PickChoice {
+            title,
+            options,
+            selected,
+            ..
+        } => draw_pick(f, app, area, title, options, *selected, false),
         Modal::Confirm { msg, .. } => draw_confirm(f, app, area, msg),
         _ => {}
     }
@@ -1520,6 +1526,15 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
             ));
         }
     }
+    // Resampled: from and to, in copper, since the source rate isn't
+    // what's playing.
+    if let Some(r) = s.resample {
+        right.push(Span::styled(
+            format!(" {} ", patina_core::browse::settings::resample_badge(r)),
+            Style::default().fg(t.copper).bg(t.raised),
+        ));
+        right.push(Span::raw(" "));
+    }
     if let Some(out) = &s.output {
         right.push(Span::styled(
             format!(" {out} "),
@@ -1783,6 +1798,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "EQ (Ctrl+E)",
             "Enter change, h/l ±0.5 dB, H/L move a band, o on/off, d remove a band",
         ),
+        ("Ctrl+O", "Pick the output device"),
         ("F5", "Check folders and podcast feeds for changes"),
         (
             "Mouse",

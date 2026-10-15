@@ -68,6 +68,7 @@ impl Session {
             buffer_ms: opts.buffer_ms.unwrap_or(cfg.output.buffer_ms),
             bit_perfect: cfg.output.bit_perfect,
             bit_perfect_device: cfg.output.bit_perfect_device.clone(),
+            ..cfg.output.clone()
         };
         let volume = opts.volume.unwrap_or(cfg.playback.volume);
         let fade_ms = opts.fade_ms.unwrap_or(cfg.playback.fade_ms);

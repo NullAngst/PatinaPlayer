@@ -344,6 +344,7 @@ pub struct SettingsState<'a> {
     /// A whole-library loudness run is going; None without the library.
     pub measuring: Option<bool>,
     pub lastfm: Option<crate::scrobble::ScrobbleStatus>,
+    pub outputs: &'a [crate::audio::output::OutDevice],
 }
 
 /// Everything a view can draw from besides the library itself.
@@ -466,6 +467,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 super::settings::Live {
                     measuring: st.measuring,
                     lastfm: st.lastfm.clone(),
+                    outputs: st.outputs.to_vec(),
                 },
             );
             let mut items = Vec::new();

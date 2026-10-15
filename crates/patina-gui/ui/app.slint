@@ -1206,6 +1206,10 @@ export component AppWindow inherits Window {
     // Bit-perfect on a DAC with no volume control: fixed at 100%.
     in property <bool> volume-locked;
     in property <string> output-label;
+    // Click the output chip to pick a device.
+    callback output-clicked;
+    // "44.1→48k" while the song is resampled.
+    in property <string> resample-label;
     in property <string> speed-label;
     // Narrow window: fewer things in the bottom bar.
     in property <bool> compact;
@@ -2232,10 +2236,16 @@ export component AppWindow inherits Window {
                             y: (parent.height - self.height) / 2;
                             text: root.badge;
                         }
+                        if root.resample-label != "" && !root.compact: Badge {
+                            y: (parent.height - self.height) / 2;
+                            text: root.resample-label;
+                            fg: P.copper;
+                        }
                         if root.output-label != "" && !root.compact: Chip {
                             y: (parent.height - self.height) / 2;
                             icon: Icons.output;
                             text: root.output-label;
+                            clicked => { root.output-clicked(); }
                         }
                         IconButton {
                             y: (parent.height - self.height) / 2;

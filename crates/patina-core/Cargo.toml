@@ -44,6 +44,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 # EBU R128 loudness and true peak, for leveling tracks that have no ReplayGain tags.
 ebur128 = "0.1"
+# Sample rate conversion, for fixed-rate output and for gapless joins
+# between songs at different rates.
+rubato = "5"
 
 [dev-dependencies]
 tempfile = "3"

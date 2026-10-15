@@ -7,8 +7,9 @@
 use std::path::PathBuf;
 
 use crate::audio::output::exclusive::HwDevice;
-use crate::audio::output::{Backend, BitPerfect};
+use crate::audio::output::{Backend, BitPerfect, OutDevice, RATES, SampleFormat};
 use crate::config::{Config, Theme};
+use crate::dsp::resample::Quality;
 use crate::remote::{ServerStatus, StreamFormat};
 
 /// Which option a row is.
@@ -24,6 +25,13 @@ pub enum Key {
     Backend,
     Device,
     BufferMs,
+    /// Output sample rate: match the source, or a fixed rate.
+    OutRate,
+    Resampler,
+    /// Sample format for ALSA.
+    OutFormat,
+    Dither,
+    Crossfade,
     BitPerfect,
     BitPerfectDevice,
     PodcastSpeed,
@@ -250,6 +258,42 @@ pub struct Live {
     pub measuring: Option<bool>,
     /// Last.fm's status; None without the library.
     pub lastfm: Option<crate::scrobble::ScrobbleStatus>,
+    /// Devices the shared output can play to, as last looked up.
+    pub outputs: Vec<OutDevice>,
+}
+
+/// Device choices: the system default, then each device there is, then
+/// the configured one if it isn't there now.
+pub fn device_options(outputs: &[OutDevice], cur: Option<&str>) -> (Vec<(String, String)>, usize) {
+    let mut opts: Vec<(String, String)> = vec![(String::new(), "System default".into())];
+    opts.extend(outputs.iter().map(|d| (d.id.clone(), d.label.clone())));
+    if let Some(cur) = cur
+        && !outputs.iter().any(|d| d.id == cur)
+    {
+        opts.push((cur.to_string(), format!("{cur} (not connected)")));
+    }
+    let index = cur
+        .and_then(|c| opts.iter().position(|o| o.0 == c))
+        .unwrap_or(0);
+    (opts, index)
+}
+
+/// "44.1 kHz", "48 kHz".
+pub fn khz(rate: u32) -> String {
+    format!("{} kHz", khz_num(rate))
+}
+
+/// "44.1→48k", for a resampling badge.
+pub fn resample_badge((from, to): (u32, u32)) -> String {
+    format!("{}→{}k", khz_num(from), khz_num(to))
+}
+
+fn khz_num(rate: u32) -> String {
+    if rate.is_multiple_of(1000) {
+        (rate / 1000).to_string()
+    } else {
+        format!("{:.1}", rate as f64 / 1000.0)
+    }
 }
 
 /// Rows, grouped under headers, for the Settings view.
@@ -262,7 +306,11 @@ pub fn rows(
     servers: &[ServerStatus],
     live: Live,
 ) -> Vec<(Option<&'static str>, Setting)> {
-    let Live { measuring, lastfm } = live;
+    let Live {
+        measuring,
+        lastfm,
+        outputs,
+    } = live;
     let lastfm = lastfm.as_ref();
     let mut v: Vec<(Option<&'static str>, Setting)> = Vec::new();
     let mut push = |group: &'static str, s: Setting| v.push((Some(group), s));
@@ -825,17 +873,16 @@ pub fn rows(
             },
         },
     );
+    let (options, index) = device_options(&outputs, cfg.output.device.as_deref());
     push(
         "Output",
         Setting {
-            disabled: None,
+            disabled: (cfg.output.backend == Backend::Null)
+                .then_some("Output is set to none: there's no device to pick."),
             key: Key::Device,
             label: "Device".into(),
-            help: "An ALSA device (\"default\", \"hw:1,0\") or a PipeWire node name.",
-            control: Control::Text {
-                value: cfg.output.device.clone().unwrap_or_default(),
-                empty: "system default",
-            },
+            help: "Where the sound goes. Also on the bottom bar: click the output there.",
+            control: Control::Choice { options, index },
         },
     );
     push(
@@ -852,6 +899,95 @@ pub fn rows(
                 step: 50,
                 scale: 1,
                 unit: " ms",
+            },
+        },
+    );
+
+    let mut rates: Vec<(String, String)> = vec![("match".into(), "Match the source".into())];
+    rates.extend(RATES.iter().map(|r| (r.to_string(), khz(*r))));
+    if cfg.output.rate != 0 && !RATES.contains(&cfg.output.rate) {
+        rates.push((cfg.output.rate.to_string(), khz(cfg.output.rate)));
+    }
+    let index = rates
+        .iter()
+        .position(|(v, _)| v.parse::<u32>().unwrap_or(0) == cfg.output.rate)
+        .unwrap_or(0);
+    push(
+        "Output",
+        Setting {
+            disabled: None,
+            key: Key::OutRate,
+            label: "Sample rate".into(),
+            help: "Match plays each album at its own rate. A fixed rate resamples everything to it. Bit-perfect ignores this.",
+            control: Control::Choice {
+                options: rates,
+                index,
+            },
+        },
+    );
+    push(
+        "Output",
+        Setting {
+            disabled: None,
+            key: Key::Resampler,
+            label: "Resampler".into(),
+            help: "Fast skips the anti-aliasing filter. Balanced is a short sinc filter. Best is a long one, run by FFT.",
+            control: Control::Choice {
+                options: Quality::ALL
+                    .iter()
+                    .map(|q| (q.as_str().to_string(), q.label().to_string()))
+                    .collect(),
+                index: Quality::ALL
+                    .iter()
+                    .position(|q| *q == cfg.output.resampler)
+                    .unwrap_or(1),
+            },
+        },
+    );
+    push(
+        "Output",
+        Setting {
+            disabled: (cfg.output.backend == Backend::PipeWire)
+                .then_some("PipeWire takes float and picks the device's format itself."),
+            key: Key::OutFormat,
+            label: "Sample format".into(),
+            help: "What ALSA is sent. Auto takes the best the device accepts. PipeWire always takes float.",
+            control: Control::Choice {
+                options: SampleFormat::ALL
+                    .iter()
+                    .map(|f| (f.as_str().to_string(), f.label().to_string()))
+                    .collect(),
+                index: SampleFormat::ALL
+                    .iter()
+                    .position(|f| *f == cfg.output.format)
+                    .unwrap_or(0),
+            },
+        },
+    );
+    push(
+        "Output",
+        Setting {
+            disabled: None,
+            key: Key::Dither,
+            label: "Dither".into(),
+            help: "TPDF dither when ALSA gets 16 or 24-bit. Trades rounding distortion for a hiss far below hearing.",
+            control: Control::Toggle(cfg.output.dither),
+        },
+    );
+    push(
+        "Output",
+        Setting {
+            disabled: None,
+            key: Key::Crossfade,
+            label: "Crossfade".into(),
+            help: "Fade each song into the next. Never between songs that follow on from each other on an album.",
+            control: Control::Number {
+                value: (cfg.output.crossfade_ms / 100) as i64,
+                min: 0,
+                max: 120,
+                step: 5,
+                scale: 10,
+                unit: " s",
             },
         },
     );

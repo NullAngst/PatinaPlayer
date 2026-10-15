@@ -334,6 +334,7 @@ fn settings_rows_and_bit_perfect() {
             settings::Live {
                 measuring: Some(false),
                 lastfm: None,
+                outputs: Vec::new(),
             },
         )
     };

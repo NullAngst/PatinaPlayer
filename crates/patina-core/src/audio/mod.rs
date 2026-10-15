@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 pub const RING_SECONDS: usize = 2;
 
 /// Sample layout the decoder hands to the output. The ring always carries
-/// interleaved f64 at the source rate; this is what changes between tracks.
+/// interleaved f64, at the source rate or the rate it was resampled to;
+/// this is what changes between tracks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamFormat {
     pub rate: u32,
@@ -107,6 +108,17 @@ pub struct Shared {
     pub limiter_ceiling: AtomicF64,
     /// Deepest gain reduction since the core last looked, in dB.
     pub limiter_gr: AtomicF64,
+    /// Output sample rate. 0 follows the source; anything else and every
+    /// track is resampled to it.
+    pub out_rate: AtomicU32,
+    /// A rate the shared device insisted on (an ALSA hw device that can't
+    /// play the source rate). 0 when there's none. Followed like
+    /// `out_rate`, which wins when both are set.
+    pub device_rate: AtomicU32,
+    /// Resampler quality, as [`crate::dsp::resample::Quality`].
+    pub resample_quality: AtomicU8,
+    /// Crossfade between songs, in milliseconds. 0 is off.
+    pub crossfade_ms: AtomicU32,
 }
 
 impl Default for Shared {
@@ -132,6 +144,10 @@ impl Default for Shared {
             limiter_on: AtomicBool::new(true),
             limiter_ceiling: AtomicF64::new(10f64.powf(-1.0 / 20.0)),
             limiter_gr: AtomicF64::new(0.0),
+            out_rate: AtomicU32::new(0),
+            device_rate: AtomicU32::new(0),
+            resample_quality: AtomicU8::new(crate::dsp::resample::Quality::Balanced.to_u8()),
+            crossfade_ms: AtomicU32::new(0),
         }
     }
 }
@@ -140,9 +156,12 @@ pub type SharedRef = Arc<Shared>;
 
 impl Shared {
     /// Whether anything in the chain would change the sound, which keeps
-    /// Auto bit-perfect off.
+    /// Auto bit-perfect off. A fixed output rate and crossfade count.
     pub fn dsp_active(&self) -> bool {
-        self.level.mode() != crate::level::LevelMode::Off || self.eq.lock().unwrap().changes_sound()
+        self.level.mode() != crate::level::LevelMode::Off
+            || self.out_rate.load(Ordering::Relaxed) != 0
+            || self.crossfade_ms.load(Ordering::Relaxed) != 0
+            || self.eq.lock().unwrap().changes_sound()
     }
 
     /// New EQ settings for the renderer to pick up.

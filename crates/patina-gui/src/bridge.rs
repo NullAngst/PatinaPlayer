@@ -132,6 +132,7 @@ Enter        in Settings: flip, pick or edit the option
 q            queue panel
 l            love the song playing
 Ctrl+E       the EQ (o in it: on or bypassed)
+Ctrl+O       pick the output device (or click the output on the bottom bar)
 F5           check folders and feeds for changes
 Ctrl+Q       quit
 
@@ -1135,6 +1136,10 @@ impl State {
         ui.set_volume_locked(s.volume_locked);
         ui.set_muted(s.muted);
         ui.set_output_label(ss(s.output.clone().unwrap_or_default()));
+        ui.set_resample_label(ss(s
+            .resample
+            .map(patina_core::browse::settings::resample_badge)
+            .unwrap_or_default()));
         let podcast = s
             .track
             .as_ref()
@@ -1581,6 +1586,31 @@ impl State {
         ui.set_dlg_ok(ss(ok));
         ui.set_dialog(3);
         self.dlg = Dlg::Confirm(c);
+    }
+
+    /// Where the sound goes, from the output chip: the devices there are
+    /// now, the current one marked.
+    fn pick_device(&mut self, ui: &AppWindow) {
+        let Some(st) = self.b.device_setting() else {
+            return;
+        };
+        if let Some(why) = st.disabled {
+            return self.b.note(why);
+        }
+        if let Control::Choice { options, index } = &st.control {
+            let items = options.iter().enumerate().map(|(i, (_, l))| {
+                ss(if i == *index {
+                    format!("{l}   (current)")
+                } else {
+                    l.clone()
+                })
+            });
+            set_strings(&self.dlg_items, items);
+            ui.set_dlg_title(ss("Output device"));
+            ui.set_dlg_new_first(false);
+            ui.set_dialog(2);
+            self.dlg = Dlg::Choose(st.key.clone());
+        }
     }
 
     /// Enter on a settings row: the obvious thing for its kind.
@@ -2197,6 +2227,7 @@ impl State {
                     let _ = slint::quit_event_loop();
                 }
                 "e" | "E" => self.b.switch(Section::Eq),
+                "o" | "O" => self.pick_device(ui),
                 "f" | "F" => {
                     let q = self.b.start_search();
                     ui.set_search_text(ss(q));
@@ -2483,6 +2514,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
     on!(on_eq_point, |s, _u, i, x, g| s
         .eq_point(i as usize, x as f64, g as f64));
     on!(on_eq_chip, |s, _u| s.b.switch(Section::Eq));
+    on!(on_output_clicked, |s, u| s.pick_device(&u));
     on!(on_love_clicked, |s, _u| s.b.toggle_love());
     on!(on_level_clicked, |s, u| {
         let tip = u.get_level_tip().to_string();

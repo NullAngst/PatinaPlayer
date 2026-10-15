@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 11 of the build plan: everything from milestones 1 to 10 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, and the EQ and true-peak limiter), plus Last.fm: linking your account from Settings, Now Playing, scrobbling with an offline queue, love, and a choice per server of who scrobbles its songs, so nothing counts twice. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Output controls (device picker, sample rate modes, resampler, dither, crossfade) come next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 12 of the build plan: everything from milestones 1 to 11 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, and Last.fm), plus the output controls: a device picker on the bottom bar, a fixed output rate or the source's own, three resampler qualities, gapless joins across sample rates, sample format and TPDF dither for ALSA, and crossfade. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The amp stack comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -76,6 +76,18 @@ This is milestone 11 of the build plan: everything from milestones 1 to 10 (the 
 - While it's working, the bottom bar shows how much it's taking off (`LIM -2.2 dB`, in copper), held for a moment so you can see it.
 - Bit-perfect playback skips it, along with everything else.
 
+**Output**
+- Click the output on the bottom bar (or press `Ctrl+O` in either app) to pick where the sound goes: every PipeWire output there is, by name, or the ALSA devices when PipeWire isn't running. The song carries on from where it was on the new device. Settings has the same list under Output, Device.
+- Sample rate: Match the source (the default) plays each album at its own rate. A fixed rate (44.1, 48, 88.2, 96, 176.4 or 192 kHz, or any rate in config.toml) resamples everything to it.
+- Gapless across rates. When the next song on the same album has a different rate, it's resampled to the rate already playing, so the join stays gapless. Between albums the output reopens at the new rate instead, a short gap, and each album keeps its own rate. With a fixed rate, songs that follow on at the same rate go through one resampler that never stops, which is exactly the same as resampling the whole album in one go.
+- Resampler quality: Fast is cubic interpolation, cheap, with no anti-aliasing filter. Balanced (the default) is a 128-tap sinc filter. Best is a long sinc filter run by FFT. The bottom bar shows `44.1→48k` in copper while a song is being resampled.
+- The resampler's own delay is measured to a fraction of a sample and taken out, and the edges of each song are run through the filter with a mirror of the song's own first and last samples, so nothing is shifted and there's no dip at the start or end. The tests hold every quality to within 2/10,000 of the exact signal.
+- If an ALSA device can't play a rate (a `hw:` device that only does 48 kHz, say), the output resamples to the rate it offers and says so in the log, instead of failing.
+- Sample format, for ALSA: Auto takes the best the device accepts (float, then 32, 24 and 16-bit), or pick one. PipeWire always takes float and sets the device's format itself, so the row greys out under PipeWire.
+- Dither: TPDF dither on 16 and 24-bit ALSA output, on by default. A sample that's already exact at that depth (an untouched 16-bit file at 16 bits) goes out exact; everything else gets the dither instead of plain rounding.
+- Crossfade: 0 to 12 seconds, equal power. Never between songs that follow on from each other on an album, so live albums and DJ mixes stay gapless. Radio and podcasts don't crossfade, and a skip by hand starts the next song at once.
+- None of these touch bit-perfect playback. Auto bit-perfect counts a fixed rate and crossfade as changing the sound, the same as leveling and the EQ.
+
 **Cache and offline**
 - Server songs are kept on disk in three ways. Prefetch downloads the songs coming up in the queue, nearest first. The cache keeps what you've played, so a replay doesn't hit the server, and drops the least recently played songs once it's full. Pinned songs stay until you unpin them.
 - Every server song plays through the cache. One that's on disk opens as a local file. One that isn't plays from its download while the download runs, so it starts as soon as the first bytes arrive, then it's kept for next time.
@@ -131,7 +143,7 @@ This is milestone 11 of the build plan: everything from milestones 1 to 10 (the 
 - The bottom bar shows BIT-PERFECT while it's happening. NOT BIT-PERFECT in copper means it was refused; click it for the reason. EXCLUSIVE means a lossy source (MP3, AAC) going out untouched as integers, which is as good as it gets for those.
 - Volume goes to the DAC's own volume control if it has one. If it doesn't, volume is fixed at 100% and the slider greys out. Mute still mutes.
 - Radio and podcasts never play bit-perfect. Radio isn't a file, and a sped-up podcast is processed by definition.
-- Auto mode means "bit-perfect whenever nothing would change the sound": leveling Off, and the EQ bypassed or flat. With leveling on (the default), that's never, so Auto is for people who set leveling to Off.
+- Auto mode means "bit-perfect whenever nothing would change the sound": leveling Off, the EQ bypassed or flat, the sample rate set to Match, and crossfade off. With leveling on (the default), that's never, so Auto is for people who set leveling to Off.
 - With bit-perfect On, leveling, the EQ and the limiter are skipped, and the leveling and EQ settings grey out with the reason.
 - Pick the card under Bit-perfect device. The list comes from ALSA when you open Settings, so a USB DAC you just plugged in shows up.
 
@@ -317,6 +329,11 @@ device = ""              # ALSA device or PipeWire node; empty is the default
 buffer_ms = 200          # 50 to 1000
 bit_perfect = "off"      # off, on or auto
 bit_perfect_device = ""  # like "hw:CARD=DAC,DEV=0"; empty is the first card
+rate = "match"           # or a rate in Hz, like 48000, to resample everything to
+resampler = "balanced"   # fast, balanced or best
+format = "auto"          # ALSA only: auto, f32, s32, s24 or s16
+dither = true            # TPDF dither on 16 and 24-bit ALSA output
+crossfade_ms = 0         # 0 to 12000
 
 [appearance]
 theme = "runout"         # runout, light, dark, oled, kawaii-light or kawaii-dark
@@ -448,6 +465,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 | q | Queue panel |
 | l | Love the song playing |
 | Ctrl+E | The EQ view |
+| Ctrl+O | Pick the output device |
 | . | Jump to the playing track in Queue |
 | F5 | Check folders for changes and refresh podcast feeds |
 | ? | Help |
@@ -455,7 +473,7 @@ These are the TUI keys. The desktop app uses the same ones, with these differenc
 
 In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe. In a show's episodes: Enter plays (resuming), `w` downloads (or cancels), `x` deletes the downloaded file, `P` toggles played.
 
-In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option, `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`. In the EQ: Enter flips, cycles or edits, `h`/`l` move a band half a dB, `H`/`L` move a parametric band's frequency, `o` turns the EQ on or off, `d` removes a parametric band. In Downloads: Enter opens a pinned item, `w` pauses or resumes a download, `x` cancels it or unpins, `W` pauses all downloads, `C` clears the cache.
+In the Queue: `d` remove, `J`/`K` move down or up, `S` add the queue to a playlist (new or existing), `L` load the queue saved on your server, `C` clear. In Settings: Enter flips, cycles or edits the option (a long list, like Device or Sample rate, opens to pick from), `h`/`l` step it down or up, `N` adds a library folder, `d` removes a folder or a server. On a server's row, Enter syncs it now and `E` edits it (renames it, for a DLNA server). On Find DLNA servers, Enter searches the network and shows what it found; Enter on one adds it. In Playlists: `N` new, `R` rename, `D` delete, and inside a playlist `d` and `J`/`K`. In the EQ: Enter flips, cycles or edits, `h`/`l` move a band half a dB, `H`/`L` move a parametric band's frequency, `o` turns the EQ on or off, `d` removes a parametric band. In Downloads: Enter opens a pinned item, `w` pauses or resumes a download, `x` cancels it or unpins, `W` pauses all downloads, `C` clears the cache.
 
 Pressing Enter on a track plays the list it's in from that track, so Enter on track 3 of an album plays the album from track 3. Use `a` if you'd rather add to what's already queued.
 
@@ -479,7 +497,7 @@ crates/
     src/cache/          the song cache: downloads, reading a song while it downloads, prefetch, pins, eviction
     src/mix.rs          genre, artist and track mixes, and who's similar
     src/level/          leveling: picking the gain, EBU R128 measuring, the live normalizer, the measuring thread
-    src/dsp/            the real-time stages: biquad filters, the EQ as it runs, the true-peak limiter
+    src/dsp/            the real-time stages: biquad filters, the EQ as it runs, the true-peak limiter, the resampler
     src/eq/             the EQ as you set it: graphic and parametric bands, presets, AutoEq and APO import
     src/lastfm.rs       Last.fm calls: signing, linking, Now Playing, scrobbles, love, similar artists and songs
     src/scrobble.rs     the Last.fm thread: linking, the scrobble queue, retries
@@ -526,6 +544,8 @@ The EQ tests play a 1 kHz tone through the player with a capturing output: a +6 
 
 The Last.fm tests run a stand-in Last.fm that checks every call's signature. They link through the approval page (waiting while it isn't approved yet), send scrobbles while it's down and check they arrive later in batches of 50 with their original times, drop a session it stops accepting while keeping the queue, love a song and ask if it's loved, and play a 32-second song in real time to see Now Playing at the start and the scrobble at the halfway mark, timed from when it started. Another checks, for each choice of who scrobbles, that a server song goes to Last.fm, to the stand-in Navidrome's scrobble endpoint, or both, exactly once each.
 
+The output tests play FFmpeg-made tones through the player with a capturing output and compare them with the same tone worked out exactly. Three 44.1 kHz parts of an album cut at odd places come out at a fixed 48 kHz through one output, every frame there, within 3/10,000 of the exact tone across the joins. An album that goes from 44.1 to 48 kHz between tracks stays on one output with no gap and no click at the join. Two albums at different rates each get their own rate. A one-second crossfade between two steady levels is checked at the start, quarter points and end of the fade against the cos and sin curve, and two tracks that follow on on an album are checked untouched with crossfade on. Unit tests check every resampler quality for pitch, length, level, lining up to a fraction of a sample, and that Balanced and Best keep a 30 kHz tone out of a 44.1 kHz output where Fast lets it fold down. The dither test checks it averages to the true value with TPDF's noise level and keeps a tone a third of a step tall that rounding wipes out. One more lists a real PipeWire's outputs.
+
 To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
 
 The network tests run a small HTTP server inside the test itself: an ICY stream that hangs up on purpose to check reconnects, a `.pls` with a dead first mirror, real HLS segments, an RSS feed, and a download that breaks halfway to check resume. No internet needed.
@@ -542,9 +562,12 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - The themes were checked under X11 (Xvfb) here, at full width and narrow, like the rest of the desktop app.
 - The AppImage build was run end to end on Ubuntu 24.04 here, the same system as the GitHub runner, but the workflow itself hasn't run on GitHub yet. The first tagged run is the real test.
 - The desktop app was checked under X11 (Xvfb) here, not on a real Plasma Wayland session. Slint supports Wayland natively, so it should be fine, but that's untested from this box.
-- When the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 12.
+- Between albums at different rates (with the rate on Match), the output reopens at the new rate and there's a short gap. That's on purpose: each album plays at its own rate. Set a fixed rate if you'd rather never have the gap.
+- A change to crossfade applies from the next song on, since the end of the song playing is already decided. Rate, resampler, format and dither changes reopen the output at once, from where it was.
+- The 24-bit ALSA format is S24_LE, 24 bits in a 32-bit word. Devices that only take packed 3-byte 24-bit get 32-bit or 16-bit from Auto instead.
+- The device list and switching were tested against a real PipeWire 1.0 with stand-in outputs (null sinks), and the ALSA list hasn't met a sound card at all (this box has none). Real USB DACs, HDMI and Bluetooth outputs haven't been tried from here.
+- Crossfade needs the two songs at the same channel layout. A stereo song into a 5.1 one plays out the stereo song in full, then starts the next.
 - Built from source the normal way, both binaries link your system's FFmpeg, PipeWire and ALSA. The AppImage links its own FFmpeg in.
-- 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
 - Graphic bands are peak filters, and neighbours overlap, so two adjacent bands at +6 dB make a bump a little over 6 dB between them. The curve shows what you get. Imports fitted to the 31-band EQ come within about a dB of the AutoEq curve in the tests, and a curve past ±12 dB stops at 12.
 - The EQ's filters are recalculated on every change and keep their memory, without a crossfade between old and new settings. A very fast drag of a big boost can make a faint zipper sound while you drag. Bypass and on do crossfade.
 - Per-device EQ was tested here against a real PipeWire 1.0 with two stand-in outputs (null sinks), switching the default between them, and the CI runs the same. It hasn't met real headphones, Bluetooth or HDMI outputs from this box. Bluetooth headsets that change profile (A2DP to headset mode) show up as a different device, so they'd want an EQ each.

@@ -143,6 +143,8 @@ pub struct Browser {
     pub settings_info: SettingsInfo,
     /// Sound cards for the bit-perfect picker, looked up when Settings opens.
     devices: Vec<HwDevice>,
+    /// Devices the shared output can play to, as last looked up.
+    outputs: Vec<crate::audio::output::OutDevice>,
     pub sidebar: Vec<SideEntry>,
     pub sidebar_sel: usize,
     pub view_error: Option<String>,
@@ -246,6 +248,7 @@ impl Browser {
             config: s.config,
             settings_info: s.settings_info,
             devices: Vec::new(),
+            outputs: Vec::new(),
             checks: HashMap::new(),
             check_tx,
             check_rx,
@@ -510,6 +513,7 @@ impl Browser {
         if s == Section::Settings {
             // Cards come and go (a USB DAC); look again each time.
             self.devices = exclusive::list_devices();
+            self.refresh_outputs();
             self.refresh_section(Section::Settings);
         }
         if s != Section::Queue && !self.stacks.contains_key(&s) {
@@ -532,6 +536,7 @@ impl Browser {
                 podcast_trim: self.podcast_trim,
                 measuring: self.measuring_library(),
                 lastfm: self.scrobble.as_ref().map(|s| s.status()),
+                outputs: &self.outputs,
             },
             stations: &self.stations,
             checks: &self.checks,
@@ -1313,6 +1318,7 @@ impl Browser {
             settings::Live {
                 measuring: self.measuring_library(),
                 lastfm: self.scrobble.as_ref().map(|s| s.status()),
+                outputs: self.outputs.clone(),
             },
         )
         .into_iter()
@@ -1383,12 +1389,51 @@ impl Browser {
                     let v = &options[*index].0;
                     w(config::set_value(&path, "output", "backend", v.as_str()))?;
                     self.config.output.backend = v.parse().unwrap_or_default();
+                    self.refresh_outputs();
                     self.apply_output();
                 }
-                (Key::Device, Control::Text { value, .. }) => {
-                    w(config::set_value(&path, "output", "device", value.as_str()))?;
-                    self.config.output.device = (!value.is_empty()).then(|| value.clone());
+                (Key::Device, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(&path, "output", "device", v.as_str()))?;
+                    self.config.output.device = (!v.is_empty()).then(|| v.clone());
                     self.apply_output();
+                }
+                (Key::OutRate, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    match v.parse::<i64>() {
+                        Ok(r) => w(config::set_value(&path, "output", "rate", r))?,
+                        Err(_) => w(config::set_value(&path, "output", "rate", "match"))?,
+                    }
+                    self.config.output.rate = v.parse().unwrap_or(0);
+                    self.apply_output_format();
+                }
+                (Key::Resampler, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(&path, "output", "resampler", v.as_str()))?;
+                    self.config.output.resampler = v.parse().unwrap_or_default();
+                    self.apply_output_format();
+                }
+                (Key::OutFormat, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(&path, "output", "format", v.as_str()))?;
+                    self.config.output.format = v.parse().unwrap_or_default();
+                    self.apply_output_format();
+                }
+                (Key::Dither, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "output", "dither", *on))?;
+                    self.config.output.dither = *on;
+                    self.apply_output_format();
+                }
+                (Key::Crossfade, Control::Number { value, .. }) => {
+                    let ms = (*value * 100) as u32;
+                    w(config::set_value(
+                        &path,
+                        "output",
+                        "crossfade_ms",
+                        ms as i64,
+                    ))?;
+                    self.config.output.crossfade_ms = ms;
+                    self.player.send(Command::SetCrossfade(ms));
                 }
                 (Key::BufferMs, Control::Number { value, .. }) => {
                     w(config::set_value(&path, "output", "buffer_ms", *value))?;
@@ -1530,6 +1575,29 @@ impl Browser {
             device: o.device.clone(),
             buffer_ms: o.buffer_ms,
         });
+    }
+
+    fn apply_output_format(&self) {
+        let o = &self.config.output;
+        self.player.send(Command::SetOutputFormat {
+            rate: o.rate,
+            resampler: o.resampler,
+            format: o.format,
+            dither: o.dither,
+        });
+    }
+
+    /// Look up the devices the output can play to again, for Settings and
+    /// the bottom bar's device picker.
+    pub fn refresh_outputs(&mut self) {
+        self.outputs = crate::audio::output::list_outputs(self.config.output.backend);
+    }
+
+    /// The Device row, for a picker on the bottom bar. Looks the devices
+    /// up again first, since they come and go.
+    pub fn device_setting(&mut self) -> Option<Setting> {
+        self.refresh_outputs();
+        self.settings_row(&Key::Device)
     }
 
     fn apply_bit_perfect(&self) {

@@ -492,7 +492,15 @@ fn settings_are_saved_and_applied() {
     assert_eq!(setting(&mut b, Key::BufferMs), "300 ms");
     b.change_setting(&Key::FadeMs, Change::Set("0".into()));
     assert_eq!(setting(&mut b, Key::FadeMs), "0 ms");
-    b.change_setting(&Key::Device, Change::Set(" hw:1,0 ".into()));
+    // Output controls.
+    b.change_setting(&Key::OutRate, Change::Choose(2));
+    assert_eq!(setting(&mut b, Key::OutRate), "48 kHz");
+    b.change_setting(&Key::Resampler, Change::Step(1));
+    assert_eq!(setting(&mut b, Key::Resampler), "Best");
+    b.change_setting(&Key::Crossfade, Change::Set("2.5".into()));
+    assert_eq!(setting(&mut b, Key::Crossfade), "2.5 s");
+    b.change_setting(&Key::Dither, Change::Toggle);
+    b.change_setting(&Key::OutFormat, Change::Choose(4));
 
     // Bit-perfect asks first, then saves.
     assert!(
@@ -517,7 +525,17 @@ fn settings_are_saved_and_applied() {
     assert_eq!(cfg.appearance.theme, patina_core::config::Theme::Oled);
     assert_eq!(cfg.output.buffer_ms, 300);
     assert_eq!(cfg.playback.fade_ms, 0);
-    assert_eq!(cfg.output.device.as_deref(), Some("hw:1,0"));
+    assert_eq!(cfg.output.rate, 48000);
+    assert_eq!(
+        cfg.output.resampler,
+        patina_core::dsp::resample::Quality::Best
+    );
+    assert_eq!(cfg.output.crossfade_ms, 2500);
+    assert!(!cfg.output.dither);
+    assert_eq!(
+        cfg.output.format,
+        patina_core::audio::output::SampleFormat::S16
+    );
     assert_eq!(
         cfg.output.bit_perfect,
         patina_core::audio::output::BitPerfect::On

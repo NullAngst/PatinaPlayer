@@ -121,6 +121,14 @@ pub enum Modal {
         found: Vec<Found>,
         selected: usize,
     },
+    /// One of a setting's choices, picked from a list: the output device
+    /// from anywhere with Ctrl+O.
+    PickChoice {
+        title: String,
+        key: SettingKey,
+        options: Vec<String>,
+        selected: usize,
+    },
 }
 
 pub struct App {
@@ -308,6 +316,10 @@ impl App {
             self.focus = Focus::Content;
             return;
         }
+        if ctrl && k.code == KeyCode::Char('o') && matches!(self.modal, Modal::None) {
+            self.pick_device();
+            return;
+        }
         match std::mem::replace(&mut self.modal, Modal::None) {
             Modal::None => {}
             Modal::Help => return,
@@ -335,6 +347,44 @@ impl App {
                         self.modal = Modal::PickDlna { found, selected };
                     }
                     _ => self.modal = Modal::PickDlna { found, selected },
+                }
+                return;
+            }
+            Modal::PickChoice {
+                title,
+                key,
+                options,
+                mut selected,
+            } => {
+                match k.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter => self.change_setting(key, Change::Choose(selected)),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        self.modal = Modal::PickChoice {
+                            title,
+                            key,
+                            options,
+                            selected,
+                        };
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(options.len().saturating_sub(1));
+                        self.modal = Modal::PickChoice {
+                            title,
+                            key,
+                            options,
+                            selected,
+                        };
+                    }
+                    _ => {
+                        self.modal = Modal::PickChoice {
+                            title,
+                            key,
+                            options,
+                            selected,
+                        }
+                    }
                 }
                 return;
             }
@@ -741,6 +791,16 @@ impl App {
             }
             (KeyCode::Enter, Some(st)) => match &st.control {
                 Control::Toggle(_) => self.change_setting(st.key, Change::Toggle),
+                // A long list opens as a list to pick from; a short one
+                // just steps.
+                Control::Choice { options, index } if options.len() > 3 => {
+                    self.modal = Modal::PickChoice {
+                        title: format!("{}. Enter picks it", st.label),
+                        key: st.key.clone(),
+                        options: options.iter().map(|(_, l)| l.clone()).collect(),
+                        selected: *index,
+                    };
+                }
                 Control::Choice { .. } => self.change_setting(st.key, Change::Step(1)),
                 Control::Number { value, scale, .. } => {
                     let buf = if *scale == 1 {
@@ -841,6 +901,24 @@ impl App {
     }
 
     /// Change a setting, asking first if it needs a yes.
+    /// Where the sound goes, picked from the devices there are now.
+    fn pick_device(&mut self) {
+        let Some(st) = self.b.device_setting() else {
+            return;
+        };
+        if let Some(why) = st.disabled {
+            return self.b.note(why);
+        }
+        if let Control::Choice { options, index } = st.control {
+            self.modal = Modal::PickChoice {
+                title: "Output device. Enter picks it".into(),
+                key: st.key,
+                options: options.into_iter().map(|(_, l)| l).collect(),
+                selected: index,
+            };
+        }
+    }
+
     fn change_setting(&mut self, key: SettingKey, change: Change) {
         match self.b.setting_warning(&key, &change) {
             Some(w) => {

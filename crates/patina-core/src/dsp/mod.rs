@@ -4,6 +4,7 @@
 
 pub mod biquad;
 pub mod limiter;
+pub mod resample;
 
 use biquad::{Band, Coeffs, State};
 

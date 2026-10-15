@@ -4,10 +4,20 @@
 //! of one track and the first sample of the next sit next to each other
 //! in the ring, with nothing in between.
 //!
-//! When the next track has a different sample rate or channel layout, the
-//! ring is left to drain and a new one (and a new output stream) is opened
-//! at the new format. That join has a short gap, which is the honest
-//! result until the resampler lands.
+//! When the next track has a different sample rate, what happens depends
+//! on the join. The next song on the same album (or a crossfade) keeps the
+//! ring's rate and is resampled to it, so the join stays gapless. Any other
+//! join lets the ring drain and opens a new one, and a new output stream,
+//! at the new rate: a short gap between albums, and the source rate kept.
+//! A fixed output rate resamples everything to that rate, always gapless.
+//! A different channel layout always takes a new ring.
+//!
+//! Crossfade holds back the last few seconds of each song instead of
+//! pushing them. At the end of the song, if the next one qualifies, those
+//! seconds are mixed into the start of the next with an equal-power curve.
+//! If it doesn't (the next song on the same album, a podcast, a station),
+//! they go out as they are and nothing is lost. A skip by hand never
+//! crossfades: it flushes the ring and starts the new song at once.
 //!
 //! Radio is the exception to "end of stream means next track". A live
 //! stream that ends or errors is reconnected with backoff, trying each of
@@ -23,6 +33,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use super::decoder::{OpenOptions, Source};
 use super::output::BitPerfect;
 use super::{Depth, SharedRef, StreamFormat};
+use crate::dsp::resample::{self, Quality};
 use crate::level::{self, Level, LevelMode, LiveNorm};
 use crate::queue::{EntryId, Queue};
 use crate::track::{MediaKind, TrackInfo};
@@ -61,6 +72,8 @@ pub struct Segment {
     pub info: TrackInfo,
     /// The leveling gain this track plays at.
     pub level: Level,
+    /// Resampled from this rate to that one, if it is.
+    pub resample: Option<(u32, u32)>,
 }
 
 #[allow(clippy::large_enum_variant)] // a few messages a second at most
@@ -150,6 +163,54 @@ struct Feeder {
     level: Level,
     level_gen: u64,
     gain: Gain,
+    /// Decoded, levelled samples at the source format, on their way
+    /// through the resampler into `pending`.
+    dec: Vec<f64>,
+    /// Source rate to ring rate, when they differ.
+    rs: Option<resample::Stream>,
+    /// Frames at the end of `pending` held back for a crossfade.
+    hold: usize,
+    /// The previous song's tail, being mixed into this one's start.
+    xf: Option<Xfade>,
+}
+
+/// The end of one song fading out under the start of the next.
+struct Xfade {
+    tail: Vec<f64>,
+    /// Samples of the tail already mixed.
+    pos: usize,
+    ch: usize,
+}
+
+impl Xfade {
+    /// Mix the tail into `buf`, which starts where the last call ended.
+    /// Equal power: the outgoing song follows cos, the incoming sin.
+    fn mix(&mut self, buf: &mut [f64]) {
+        let frames = (self.tail.len() / self.ch).max(1) as f64;
+        for f in buf.chunks_exact_mut(self.ch) {
+            if self.pos >= self.tail.len() {
+                return;
+            }
+            let t = (self.pos / self.ch) as f64 / frames * std::f64::consts::FRAC_PI_2;
+            let (a, b) = (t.cos(), t.sin());
+            for (i, s) in f.iter_mut().enumerate() {
+                *s = self.tail[self.pos + i] * a + *s * b;
+            }
+            self.pos += self.ch;
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.pos >= self.tail.len()
+    }
+
+    /// The incoming song ended before the fade did: the rest of the tail
+    /// fades out over silence.
+    fn rest(&mut self, out: &mut Vec<f64>) {
+        let start = out.len();
+        out.resize(start + self.tail.len() - self.pos, 0.0);
+        self.mix(&mut out[start..]);
+    }
 }
 
 /// Applies the leveling gain to decoded samples on their way into the
@@ -244,6 +305,10 @@ impl Feeder {
                 target: 1.0,
                 ..Default::default()
             },
+            dec: Vec::with_capacity(32768),
+            rs: None,
+            hold: 0,
+            xf: None,
         }
     }
 
@@ -293,7 +358,7 @@ impl Feeder {
                         self.flush();
                         self.source = None;
                         let _ = self.msgs.send(FeedMsg::Flushed);
-                        self.open_from(entry, pos);
+                        self.open_from(entry, pos, false);
                     }
                     FeedCmd::Seek(pos) => {
                         if self.source.as_ref().is_some_and(|s| s.is_live()) {
@@ -308,7 +373,7 @@ impl Feeder {
                             // Seek failed (or nothing open): reopen there.
                             _ => {
                                 self.source = None;
-                                self.open_from(entry, pos);
+                                self.open_from(entry, pos, false);
                             }
                         }
                     }
@@ -331,6 +396,10 @@ impl Feeder {
     fn flush(&mut self) {
         self.pending.clear();
         self.pending_off = 0;
+        self.xf = None;
+        if let Some(r) = self.rs.as_mut() {
+            r.reset();
+        }
         self.shared.end_of_queue.store(false, Ordering::Release);
         self.shared.drained.store(false, Ordering::Release);
         if self.ring.is_none() {
@@ -355,10 +424,11 @@ impl Feeder {
     }
 
     /// Open `entry` at `pos`, skipping forward past files that won't open.
-    fn open_from(&mut self, mut entry: EntryId, pos: Duration) {
+    /// `join` is a song following on from the one that just ended.
+    fn open_from(&mut self, mut entry: EntryId, pos: Duration, join: bool) {
         let mut pos = pos;
         for _ in 0..MAX_CONSECUTIVE_ERRORS {
-            match self.open(entry, pos, 1) {
+            match self.open(entry, pos, 1, join) {
                 Opened::Yes | Opened::Interrupted => return,
                 Opened::Retrying => return,
                 Opened::No => {}
@@ -408,7 +478,10 @@ impl Feeder {
 
     /// Open one entry. Sends the Segment (and a new ring if needed).
     /// `attempt` numbers the reconnect a failure here would schedule.
-    fn open(&mut self, entry: EntryId, pos: Duration, attempt: u32) -> Opened {
+    fn open(&mut self, entry: EntryId, pos: Duration, attempt: u32, join: bool) -> Opened {
+        // Whatever was held back for a crossfade: it's this join's or
+        // nobody's.
+        let held = std::mem::take(&mut self.hold);
         let Some(info) = self
             .queue
             .lock()
@@ -517,21 +590,160 @@ impl Feeder {
         let dsp = self.shared.dsp_active();
         let exclusive =
             (mode.wanted(dsp) && original && src.source_position().is_none()).then(|| src.depth());
-        if self.format != Some(fmt) || self.exclusive != exclusive {
+
+        // The join: crossfade into this song, and keep the ring's rate?
+        let shared_out = exclusive.is_none() && self.exclusive.is_none();
+        let same_layout = self
+            .format
+            .is_some_and(|f| f.channels == fmt.channels && f.mask == fmt.mask);
+        let prev = &self.entry_info;
+        let follows = level::follows_on(prev, &merged);
+        let xfade = join
+            && held > 0
+            && shared_out
+            && same_layout
+            && !follows
+            && crossfades(prev)
+            && crossfades(&merged);
+        let keep = join && shared_out && same_layout && (xfade || follows);
+        let ring_fmt = if exclusive.is_some() {
+            fmt
+        } else {
+            let mut r = fmt;
+            r.rate = self.fixed_rate().unwrap_or(match self.format {
+                Some(f) if keep => f.rate,
+                _ => fmt.rate,
+            });
+            r
+        };
+        // The next song on at the same rates carries on through the same
+        // resampler, exactly as if it were one long song. Anything else
+        // ends the old stream here.
+        let carry_on = join
+            && !xfade
+            && self.format == Some(ring_fmt)
+            && self.exclusive == exclusive
+            && self.rs.as_ref().is_some_and(|r| {
+                r.from == fmt.rate && r.to == ring_fmt.rate && r.channels() == fmt.channels as usize
+            });
+        if !carry_on && let Some(mut r) = self.rs.take() {
+            r.finish(&mut self.pending);
+        }
+        if xfade {
+            let ch = fmt.channels.max(1) as usize;
+            let n = (self.pending.len() - self.pending_off).min(held * ch);
+            let tail = self.pending.split_off(self.pending.len() - n);
+            self.xf = Some(Xfade { tail, pos: 0, ch });
+        } else {
+            self.xf = None;
+        }
+
+        if self.format != Some(ring_fmt) || self.exclusive != exclusive {
             if !self.drain_ring() {
                 // A command arrived while draining; it's stashed and wins.
                 return Opened::Interrupted;
             }
             self.exclusive = exclusive;
-            self.new_ring(fmt);
+            self.new_ring(ring_fmt);
+        }
+        if !carry_on {
+            self.rs = self.resampler(fmt, ring_fmt.rate);
         }
         self.entry = entry;
         self.entry_info = merged;
         self.source = Some(src);
         self.last_mark = 0;
+        self.hold = self.track_hold();
         self.set_level(true);
         self.announce(pos);
         Opened::Yes
+    }
+
+    /// The rate every track goes out at, if one is set: yours, or the
+    /// device's.
+    fn fixed_rate(&self) -> Option<u32> {
+        [&self.shared.out_rate, &self.shared.device_rate]
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .find(|&r| r != 0)
+    }
+
+    /// A resampler from the source format to `rate`, if they differ.
+    fn resampler(&self, src: StreamFormat, rate: u32) -> Option<resample::Stream> {
+        if src.rate == rate || src.rate == 0 {
+            return None;
+        }
+        let q = Quality::from_u8(self.shared.resample_quality.load(Ordering::Relaxed));
+        match resample::Stream::new(src.rate, rate, src.channels, q) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::error!("can't resample {} to {rate} Hz: {e}", src.rate);
+                None
+            }
+        }
+    }
+
+    /// Frames to hold back at the end of the open song, for a crossfade
+    /// into the next.
+    fn track_hold(&self) -> usize {
+        let ms = self.shared.crossfade_ms.load(Ordering::Relaxed).min(12_000) as usize;
+        match self.format {
+            Some(f) if ms > 0 && self.exclusive.is_none() && crossfades(&self.entry_info) => {
+                f.rate as usize * ms / 1000
+            }
+            _ => 0,
+        }
+    }
+
+    /// Samples in `pending` free to go into the ring.
+    fn pushable(&self) -> usize {
+        let ch = self.format.map(|f| f.channels as usize).unwrap_or(1);
+        (self.pending.len() - self.pending_off).saturating_sub(self.hold * ch)
+    }
+
+    /// The decoded samples in `dec` through the resampler into `pending`,
+    /// and the crossfade mixed in.
+    fn convert(&mut self) {
+        let start = self.pending.len();
+        match self.rs.as_mut() {
+            Some(r) => r.push(&self.dec, &mut self.pending),
+            None => self.pending.extend_from_slice(&self.dec),
+        }
+        self.dec.clear();
+        self.mix_from(start);
+    }
+
+    fn mix_from(&mut self, start: usize) {
+        if let Some(x) = self.xf.as_mut() {
+            x.mix(&mut self.pending[start..]);
+            if x.done() {
+                self.xf = None;
+            }
+        }
+    }
+
+    /// The song ended in the middle of a crossfade (it was shorter than
+    /// the fade): its last samples out of the resampler, and the rest of
+    /// the outgoing tail over silence. Otherwise the resampler stays open
+    /// until the next song is known, in case it carries on through it.
+    fn finish_track(&mut self) {
+        if self.xf.is_none() {
+            return;
+        }
+        if let Some(mut r) = self.rs.take() {
+            let start = self.pending.len();
+            r.finish(&mut self.pending);
+            self.mix_from(start);
+        }
+        if let Some(mut x) = self.xf.take() {
+            x.rest(&mut self.pending);
+        }
+    }
+
+    /// The ring frame the next decoded sample will play at: what's
+    /// pushed, what's pending, and what the resampler still owes.
+    fn write_point(&self) -> u64 {
+        self.written + self.pushable_frames_all() + self.rs.as_ref().map_or(0, |r| r.owed())
     }
 
     fn schedule_retry(&mut self, entry: EntryId, attempt: u32, error: String) {
@@ -555,7 +767,7 @@ impl Feeder {
         if !self.queue.lock().unwrap().contains(entry) {
             return;
         }
-        if let Opened::Yes = self.open(entry, Duration::ZERO, attempt + 1) {
+        if let Opened::Yes = self.open(entry, Duration::ZERO, attempt + 1, false) {
             log::info!("stream back after {attempt} attempt(s)");
         }
     }
@@ -568,19 +780,19 @@ impl Feeder {
         } else {
             1.0
         };
-        let start_frame = self.written
-            + (self.pending.len() - self.pending_off) as u64
-                / self.format.map(|f| f.channels as u64).unwrap_or(1);
-        self.seg = (start_frame, pos, src.format().rate);
+        let start_frame = self.write_point();
+        let rate = self.format.map(|f| f.rate).unwrap_or(src.format().rate);
+        self.seg = (start_frame, pos, rate);
         let _ = self.msgs.send(FeedMsg::Segment(Segment {
             entry: self.entry,
             start_frame,
             start_pos: pos,
-            rate: src.format().rate,
+            rate,
             tempo,
             marked,
             info: self.entry_info.clone(),
             level: self.level,
+            resample: self.rs.as_ref().map(|r| (r.from, r.to)),
         }));
     }
 
@@ -660,11 +872,7 @@ impl Feeder {
     /// Tell the core the gain changed mid-track, for the bottom bar. A
     /// segment at the current write point, same track, same position line.
     fn announce_level(&mut self) {
-        let pos = self.position_at(
-            self.written
-                + (self.pending.len() - self.pending_off) as u64
-                    / self.format.map(|f| f.channels as u64).unwrap_or(1),
-        );
+        let pos = self.position_at(self.write_point());
         if self
             .source
             .as_ref()
@@ -683,11 +891,10 @@ impl Feeder {
         if self.ring.is_none() {
             return true;
         }
-        // Push what's left of the previous track first.
-        while self.pending_off < self.pending.len() {
-            if !self.push_pending_blocking() {
-                return false;
-            }
+        // Push what's left of the previous track first, held back or not.
+        self.hold = 0;
+        if !self.push_pending_blocking() {
+            return false;
         }
         loop {
             let consumed = self.shared.consumed_frames.load(Ordering::Acquire);
@@ -727,10 +934,12 @@ impl Feeder {
                 });
             }
         }
-        if self.pending_off >= self.pending.len() {
-            self.pending.clear();
+        if self.pushable() == 0 {
+            // Keep only what's held back, at the front.
+            self.pending.drain(..self.pending_off);
             self.pending_off = 0;
-            let res = self.source.as_mut().unwrap().decode_into(&mut self.pending);
+            self.dec.clear();
+            let res = self.source.as_mut().unwrap().decode_into(&mut self.dec);
             match res {
                 Ok(0) if live => {
                     self.source = None;
@@ -738,6 +947,7 @@ impl Feeder {
                     return;
                 }
                 Ok(0) => {
+                    self.finish_track();
                     self.next_track();
                     return;
                 }
@@ -752,12 +962,12 @@ impl Feeder {
                         self.announce_level();
                     }
                     if let Some(fmt) = self.source.as_ref().map(|s| s.format()) {
-                        let fresh = &mut self.pending[self.pending_off..];
-                        self.gain.process(fresh, fmt);
+                        self.gain.process(&mut self.dec, fmt);
                         if let Some(n) = &self.gain.live {
                             self.shared.level.live_db.store(n.gain_db());
                         }
                     }
+                    self.convert();
                 }
                 Err(e) if live => {
                     self.source = None;
@@ -794,17 +1004,38 @@ impl Feeder {
         let Some(fmt) = self.source.as_ref().map(|s| s.format()) else {
             return;
         };
-        // The freshly decoded samples are already in the new format: keep
-        // them out of the old ring.
-        let fresh = std::mem::take(&mut self.pending);
-        let off = std::mem::replace(&mut self.pending_off, 0);
-        let pos = self.position_at(self.written);
-        if !self.drain_ring() {
-            self.pending = fresh;
-            self.pending_off = off;
+        // The freshly decoded samples (in `dec`) are already in the new
+        // format. What the old resampler holds belongs to the old one.
+        if let Some(r) = self.rs.as_mut() {
+            r.finish(&mut self.pending);
+        }
+        self.xf = None;
+        let exclusive = self.exclusive.is_some();
+        let ring_rate = self.fixed_rate().filter(|_| !exclusive).unwrap_or(fmt.rate);
+        if let Some(cur) = self.format
+            && cur.rate == ring_rate
+            && cur.channels == fmt.channels
+            && cur.mask == fmt.mask
+        {
+            // Resampled to a fixed rate: only the resampler changes, and
+            // the ring carries on without a gap.
+            self.rs = self.resampler(fmt, ring_rate);
+            self.entry_info.sample_rate = fmt.rate;
+            self.queue
+                .lock()
+                .unwrap()
+                .set_info(self.entry, self.entry_info.clone());
             return;
         }
-        self.new_ring(fmt);
+        let pos = self.position_at(self.written + self.pushable_frames_all());
+        if !self.drain_ring() {
+            return;
+        }
+        let mut ring = fmt;
+        ring.rate = ring_rate;
+        self.new_ring(ring);
+        self.rs = self.resampler(fmt, ring_rate);
+        self.hold = self.track_hold();
         if let Some(n) = self
             .gain
             .live
@@ -820,10 +1051,14 @@ impl Feeder {
             .unwrap()
             .set_info(self.entry, self.entry_info.clone());
         // Announced with nothing pending, so the segment starts at the
-        // first of the fresh samples.
+        // first of the fresh samples, still in `dec`.
         self.announce(pos);
-        self.pending = fresh;
-        self.pending_off = off;
+    }
+
+    /// Frames in `pending`, held back or not.
+    fn pushable_frames_all(&self) -> u64 {
+        let ch = self.format.map(|f| f.channels as u64).unwrap_or(1);
+        (self.pending.len() - self.pending_off) as u64 / ch
     }
 
     /// Track position of ring frame `frame`, from the current segment.
@@ -842,7 +1077,7 @@ impl Feeder {
             return;
         };
         let rate = self.format.map(|f| f.rate as u64).unwrap_or(44100);
-        if self.pending_off < self.pending.len() || self.written < self.last_mark + rate / 4 {
+        if self.pushable() > 0 || self.written < self.last_mark + rate / 4 {
             return;
         }
         self.last_mark = self.written;
@@ -854,12 +1089,12 @@ impl Feeder {
 
     /// Push as much pending audio as fits. Returns samples pushed.
     fn push_pending(&mut self) -> usize {
+        let left = self.pushable();
         let Some(ring) = self.ring.as_mut() else {
-            self.pending_off = self.pending.len();
+            self.pending_off += left;
             return 0;
         };
         let ch = self.format.map(|f| f.channels as usize).unwrap_or(1);
-        let left = self.pending.len() - self.pending_off;
         // Whole frames only, so the renderer never sees half a frame.
         let n = (ring.slots().min(left) / ch) * ch;
         if n == 0 {
@@ -882,7 +1117,7 @@ impl Feeder {
     }
 
     fn push_pending_blocking(&mut self) -> bool {
-        while self.pending_off < self.pending.len() {
+        while self.pushable() > 0 {
             if self.push_pending() == 0 {
                 if let Ok(c) = self.cmds.try_recv() {
                     self.stashed = Some(c);
@@ -899,13 +1134,17 @@ impl Feeder {
         let next = self.queue.lock().unwrap().upcoming(self.entry);
         self.source = None;
         match next {
-            Some(n) => self.open_from(n, Duration::ZERO),
+            Some(n) => self.open_from(n, Duration::ZERO, true),
             None => self.finish_queue(),
         }
     }
 
     fn finish_queue(&mut self) {
         self.source = None;
+        self.hold = 0;
+        if let Some(mut r) = self.rs.take() {
+            r.finish(&mut self.pending);
+        }
         // Everything decoded is either in the ring or in pending. Pending
         // has to go in before the renderer may call it done.
         if self.ring.is_some() && !self.push_pending_blocking() {
@@ -914,6 +1153,11 @@ impl Feeder {
         self.shared.end_of_queue.store(true, Ordering::Release);
         let _ = self.msgs.send(FeedMsg::EndOfQueue);
     }
+}
+
+/// Songs crossfade; stations and podcast episodes don't.
+fn crossfades(info: &TrackInfo) -> bool {
+    info.kind == MediaKind::File && !info.is_live()
 }
 
 enum Opened {

@@ -94,6 +94,16 @@ pub enum Command {
         device: Option<String>,
         buffer_ms: u32,
     },
+    /// Output rate (0 follows the source), resampler quality, sample
+    /// format and dither. The output reopens at once, from where it was.
+    SetOutputFormat {
+        rate: u32,
+        resampler: crate::dsp::resample::Quality,
+        format: output::SampleFormat,
+        dither: bool,
+    },
+    /// Crossfade length, 0 to 12000 ms. From the next song on.
+    SetCrossfade(u32),
     /// Podcast speed (0.5 to 3, pitch kept) and silence trimming. Takes
     /// effect at once on a playing episode.
     SetPodcastPlayback {
@@ -181,6 +191,8 @@ pub struct Snapshot {
     /// How hard the limiter worked lately, in dB of gain reduction. Held
     /// for a moment after it lets go, so it can be seen.
     pub limiting_db: f64,
+    /// The playing song is resampled, from this rate to that one.
+    pub resample: Option<(u32, u32)>,
 }
 
 /// The leveling gain for the bottom bar: "-4.2 dB album".
@@ -385,6 +397,13 @@ impl Core {
         shared.level.set(&cfg.leveling);
         shared.set_eq(cfg.eq);
         shared.limiter_on.store(cfg.limiter_on, Ordering::Relaxed);
+        shared.out_rate.store(cfg.output.rate, Ordering::Relaxed);
+        shared
+            .resample_quality
+            .store(cfg.output.resampler.to_u8(), Ordering::Relaxed);
+        shared
+            .crossfade_ms
+            .store(cfg.output.crossfade_ms.min(12_000), Ordering::Relaxed);
         shared
             .limiter_ceiling
             .store(10f64.powf(cfg.limiter_ceiling_db.clamp(-6.0, 0.0) / 20.0));
@@ -839,8 +858,41 @@ impl Core {
                 self.cfg.output.backend = backend;
                 self.cfg.output.device = device;
                 self.cfg.output.buffer_ms = buffer_ms.clamp(50, 1000);
+                // A new device may take any rate.
+                self.shared.device_rate.store(0, Ordering::Relaxed);
                 self.send_feed(FeedCmd::NewRing);
                 self.restart_here();
+            }
+            Command::SetOutputFormat {
+                rate,
+                resampler,
+                format,
+                dither,
+            } => {
+                let o = &mut self.cfg.output;
+                o.rate = rate;
+                o.resampler = resampler;
+                o.format = format;
+                o.dither = dither;
+                self.shared.out_rate.store(rate, Ordering::Relaxed);
+                self.shared
+                    .resample_quality
+                    .store(resampler.to_u8(), Ordering::Relaxed);
+                self.exclusive_refused = None;
+                self.send_feed(FeedCmd::NewRing);
+                self.restart_here();
+            }
+            Command::SetCrossfade(ms) => {
+                let ms = ms.min(12_000);
+                let before = self.shared.dsp_active();
+                self.cfg.output.crossfade_ms = ms;
+                self.shared.crossfade_ms.store(ms, Ordering::Relaxed);
+                if before != self.shared.dsp_active()
+                    && self.cfg.output.bit_perfect == BitPerfect::Auto
+                {
+                    self.exclusive_refused = None;
+                    self.restart_here();
+                }
             }
             Command::ToggleMute => {
                 self.muted = !self.muted;
@@ -916,7 +968,21 @@ impl Core {
                 }
                 let res = match &self.factory {
                     Some(f) => f(&self.cfg.output, renderer),
-                    None => output::open(&self.cfg.output, renderer).map_err(|e| e.to_string()),
+                    None => match output::open(&self.cfg.output, renderer) {
+                        Err(output::OutputError::Rate { device, want, got })
+                            if got != 0
+                                && self.shared.device_rate.load(Ordering::Relaxed) != got =>
+                        {
+                            // The device has a rate of its own: resample to
+                            // it from here on, and start again where we were.
+                            log::info!("{device} can't play {want} Hz, resampling to {got} Hz");
+                            self.shared.device_rate.store(got, Ordering::Relaxed);
+                            self.send_feed(FeedCmd::NewRing);
+                            self.restart_here();
+                            return;
+                        }
+                        r => r.map_err(|e| e.to_string()),
+                    },
                 };
                 match res {
                     Ok(o) => {
@@ -1160,6 +1226,11 @@ impl Core {
             self.limit_hold = (gr, now);
         }
         snap.limiting_db = self.limit_hold.0;
+        snap.resample = self
+            .segments
+            .front()
+            .filter(|_| self.state != PlayState::Stopped)
+            .and_then(|s| s.resample);
         snap.level = playing_level.map(|l| LevelView {
             gain_db: if l.source == crate::level::Source::Live {
                 self.shared.level.live_db.load()

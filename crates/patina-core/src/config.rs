@@ -485,6 +485,19 @@ struct RawOutput {
     buffer_ms: Option<u32>,
     bit_perfect: Option<String>,
     bit_perfect_device: Option<String>,
+    rate: Option<RawRate>,
+    resampler: Option<String>,
+    format: Option<String>,
+    dither: Option<bool>,
+    crossfade_ms: Option<u32>,
+}
+
+/// `rate = "match"` or `rate = 48000`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRate {
+    Hz(u32),
+    Word(String),
 }
 
 #[derive(Deserialize, Default)]
@@ -677,6 +690,39 @@ impl Config {
             })?,
             None => d.output.bit_perfect,
         };
+        let perr = |key: &str, msg: String| ConfigError::Parse {
+            path: path.to_path_buf(),
+            msg: format!("output.{key}: {msg}"),
+        };
+        let rate = match out.rate {
+            None => d.output.rate,
+            Some(RawRate::Hz(0)) => 0,
+            Some(RawRate::Hz(r)) if (8000..=768_000).contains(&r) => r,
+            Some(RawRate::Hz(r)) => {
+                return Err(perr(
+                    "rate",
+                    format!("{r} Hz is out of range (8000 to 768000)"),
+                ));
+            }
+            Some(RawRate::Word(w)) => match w.trim().to_ascii_lowercase().as_str() {
+                "match" | "source" | "" => 0,
+                x => x
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|r| (8000..=768_000).contains(r))
+                    .ok_or_else(|| {
+                        perr("rate", format!("\"{w}\" isn't \"match\" or a rate in Hz"))
+                    })?,
+            },
+        };
+        let resampler = match out.resampler {
+            Some(q) => q.parse().map_err(|m| perr("resampler", m))?,
+            None => d.output.resampler,
+        };
+        let format = match out.format {
+            Some(f) => f.parse().map_err(|m| perr("format", m))?,
+            None => d.output.format,
+        };
         Ok(Self {
             library: LibraryConfig {
                 folders: lib
@@ -693,6 +739,14 @@ impl Config {
                 buffer_ms: out.buffer_ms.unwrap_or(d.output.buffer_ms).clamp(50, 1000),
                 bit_perfect,
                 bit_perfect_device: out.bit_perfect_device.filter(|d| !d.trim().is_empty()),
+                rate,
+                resampler,
+                format,
+                dither: out.dither.unwrap_or(d.output.dither),
+                crossfade_ms: out
+                    .crossfade_ms
+                    .unwrap_or(d.output.crossfade_ms)
+                    .min(12_000),
             },
             playback: PlaybackConfig {
                 volume: pb.volume.unwrap_or(d.playback.volume).min(100),
@@ -788,6 +842,19 @@ bit_perfect = "off"
 # Card for bit-perfect playback, like "hw:CARD=DAC,DEV=0". Empty is the
 # first sound card. Settings lists the ones you have.
 bit_perfect_device = ""
+# Output sample rate: "match" plays each song at its own rate, or a number
+# (48000) resamples everything to that rate.
+rate = "match"
+# Resampler quality: fast, balanced or best.
+resampler = "balanced"
+# Sample format for ALSA: auto, f32, s32, s24 or s16. PipeWire takes float
+# and picks the device format itself.
+format = "auto"
+# TPDF dither on 16 and 24-bit output.
+dither = true
+# Crossfade between songs in milliseconds, 0 (off) to 12000. Never between
+# songs that follow on from each other on the same album.
+crossfade_ms = 0
 
 [appearance]
 # How the app looks: runout (dark verdigris and copper), light or dark
@@ -1264,6 +1331,19 @@ mod tests {
     fn typo_is_an_error() {
         assert!(Config::parse("[output]\nbufer_ms = 5\n", Path::new("x")).is_err());
         assert!(Config::parse("[output]\nbackend = \"oss\"\n", Path::new("x")).is_err());
+        let c = Config::parse(
+            "[output]\nrate = 96000\nresampler = \"best\"\nformat = \"s24\"\ncrossfade_ms = 20000\n",
+            Path::new("x"),
+        )
+        .unwrap();
+        assert_eq!(c.output.rate, 96000);
+        assert_eq!(c.output.resampler, crate::dsp::resample::Quality::Best);
+        assert_eq!(c.output.format, crate::audio::output::SampleFormat::S24);
+        assert_eq!(c.output.crossfade_ms, 12000, "clamped");
+        let c = Config::parse("[output]\nrate = \"match\"\n", Path::new("x")).unwrap();
+        assert_eq!(c.output.rate, 0);
+        assert!(Config::parse("[output]\nrate = \"fast\"\n", Path::new("x")).is_err());
+        assert!(Config::parse("[output]\nrate = 12\n", Path::new("x")).is_err());
     }
 
     #[test]

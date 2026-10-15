@@ -340,8 +340,12 @@ fn positions(mask: u64, channels: u16) -> [u32; spa::param::audio::MAX_CHANNELS]
 
 impl Output for PwOutput {
     fn describe(&self) -> String {
+        // The sink's own description once the graph has said it.
         match &self.target {
-            Some(t) => format!("PipeWire {t}"),
+            Some(t) => {
+                let s = self.sinks.lock().unwrap();
+                format!("PipeWire {}", s.names.get(t).unwrap_or(t))
+            }
             None => "PipeWire".into(),
         }
     }
@@ -365,4 +369,65 @@ impl Drop for PwOutput {
             let _ = t.join();
         }
     }
+}
+
+/// Every PipeWire sink: (node name, description), in the order the graph
+/// lists them. Asks the daemon and waits for its answer, a few ms; gives
+/// up after two seconds.
+pub fn list_sinks() -> Result<Vec<(String, String)>, String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("patina-pw-list".into())
+        .spawn(move || {
+            let _ = tx.send(list_sinks_here());
+        })
+        .map_err(|e| e.to_string())?;
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .map_err(|_| "PipeWire didn't answer".to_string())?
+}
+
+fn list_sinks_here() -> Result<Vec<(String, String)>, String> {
+    pw::init();
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| e.to_string())?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| e.to_string())?;
+    let core = context.connect_rc(None).map_err(|e| e.to_string())?;
+    let registry = core.get_registry_rc().map_err(|e| e.to_string())?;
+    let found: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    let found2 = found.clone();
+    let _reg = registry
+        .add_listener_local()
+        .global(move |g| {
+            if g.type_ != pw::types::ObjectType::Node {
+                return;
+            }
+            let Some(p) = g.props else { return };
+            if p.get("media.class") != Some("Audio/Sink") {
+                return;
+            }
+            if let Some(name) = p.get("node.name") {
+                let desc = p
+                    .get("node.description")
+                    .or_else(|| p.get("node.nick"))
+                    .unwrap_or(name);
+                found2
+                    .borrow_mut()
+                    .push((name.to_string(), desc.to_string()));
+            }
+        })
+        .register();
+    // Every global has been announced once the daemon answers a sync
+    // sent after the registry was bound.
+    let pending = core.sync(0).map_err(|e| e.to_string())?;
+    let ml = mainloop.clone();
+    let _core_l = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == pw::core::PW_ID_CORE && seq == pending {
+                ml.quit();
+            }
+        })
+        .register();
+    mainloop.run();
+    let v = found.borrow().clone();
+    Ok(v)
 }
