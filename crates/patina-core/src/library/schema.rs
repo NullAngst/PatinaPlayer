@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 5;
+pub const VERSION: i64 = 6;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -207,6 +207,25 @@ CREATE TABLE mixes (
 );
 "#;
 
+/// Loudness for leveling, by song: our own EBU R128 measurements, and
+/// ReplayGain tags read from cached server files the server didn't report.
+/// Keyed like playlist items ("file:" plus the path, or a server song's
+/// URI), so a rescan or a re-sync that rewrites rows keeps them.
+const V6: &str = r#"
+CREATE TABLE loudness (
+    song         BLOB PRIMARY KEY,
+    lufs         REAL,                  -- measured integrated loudness
+    track_gain   REAL,                  -- ReplayGain 2 dB; NULL if it failed
+    track_peak   REAL,
+    album_gain   REAL,                  -- only from tags
+    album_peak   REAL,
+    seconds      REAL,
+    source       TEXT NOT NULL,         -- 'measured', 'tags' or 'failed'
+    size         INTEGER,               -- file size then: a changed file is measured again
+    measured_at  INTEGER NOT NULL
+);
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -235,6 +254,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 5 {
         tx.execute_batch(V5)?;
+    }
+    if current < 6 {
+        tx.execute_batch(V6)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

@@ -44,6 +44,7 @@ fn setup() -> Setup {
         remote: Some(RemoteService::start(&db, Vec::new(), secrets)),
         cache: None,
         mixes: None,
+        level: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),

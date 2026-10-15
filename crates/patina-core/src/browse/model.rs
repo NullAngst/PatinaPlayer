@@ -338,6 +338,8 @@ pub struct SettingsState<'a> {
     pub devices: &'a [crate::audio::output::exclusive::HwDevice],
     pub podcast_tempo: f64,
     pub podcast_trim: bool,
+    /// A whole-library loudness run is going; None without the library.
+    pub measuring: Option<bool>,
 }
 
 /// Everything a view can draw from besides the library itself.
@@ -456,6 +458,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 st.podcast_trim,
                 st.devices,
                 ctx.servers,
+                st.measuring,
             );
             let mut items = Vec::new();
             let mut last = None;

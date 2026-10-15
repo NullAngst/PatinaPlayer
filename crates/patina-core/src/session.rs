@@ -128,6 +128,7 @@ impl Session {
                 fade_ms,
                 podcast_tempo: cfg.podcasts.speed,
                 podcast_trim: cfg.podcasts.trim_silence,
+                leveling: cfg.leveling.clone(),
             },
             Hooks {
                 played,
@@ -191,6 +192,17 @@ impl Session {
                 .map_err(|e| log::warn!("mixes are unavailable: {e}"))
                 .ok()
         };
+        // Leveling: the decoder's own read connection for gains, and the
+        // thread that measures songs with none.
+        let level = if opts.no_library {
+            crate::level::lookup::install(None);
+            None
+        } else {
+            crate::level::lookup::install(Some(&db_path));
+            crate::level::LevelService::start(&db_path)
+                .map_err(|e| log::warn!("leveling can't measure songs: {e}"))
+                .ok()
+        };
         let browser = Browser::new(Startup {
             player,
             lib,
@@ -199,6 +211,7 @@ impl Session {
             remote,
             cache,
             mixes,
+            level,
             config: cfg.clone(),
             settings_info: SettingsInfo {
                 config_path: config_path.clone(),

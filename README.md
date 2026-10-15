@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 8 of the build plan: everything from milestones 1 to 7 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, and the song cache with prefetch, offline pins and offline mode), plus mixes: genre mixes across one or more genres, endless artist and track mixes, and saved mixes in the sidebar. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. Volume leveling comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 9 of the build plan: everything from milestones 1 to 8 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, and mixes), plus volume leveling: ReplayGain from your server or your tags, EBU R128 measurement for songs that have neither, and a live normalizer for radio and podcasts. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The EQ comes next, then the rest. What's here is built to the final shape, so later milestones add to it instead of replacing it.
 
 ## What works right now
 
@@ -29,6 +29,21 @@ This is milestone 8 of the build plan: everything from milestones 1 to 7 (the au
 - While a server is unreachable, a mix leaves out its songs that aren't kept.
 - Save a mix you like with Save mix on the Queue page (`M` in the Queue). It goes in the sidebar under Mixes, one click to play, and in Playlists under Saved mixes, where you can rename it, delete it, or keep it offline. A saved mix remembers who was similar when you saved it, so it plays the same way without the server or Last.fm.
 - Playing anything else ends the mix. Adding to the queue doesn't.
+
+**Volume leveling**
+- Evens out loudness between songs, the ReplayGain 2 way: every song brought to a target loudness, -18 LUFS by default. On by default, in Smart mode.
+- Modes, in Settings under Leveling: Off, Track (every song on its own), Album (an album shares one gain, so a quiet intro stays quiet), and Smart. Smart uses the album gain while an album plays in order and the track gain on shuffle, in a mix, or in a playlist that jumps between albums. "In order" means a neighbour in the queue is the same album with the next track number.
+- Where a song's gain comes from, best first: the server's replayGain field (Navidrome sends it), ReplayGain tags in the file, then PatinaPlayer's own measurement.
+- Songs with neither get measured with EBU R128 (integrated loudness and true peak, the figures ReplayGain 2 is made from) and the result goes in the library index, so each song is measured once. What gets measured: the song playing and the next five in the queue, server songs as soon as they land in the cache (prefetched, played or pinned), and, if you press Measure now under Leveling, every untagged song in your folders, in the background.
+- A server song is measured from its cached file, so nothing is downloaded twice. That file is checked for ReplayGain tags first, since some servers (Gonic, for one) don't pass them on.
+- An album with no album gain in its tags gets one worked out from its songs once every song on it is known.
+- A song nothing is known about yet plays at -6 dB (Gain before measuring, in Settings), and plays at its measured gain from the next time on. Since prefetch downloads and measures ahead, that's mostly the first song you play.
+- Keep peaks from clipping (on by default) holds a song's gain down so its loudest peak stays under full scale. It matters when you raise the target.
+- The live normalizer follows the sound as it plays: the last 3 seconds of loudness, moving the gain about a dB a second (faster for the first few seconds), holding still through silence. It's on for radio and podcasts, which can't be measured ahead of time, and off for music, since a measured gain sounds better. Turn it on for music and it takes over for songs that aren't measured yet, instead of the fixed -6 dB.
+- The gain switches at the exact sample where one song becomes the next, so gapless albums stay gapless. A test plays a FLAC cut into three parts with leveling on and checks the output is the original, scaled, sample for sample.
+- The bottom bar shows the gain on what's playing: `-4.2 dB`, `-6.0 dB?` while the song isn't measured yet, `~-9.1 dB` under the live normalizer. Click it in the desktop app for where it came from (the server, tags, or measured here).
+- Changes in Settings apply to the song playing too, within a couple of seconds, gliding to the new gain instead of jumping.
+- Bit-perfect skips leveling. With bit-perfect On, the leveling rows grey out and say why. Auto turns bit-perfect on only when leveling is Off, since leveling changes the sound.
 
 **Cache and offline**
 - Server songs are kept on disk in three ways. Prefetch downloads the songs coming up in the queue, nearest first. The cache keeps what you've played, so a replay doesn't hit the server, and drops the least recently played songs once it's full. Pinned songs stay until you unpin them.
@@ -85,7 +100,8 @@ This is milestone 8 of the build plan: everything from milestones 1 to 7 (the au
 - The bottom bar shows BIT-PERFECT while it's happening. NOT BIT-PERFECT in copper means it was refused; click it for the reason. EXCLUSIVE means a lossy source (MP3, AAC) going out untouched as integers, which is as good as it gets for those.
 - Volume goes to the DAC's own volume control if it has one. If it doesn't, volume is fixed at 100% and the slider greys out. Mute still mutes.
 - Radio and podcasts never play bit-perfect. Radio isn't a file, and a sped-up podcast is processed by definition.
-- Auto mode means "bit-perfect whenever nothing would change the sound". There's no EQ or leveling yet, so for now it's the same as On.
+- Auto mode means "bit-perfect whenever nothing would change the sound". With leveling on (the default), that's never, so Auto is for people who set leveling to Off. There's no EQ yet.
+- With bit-perfect On, leveling is skipped and its settings grey out.
 - Pick the card under Bit-perfect device. The list comes from ALSA when you open Settings, so a USB DAC you just plugged in shows up.
 
 **Settings**
@@ -122,7 +138,7 @@ This is milestone 8 of the build plan: everything from milestones 1 to 7 (the au
 
 **Library**
 - Indexes your local folders into one SQLite database, so browsing is instant and works offline.
-- Reads tags with lofty (ID3v2, Vorbis comments, MP4, APE), with FFmpeg as the fallback for anything lofty can't read. ReplayGain values are stored now so leveling can use them later.
+- Reads tags with lofty (ID3v2, Vorbis comments, MP4, APE), with FFmpeg as the fallback for anything lofty can't read. ReplayGain values go in the index, where leveling finds them.
 - Only reads tags for new or changed files on startup, by size and modification time. A 3000-file test folder takes about a quarter second to index from scratch and about 10 ms to recheck.
 - Watches the folders with inotify while it runs. Copy an album in and it shows up a couple of seconds later. Delete one and it's gone.
 - If a folder root goes missing (an unmounted drive, say), its tracks are kept until it comes back instead of being wiped.
@@ -278,6 +294,14 @@ theme = "runout"         # runout, light, dark, oled, kawaii-light or kawaii-dar
 volume = 80              # starting volume, 0 to 100
 fade_ms = 100            # 0 turns fades off
 
+[leveling]
+mode = "smart"           # off, track, album or smart
+target_lufs = -18        # -23 to -10; higher is louder
+fallback_db = -6         # -12 to 0, for songs not measured yet
+clip_guard = true        # keep the gain under the song's peak
+live_music = false       # the live normalizer for unmeasured music
+live_radio = true        # the live normalizer for radio and podcasts
+
 [podcasts]
 feeds = ["https://example.com/feed.xml"]
 speed = 1.0              # 0.5 to 3, podcasts only
@@ -326,7 +350,7 @@ Where everything else goes:
 | What | Where |
 |---|---|
 | Settings | `~/.config/patinaplayer/config.toml` |
-| Library index, playlists, play counts, podcast positions | `~/.local/share/patinaplayer/library.db` |
+| Library index, playlists, play counts, podcast positions, loudness measurements | `~/.local/share/patinaplayer/library.db` |
 | Downloaded podcast episodes | `~/.local/share/patinaplayer/offline/podcasts/` |
 | Songs pinned for offline | `~/.local/share/patinaplayer/offline/tracks/` |
 | Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
@@ -394,6 +418,7 @@ crates/
     src/remote/         music servers: the Subsonic, Ampache and DLNA clients, syncing into the index, the server threads
     src/cache/          the song cache: downloads, reading a song while it downloads, prefetch, pins, eviction
     src/mix.rs          genre, artist and track mixes, and who's similar
+    src/level/          leveling: picking the gain, EBU R128 measuring, the live normalizer, the measuring thread
     src/lastfm.rs       Last.fm, for now only for similar artists and songs
     src/secrets.rs      passwords in the keyring (Secret Service over D-Bus), or a private file
     src/config.rs       config file and XDG paths
@@ -432,6 +457,8 @@ The cache tests play songs through the cache from the stand-in Navidrome, and ch
 
 The DLNA tests run a stand-in media server that answers SSDP searches on a private address and ContentDirectory calls three ways: a folder view that titles songs by file name (like Gerbera), search only (like Jellyfin, with the media server nested in another device and a URLBase), and neither, with every song under three views. It also lists a converted MP3 before each original FLAC and hands out two items per page, so the paging and the pick of the original both get used. The servers workflow then runs the same client against real MiniDLNA and Gerbera.
 
+The leveling tests measure FFmpeg-made sine tones into a real index and play them through the player with a capturing output: two songs 6 dB apart come out level in Track mode and still 6 dB apart in Smart mode in album order, back to level on shuffle; an unknown song comes out 6 dB down; a podcast 12 dB too loud is ridden down to the target by the live normalizer. The cache test checks that songs landing in the cache from a stand-in Gonic get measured, and that a stand-in Navidrome's replayGain field is used as it is.
+
 To try the server side without a server: `cargo run -p patina-core --example mock_server` starts the stand-in Navidrome and prints its address; log in as `demo` with password `demo`.
 
 The network tests run a small HTTP server inside the test itself: an ICY stream that hangs up on purpose to check reconnects, a `.pls` with a dead first mirror, real HLS segments, an RSS feed, and a download that breaks halfway to check resume. No internet needed.
@@ -451,7 +478,12 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - When the next track has a different sample rate (44.1 kHz into 48 kHz, say), the output reopens at the new rate and there's a short gap. Gapless across rates needs the resampler, which is milestone 12.
 - Built from source the normal way, both binaries link your system's FFmpeg, PipeWire and ALSA. The AppImage links its own FFmpeg in.
 - 16-bit ALSA output is rounded, not dithered. TPDF dither lands with the output controls in milestone 12, and it only matters on the ALSA fallback with a device that refuses float and 32-bit.
-- Radio has no loudness leveling yet. The live normalizer for radio comes with leveling in milestone 9.
+- There's no true-peak limiter yet. Keep peaks from clipping uses each song's stored peak, which covers ReplayGain the way it's meant to work, but with it turned off and a high target, a loud song can clip, and the live normalizer has no peak to go by. Until the limiter lands with the EQ in milestone 10, anything over full scale is hard-clipped.
+- An album gain worked out from measured songs averages their loudness by energy, weighted by length. That's the R128 album figure without the gating across songs, so on an album with long near-silent stretches it can differ from a tagger's by a few tenths of a dB. Album gains in tags are used as they are.
+- Opus files tagged with R128_TRACK_GAIN (opusgain style) and no REPLAYGAIN tags get measured rather than read.
+- A song that changed on disk (a new size) is measured again. A server song that changed on the server keeps its old measurement until its cached copy is dropped and fetched again.
+- Measuring decodes the whole song once, on its own thread. Measure now goes a song at a time with a short rest between, so it can run while you listen, but a big library takes a while.
+- After a leveling change in Settings, the couple of seconds already decoded play out at the old gain first.
 - The server clients were tested here against stand-in servers built to the Subsonic, OpenSubsonic and Ampache API documents, with the quirks Navidrome and Gonic are known for. They haven't met a real server from this box, which can't reach the internet or run containers. The servers workflow runs them against real Navidrome and Gonic on GitHub; it hasn't run yet, so its first run is the real test. Its Ampache job sets Ampache up through Ampache's command-line installer, which I couldn't try here, so that job reports failures without failing the run.
 - DLNA was tested here against real MiniDLNA 1.3.3 and Gerbera 2.0 (found on the network, synced, covers, a song played through), and against the stand-in above. Jellyfin, Plex, Serviio and Twonky haven't been tried. The search and walk paths are there for the way they lay out their trees, but their first real run is yours. Jellyfin 10.9 and later ship DLNA as a plugin, so install it from the plugin catalogue first. Plex has its own DLNA switch in its settings.
 - DLNA servers have no playlists, play queue, stations or podcasts PatinaPlayer can reach, so a DLNA source is songs only. Its songs still go in your local playlists.

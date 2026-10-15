@@ -69,7 +69,11 @@ impl Rig {
 /// A synced stand-in server, connected, with a cache in a temp folder.
 /// `body` replaces the song the server sends, and its size is reported.
 fn rig(name: &str, cfg: CacheConfig, body: Option<Vec<u8>>) -> Rig {
-    let srv = Subsonic::start(Flavor::Navidrome, "zack", "pw", None);
+    rig_on(Flavor::Navidrome, name, cfg, body)
+}
+
+fn rig_on(flavor: Flavor, name: &str, cfg: CacheConfig, body: Option<Vec<u8>>) -> Rig {
+    let srv = Subsonic::start(flavor, "zack", "pw", None);
     if let Some(b) = body {
         let mut st = srv.state.lock().unwrap();
         for a in &mut st.albums {
@@ -647,6 +651,7 @@ fn settings_keep_prefetch_inside_the_cache_and_views_pin_whole() {
         remote: None,
         cache: Some(cache),
         mixes: None,
+        level: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),
@@ -713,4 +718,57 @@ fn settings_keep_prefetch_inside_the_cache_and_views_pin_whole() {
         cover_track: None,
     });
     assert!(!b.can_pin(&local));
+}
+
+#[test]
+fn songs_landing_in_the_cache_get_measured_unless_the_server_knows() {
+    use patina_core::level::{LevelEvent, LevelService, Origin};
+    let _t = turn();
+    // Gonic sends no ReplayGain: what lands gets measured.
+    let r = rig_on(Flavor::Gonic, "LevelG", CacheConfig::default(), None);
+    let lib = r.lib();
+    let bleach = lib.album_tracks(&r.album_key("Bleach")).unwrap();
+    r.cache.upcoming(
+        bleach
+            .iter()
+            .filter_map(|t| t.remote())
+            .filter_map(|x| SongKey::of(&x))
+            .collect(),
+    );
+    assert!(wait_for(15, || r.cache.status().cache_files == bleach.len()));
+    let svc = LevelService::start(&r.db).unwrap();
+    svc.cache_changed();
+    let mut got = HashSet::new();
+    while got.len() < bleach.len() {
+        match svc.events().recv_timeout(Duration::from_secs(20)) {
+            Ok(LevelEvent::Measured(k)) => {
+                got.insert(k);
+            }
+            other => panic!("expected measurements, got {other:?}"),
+        }
+    }
+    let g = lib.gains_for(&bleach[0].to_info()).unwrap();
+    assert_eq!(g.track_from, Some(Origin::Measured));
+    // The stand-in's song is a quiet 440 Hz sine (FFmpeg's default 1/8,
+    // panned to stereo): about -22 LUFS, so it comes up a few dB.
+    let t = g.track_gain.unwrap();
+    assert!(t > 2.0 && t < 6.0, "{g:?}");
+    // Every song of the album is known now, so it has an album gain too.
+    assert_eq!(g.album_from, Some(Origin::Measured));
+    drop(svc);
+
+    // Navidrome does send it: nothing to measure, and the server's value
+    // is what plays.
+    let r = rig("LevelN", CacheConfig::default(), None);
+    let lib = r.lib();
+    let bleach = lib.album_tracks(&r.album_key("Bleach")).unwrap();
+    r.cache.upcoming(vec![r.key("11")]);
+    assert!(wait_for(15, || r.cache.status().cache_files >= 1));
+    let svc = LevelService::start(&r.db).unwrap();
+    svc.cache_changed();
+    assert!(svc.events().recv_timeout(Duration::from_secs(2)).is_err());
+    let g = lib.gains_for(&bleach[0].to_info()).unwrap();
+    assert_eq!(g.track_from, Some(Origin::Server));
+    assert_eq!(g.track_gain, Some(-6.0));
+    assert_eq!(g.album_gain, Some(-7.0));
 }

@@ -419,12 +419,17 @@ impl State {
                     Control::Folder => (5, false),
                     Control::Action(_) if st.key == SettingKey::AddServer => (9, false),
                     Control::Action(_) if st.key == SettingKey::FindDlna => (10, false),
+                    Control::Action(_) if st.key == SettingKey::MeasureLibrary => (11, false),
                     Control::Action(_) => (6, false),
                     Control::Info(_) => (7, false),
                     Control::Server(_) => (8, false),
                 };
                 if matches!(st.control, Control::Folder) {
                     r.meta = SharedString::new();
+                }
+                if let Some(why) = st.disabled {
+                    r.off = true;
+                    r.meta = ss(why);
                 }
                 // A server's row: its status line under its name.
                 if matches!(st.control, Control::Server(_)) {
@@ -472,7 +477,7 @@ impl State {
                 r.playing = self.b.mix.as_ref().and_then(|x| x.saved) == Some(m.id);
             }
         }
-        r.off = !self.b.plays(item);
+        r.off = r.off || !self.b.plays(item);
         r.can_mix = self.b.can_mix(item) && !matches!(item, Item::Mix(_));
         r.can_pin = self.b.can_pin(item);
         r.pinned = r.can_pin && self.b.pinned(item).is_some();
@@ -1056,6 +1061,20 @@ impl State {
                 ui.set_bp_badge(ss(bp));
                 ui.set_bp_tone(tone);
                 ui.set_bp_tip(ss(tip));
+                match s.level {
+                    Some(l) => {
+                        ui.set_level_label(ss(l.short()));
+                        ui.set_level_tip(ss(format!(
+                            "Leveling {}. {}",
+                            l.text(),
+                            l.source.detail()
+                        )));
+                    }
+                    None => {
+                        ui.set_level_label(SharedString::new());
+                        ui.set_level_tip(SharedString::new());
+                    }
+                }
             }
             None => {
                 ui.set_np_title(SharedString::new());
@@ -1063,6 +1082,7 @@ impl State {
                 ui.set_np_has_art(false);
                 ui.set_badge(SharedString::new());
                 ui.set_bp_badge(SharedString::new());
+                ui.set_level_label(SharedString::new());
             }
         }
         let s = &self.snap;
@@ -1545,6 +1565,7 @@ impl State {
             Control::Number { .. } | Control::Text { .. } => "edit",
             Control::Action(_) if st.key == SettingKey::AddServer => "add-server",
             Control::Action(_) if st.key == SettingKey::FindDlna => "find-dlna",
+            Control::Action(_) if st.key == SettingKey::MeasureLibrary => "measure",
             Control::Action(_) => "browse",
             Control::Server(_) => "sync",
             Control::Folder | Control::Info(_) => return,
@@ -1556,7 +1577,13 @@ impl State {
         let Some(st) = self.b.selected_setting() else {
             return;
         };
+        if let Some(why) = st.disabled {
+            return self.b.note(why);
+        }
         let key = st.key.clone();
+        if key == SettingKey::MeasureLibrary {
+            return self.b.toggle_measure_library();
+        }
         match a {
             "toggle" => self.change_setting(ui, key, Change::Toggle),
             "dec" => self.change_setting(ui, key, Change::Step(-1)),
@@ -2242,6 +2269,12 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
     on!(on_row_activate, |s, u, i| {
         if s.b.select(i as usize) {
             s.activate_in(&u);
+        }
+    });
+    on!(on_level_clicked, |s, u| {
+        let tip = u.get_level_tip().to_string();
+        if !tip.is_empty() {
+            s.b.note(tip);
         }
     });
     on!(on_bp_clicked, |s, u| {

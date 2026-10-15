@@ -95,6 +95,8 @@ pub struct Shared {
     /// Bit-perfect mode, as [`output::BitPerfect`]. Read by the decoder
     /// when it opens a track, to pick the output kind.
     pub bit_perfect: AtomicU8,
+    /// Leveling settings, read by the decoder as it opens each track.
+    pub level: crate::level::LevelShared,
 }
 
 impl Default for Shared {
@@ -114,6 +116,7 @@ impl Default for Shared {
             podcast_tempo: AtomicF64::new(1.0),
             podcast_trim: AtomicBool::new(false),
             bit_perfect: AtomicU8::new(0),
+            level: crate::level::LevelShared::default(),
         }
     }
 }

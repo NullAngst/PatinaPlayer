@@ -677,6 +677,12 @@ impl App {
                     buf: "~/".into(),
                 };
             }
+            (KeyCode::Enter, Some(st)) if st.disabled.is_some() => {
+                self.b.note(st.disabled.unwrap_or_default());
+            }
+            (KeyCode::Enter, Some(st)) if st.key == SettingKey::MeasureLibrary => {
+                self.b.toggle_measure_library();
+            }
             (KeyCode::Enter, Some(st)) => match &st.control {
                 Control::Toggle(_) => self.change_setting(st.key, Change::Toggle),
                 Control::Choice { .. } => self.change_setting(st.key, Change::Step(1)),

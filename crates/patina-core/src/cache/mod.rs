@@ -226,6 +226,31 @@ pub fn stored_keys() -> HashMap<SongKey, Tier> {
         .unwrap_or_default()
 }
 
+/// Where a kept song's file is, if it's on disk.
+pub fn stored_file(key: &SongKey) -> Option<PathBuf> {
+    let h = HANDLE.read().unwrap();
+    let idx = h.as_ref()?.shared.index.read().unwrap();
+    idx.get(key).map(|s| s.file.clone()).filter(|f| f.is_file())
+}
+
+/// Every kept song and its file, for measuring what lands in the cache.
+pub fn stored_files() -> Vec<(SongKey, PathBuf)> {
+    HANDLE
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|h| {
+            h.shared
+                .index
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(k, s)| (k.clone(), s.file.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn set_handle(shared: Option<Arc<service::Shared>>) {
     *HANDLE.write().unwrap() = shared.map(|shared| Handle { shared });
 }

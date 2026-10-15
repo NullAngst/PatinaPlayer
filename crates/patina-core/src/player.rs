@@ -100,6 +100,12 @@ pub enum Command {
         tempo: f64,
         trim_silence: bool,
     },
+    /// Leveling settings. The playing track's gain follows within a
+    /// couple of seconds (what's already decoded plays out).
+    SetLeveling(crate::level::LevelConfig),
+    /// A mix is playing, or stopped: Smart leveling treats a mix like
+    /// shuffle.
+    SetMixing(bool),
     Quit,
 }
 
@@ -152,6 +158,39 @@ pub struct Snapshot {
     pub bit_perfect_refused: Option<String>,
     /// Volume can't move: exclusive output on a DAC with no volume control.
     pub volume_locked: bool,
+    /// The leveling gain on what's playing, and where it came from.
+    pub level: Option<LevelView>,
+}
+
+/// The leveling gain for the bottom bar: "-4.2 dB album".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelView {
+    pub gain_db: f64,
+    pub source: crate::level::Source,
+}
+
+impl LevelView {
+    /// "-4.2 dB album", or "leveling off (bit-perfect)".
+    pub fn text(&self) -> String {
+        use crate::level::Source;
+        match self.source {
+            Source::Off => "leveling off".into(),
+            Source::BitPerfect => "leveling off (bit-perfect)".into(),
+            s => format!("{:+.1} dB {}", self.gain_db, s.label()),
+        }
+    }
+
+    /// Just the number, for a narrow bar: "-4.2 dB", "-6.0 dB?" while
+    /// it's a guess.
+    pub fn short(&self) -> String {
+        use crate::level::Source;
+        match self.source {
+            Source::Off | Source::BitPerfect => String::new(),
+            Source::Fallback => format!("{:+.1} dB?", self.gain_db),
+            Source::Live => format!("~{:+.1} dB", self.gain_db),
+            _ => format!("{:+.1} dB", self.gain_db),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +207,7 @@ pub struct PlayerConfig {
     pub fade_ms: u32,
     pub podcast_tempo: f64,
     pub podcast_trim: bool,
+    pub leveling: crate::level::LevelConfig,
 }
 
 impl Default for PlayerConfig {
@@ -178,6 +218,7 @@ impl Default for PlayerConfig {
             fade_ms: 100,
             podcast_tempo: 1.0,
             podcast_trim: false,
+            leveling: crate::level::LevelConfig::default(),
         }
     }
 }
@@ -310,6 +351,7 @@ impl Core {
         shared
             .bit_perfect
             .store(cfg.output.bit_perfect.to_u8(), Ordering::Relaxed);
+        shared.level.set(&cfg.leveling);
         let (feed_tx, feed_cmd_rx) = unbounded();
         let (feed_msg_tx, feed_rx) = unbounded();
         feeder::spawn(shared.clone(), queue.clone(), feed_cmd_rx, feed_msg_tx);
@@ -716,6 +758,23 @@ impl Core {
                 // Close whatever's open, so the next open goes the new way.
                 self.restart_here();
             }
+            Command::SetLeveling(c) => {
+                let was_off = self.shared.level.mode() == crate::level::LevelMode::Off;
+                self.cfg.leveling = c.clone();
+                self.shared.level.set(&c);
+                // Auto bit-perfect goes on and off with leveling.
+                let now_off = c.mode == crate::level::LevelMode::Off;
+                if was_off != now_off && self.cfg.output.bit_perfect == BitPerfect::Auto {
+                    self.exclusive_refused = None;
+                    self.restart_here();
+                }
+            }
+            Command::SetMixing(on) => {
+                let l = &self.shared.level;
+                if l.mixing.swap(on, Ordering::Relaxed) != on {
+                    l.generation.fetch_add(1, Ordering::Release);
+                }
+            }
             Command::SetOutput {
                 backend,
                 device,
@@ -956,6 +1015,11 @@ impl Core {
             self.shared.underrun.swap(false, Ordering::Relaxed) && self.state == PlayState::Playing;
         let position = self.position();
         let track = self.segments.front().map(|s| s.info.clone());
+        let playing_level = self
+            .segments
+            .front()
+            .filter(|_| self.state != PlayState::Stopped)
+            .map(|s| s.level);
         if self.state == PlayState::Playing {
             self.count_listening(position, track.as_ref());
         } else {
@@ -1016,6 +1080,14 @@ impl Core {
         snap.bit_perfect = self.cfg.output.bit_perfect;
         snap.exclusive = self.output.as_ref().and_then(|o| o.exclusive());
         snap.volume_locked = snap.exclusive.as_ref().is_some_and(|e| !e.hw_volume);
+        snap.level = playing_level.map(|l| LevelView {
+            gain_db: if l.source == crate::level::Source::Live {
+                self.shared.level.live_db.load()
+            } else {
+                l.gain_db
+            },
+            source: l.source,
+        });
         snap.bit_perfect_refused = if snap.exclusive.is_none()
             && self.cfg.output.bit_perfect != BitPerfect::Off
             && snap

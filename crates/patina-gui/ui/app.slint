@@ -724,153 +724,166 @@ component ListRow inherits Rectangle {
 
     // A settings row: label and help on the left, its control on the
     // right. Laid over the row's touch area so the buttons get the clicks.
-    if item.kind == 12: HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 16px;
-        VerticalLayout {
-            horizontal-stretch: 1;
-            alignment: center;
-            spacing: 2px;
-            Text {
-                text: item.title;
-                font-size: 13px;
-                color: item.ctl == 5 ? P.text : P.text;
-                font-family: item.ctl == 5 ? P.mono : P.sans;
-                overflow: elide;
-            }
-            if item.meta != "": Text {
-                text: item.meta;
-                font-size: 11.5px;
-                color: P.muted;
-                overflow: elide;
-            }
-        }
+    // Greyed out (leveling under bit-perfect) shows faded, its help line
+    // saying why, and a click on its control just says why again.
+    if item.kind == 12: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        opacity: item.off ? 0.45 : 1.0;
         HorizontalLayout {
-            horizontal-stretch: 0;
-            alignment: end;
-            spacing: 6px;
-            if item.ctl == 1: Rectangle {
-                width: 36px;
-                Switch {
-                    y: (parent.height - self.height) / 2;
-                    on: item.on;
-                    toggled => { root.act("toggle"); }
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 16px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: item.title;
+                    font-size: 13px;
+                    color: item.ctl == 5 ? P.text : P.text;
+                    font-family: item.ctl == 5 ? P.mono : P.sans;
+                    overflow: elide;
+                }
+                if item.meta != "": Text {
+                    text: item.meta;
+                    font-size: 11.5px;
+                    color: P.muted;
+                    overflow: elide;
                 }
             }
-            if item.ctl == 2: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                max-width: 340px;
-                text: item.sub + "  ▾";
-                clicked => { root.act("choose"); }
-            }
-            if item.ctl == 3: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "−";
-                clicked => { root.act("dec"); }
-            }
-            if item.ctl == 3: Rectangle {
-                min-width: 72px;
-                Text {
-                    width: parent.width;
-                    height: parent.height;
+            HorizontalLayout {
+                horizontal-stretch: 0;
+                alignment: end;
+                spacing: 6px;
+                if item.ctl == 1: Rectangle {
+                    width: 36px;
+                    Switch {
+                        y: (parent.height - self.height) / 2;
+                        on: item.on;
+                        toggled => { root.act("toggle"); }
+                    }
+                }
+                if item.ctl == 2: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    max-width: 340px;
+                    text: item.sub + "  ▾";
+                    clicked => { root.act("choose"); }
+                }
+                if item.ctl == 3: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "−";
+                    clicked => { root.act("dec"); }
+                }
+                if item.ctl == 3: Rectangle {
+                    min-width: 72px;
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: item.sub;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        font-family: P.mono;
+                        font-size: 12px;
+                        color: P.text;
+                    }
+                    TouchArea {
+                        mouse-cursor: text;
+                        clicked => { root.act("edit"); }
+                    }
+                }
+                if item.ctl == 3: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "+";
+                    clicked => { root.act("inc"); }
+                }
+                if item.ctl == 4: Text {
+                    max-width: 300px;
                     text: item.sub;
-                    horizontal-alignment: center;
                     vertical-alignment: center;
                     font-family: P.mono;
                     font-size: 12px;
-                    color: P.text;
+                    color: item.on ? P.text : P.muted;
+                    overflow: elide;
                 }
-                TouchArea {
-                    mouse-cursor: text;
+                if item.ctl == 4: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Edit";
                     clicked => { root.act("edit"); }
                 }
-            }
-            if item.ctl == 3: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "+";
-                clicked => { root.act("inc"); }
-            }
-            if item.ctl == 4: Text {
-                max-width: 300px;
-                text: item.sub;
-                vertical-alignment: center;
-                font-family: P.mono;
-                font-size: 12px;
-                color: item.on ? P.text : P.muted;
-                overflow: elide;
-            }
-            if item.ctl == 4: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Edit";
-                clicked => { root.act("edit"); }
-            }
-            if item.ctl == 5: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Remove";
-                danger: true;
-                clicked => { root.act("remove"); }
-            }
-            if item.ctl == 6: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Browse…";
-                primary: true;
-                clicked => { root.act("browse"); }
-            }
-            if item.ctl == 6: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Type a path…";
-                clicked => { root.act("edit"); }
-            }
-            // A music server: sync it, edit it, remove it.
-            if item.ctl == 8: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Sync now";
-                clicked => { root.act("sync"); }
-            }
-            if item.ctl == 8: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Edit";
-                clicked => { root.act("srv-edit"); }
-            }
-            if item.ctl == 8: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Remove";
-                danger: true;
-                clicked => { root.act("srv-remove"); }
-            }
-            if item.ctl == 9: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Add server…";
-                primary: true;
-                clicked => { root.act("add-server"); }
-            }
-            if item.ctl == 10: Chip {
-                y: (parent.height - self.height) / 2;
-                h: 28px;
-                text: "Find servers…";
-                primary: true;
-                clicked => { root.act("find-dlna"); }
-            }
-            if item.ctl == 7: Text {
-                max-width: 520px;
-                text: item.sub;
-                vertical-alignment: center;
-                font-family: P.mono;
-                font-size: 11.5px;
-                color: P.muted;
-                overflow: elide;
+                if item.ctl == 5: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Remove";
+                    danger: true;
+                    clicked => { root.act("remove"); }
+                }
+                if item.ctl == 6: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Browse…";
+                    primary: true;
+                    clicked => { root.act("browse"); }
+                }
+                if item.ctl == 6: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Type a path…";
+                    clicked => { root.act("edit"); }
+                }
+                // A music server: sync it, edit it, remove it.
+                if item.ctl == 8: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Sync now";
+                    clicked => { root.act("sync"); }
+                }
+                if item.ctl == 8: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Edit";
+                    clicked => { root.act("srv-edit"); }
+                }
+                if item.ctl == 8: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Remove";
+                    danger: true;
+                    clicked => { root.act("srv-remove"); }
+                }
+                if item.ctl == 9: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Add server…";
+                    primary: true;
+                    clicked => { root.act("add-server"); }
+                }
+                if item.ctl == 10: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: "Find servers…";
+                    primary: true;
+                    clicked => { root.act("find-dlna"); }
+                }
+                if item.ctl == 11: Chip {
+                    y: (parent.height - self.height) / 2;
+                    h: 28px;
+                    text: item.sub;
+                    clicked => { root.act("measure"); }
+                }
+                if item.ctl == 7: Text {
+                    max-width: 520px;
+                    text: item.sub;
+                    vertical-alignment: center;
+                    font-family: P.mono;
+                    font-size: 11.5px;
+                    color: P.muted;
+                    overflow: elide;
+                }
             }
         }
     }
@@ -1052,6 +1065,10 @@ export component AppWindow inherits Window {
     in property <int> bp-tone; // 0 good, 1 plain, 2 refused
     in property <string> bp-tip;
     callback bp-clicked;
+    // The leveling gain on what's playing ("-4.2 dB"), and where it's from.
+    in property <string> level-label;
+    in property <string> level-tip;
+    callback level-clicked;
     // Bit-perfect on a DAC with no volume control: fixed at 100%.
     in property <bool> volume-locked;
     in property <string> output-label;
@@ -2023,6 +2040,19 @@ export component AppWindow inherits Window {
                             TouchArea {
                                 mouse-cursor: pointer;
                                 clicked => { root.bp-clicked(); }
+                            }
+                        }
+                        // Click it for where the gain came from.
+                        if root.level-label != "": Rectangle {
+                            width: lvb.width;
+                            lvb := Badge {
+                                y: (parent.height - self.height) / 2;
+                                text: root.level-label;
+                                fg: P.muted;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.level-clicked(); }
                             }
                         }
                         if root.badge != "" && !root.compact: Badge {

@@ -213,6 +213,7 @@ impl Browser {
                         m.started = true;
                         m.similar = similar;
                     }
+                    self.player.send(Command::SetMixing(true));
                     if matches!(seed, MixSeed::Genre { .. }) {
                         self.genre_marks.clear();
                     }
@@ -236,6 +237,7 @@ impl Browser {
                 }
                 MixEvent::Empty { run, why } if Some(run) == current => {
                     self.mix = None;
+                    self.player.send(Command::SetMixing(false));
                     self.note(why);
                     self.touch();
                 }
@@ -266,6 +268,7 @@ impl Browser {
     /// Something else took over the queue: the mix is over.
     pub(super) fn end_mix(&mut self) {
         if self.mix.take().is_some() {
+            self.player.send(Command::SetMixing(false));
             self.touch();
         }
     }

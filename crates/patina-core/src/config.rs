@@ -94,6 +94,7 @@ pub struct Config {
     pub cache: CacheConfig,
     pub mixes: MixConfig,
     pub lastfm: LastFmConfig,
+    pub leveling: crate::level::LevelConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -255,6 +256,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             mixes: MixConfig::default(),
             lastfm: LastFmConfig::default(),
+            leveling: crate::level::LevelConfig::default(),
         }
     }
 }
@@ -274,6 +276,18 @@ struct RawConfig {
     cache: Option<RawCache>,
     mixes: Option<RawMixes>,
     lastfm: Option<RawLastFm>,
+    leveling: Option<RawLeveling>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLeveling {
+    mode: Option<String>,
+    target_lufs: Option<f64>,
+    fallback_db: Option<f64>,
+    clip_guard: Option<bool>,
+    live_music: Option<bool>,
+    live_radio: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -480,6 +494,27 @@ impl Config {
                 .trim()
                 .to_string(),
         };
+        let rl = raw.leveling.unwrap_or_default();
+        let dl = crate::level::LevelConfig::default();
+        let leveling = crate::level::LevelConfig {
+            mode: match rl.mode {
+                Some(m) => m
+                    .parse()
+                    .map_err(|m| parse_err(format!("leveling.mode: {m}")))?,
+                None => dl.mode,
+            },
+            target: rl
+                .target_lufs
+                .unwrap_or(dl.target)
+                .clamp(crate::level::TARGET_MIN, crate::level::TARGET_MAX),
+            fallback: rl
+                .fallback_db
+                .unwrap_or(dl.fallback)
+                .clamp(crate::level::FALLBACK_MIN, crate::level::FALLBACK_MAX),
+            clip_guard: rl.clip_guard.unwrap_or(dl.clip_guard),
+            live_music: rl.live_music.unwrap_or(dl.live_music),
+            live_streams: rl.live_radio.unwrap_or(dl.live_streams),
+        };
         let theme = match look.theme {
             Some(t) => t.parse::<Theme>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -548,6 +583,7 @@ impl Config {
             cache,
             mixes,
             lastfm,
+            leveling,
         })
     }
 
@@ -622,6 +658,25 @@ theme = "runout"
 volume = 80
 # Fade on pause, resume, seek and stop, in milliseconds. 0 turns it off.
 fade_ms = 100
+
+[leveling]
+# Evens out loudness between songs. off, track (every song on its own),
+# album (an album keeps its own dynamics), or smart: album while an album
+# plays in order, track on shuffle, in a mix or in a mixed playlist.
+mode = "smart"
+# Loudness to aim for, -23 to -10 LUFS. -18 is the ReplayGain reference;
+# higher is louder (and leaves less room before peaks need taming).
+target_lufs = -18
+# Gain for a song not measured yet, -12 to 0 dB. It's measured as it
+# downloads or as it comes up in the queue, and right from then on.
+fallback_db = -6
+# Keep the gain low enough that the song's loudest peak can't clip.
+clip_guard = true
+# The live normalizer: follows the sound as it plays. Worse than a
+# measured gain, so for music it's only for songs not measured yet, and
+# off by default. For radio and podcasts it's all there is.
+live_music = false
+live_radio = true
 
 [podcasts]
 # Feed URLs. The Podcasts view adds to this list for you.

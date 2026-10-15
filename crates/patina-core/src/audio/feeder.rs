@@ -23,6 +23,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use super::decoder::{OpenOptions, Source};
 use super::output::BitPerfect;
 use super::{Depth, SharedRef, StreamFormat};
+use crate::level::{self, Level, LevelMode, LiveNorm};
 use crate::queue::{EntryId, Queue};
 use crate::track::{MediaKind, TrackInfo};
 
@@ -58,6 +59,8 @@ pub struct Segment {
     /// since silence trimming makes the mapping uneven.
     pub marked: bool,
     pub info: TrackInfo,
+    /// The leveling gain this track plays at.
+    pub level: Level,
 }
 
 #[allow(clippy::large_enum_variant)] // a few messages a second at most
@@ -142,6 +145,58 @@ struct Feeder {
     last_mark: u64,
     /// The current segment: first ring frame, track position there, rate.
     seg: (u64, Duration, u32),
+    /// Leveling for the open track, and the settings generation it was
+    /// worked out under.
+    level: Level,
+    level_gen: u64,
+    gain: Gain,
+}
+
+/// Applies the leveling gain to decoded samples on their way into the
+/// ring: a fixed gain (ramped when a setting changes mid-track, so it
+/// doesn't click), or the live normalizer.
+#[derive(Default)]
+struct Gain {
+    /// Linear gain on the last sample.
+    cur: f64,
+    target: f64,
+    /// Frames left in a ramp from `cur` to `target`.
+    ramp: usize,
+    live: Option<LiveNorm>,
+}
+
+/// A gain change mid-track glides over this long.
+const RAMP_MS: usize = 50;
+
+impl Gain {
+    fn process(&mut self, buf: &mut [f64], fmt: StreamFormat) {
+        if let Some(n) = self.live.as_mut() {
+            n.process(buf);
+            return;
+        }
+        let ch = (fmt.channels as usize).max(1);
+        if self.ramp == 0 {
+            if self.cur != 1.0 {
+                for s in buf.iter_mut() {
+                    *s *= self.cur;
+                }
+            }
+            return;
+        }
+        let step = (self.target - self.cur) / self.ramp as f64;
+        for f in buf.chunks_exact_mut(ch) {
+            if self.ramp > 0 {
+                self.cur += step;
+                self.ramp -= 1;
+                if self.ramp == 0 {
+                    self.cur = self.target;
+                }
+            }
+            for s in f {
+                *s *= self.cur;
+            }
+        }
+    }
 }
 
 /// Longest we wait for the renderer to acknowledge a flush. If the output
@@ -182,6 +237,13 @@ impl Feeder {
             last_title_poll: Instant::now(),
             last_mark: 0,
             seg: (0, Duration::ZERO, 0),
+            level: Level::OFF,
+            level_gen: 0,
+            gain: Gain {
+                cur: 1.0,
+                target: 1.0,
+                ..Default::default()
+            },
         }
     }
 
@@ -452,8 +514,9 @@ impl Feeder {
         // Bit-perfect is for local files played as they are: never radio,
         // never a sped-up or trimmed podcast.
         let mode = BitPerfect::from_u8(self.shared.bit_perfect.load(Ordering::Relaxed));
-        let exclusive = (mode.wanted(false) && original && src.source_position().is_none())
-            .then(|| src.depth());
+        let dsp = self.shared.level.mode() != LevelMode::Off;
+        let exclusive =
+            (mode.wanted(dsp) && original && src.source_position().is_none()).then(|| src.depth());
         if self.format != Some(fmt) || self.exclusive != exclusive {
             if !self.drain_ring() {
                 // A command arrived while draining; it's stashed and wins.
@@ -466,6 +529,7 @@ impl Feeder {
         self.entry_info = merged;
         self.source = Some(src);
         self.last_mark = 0;
+        self.set_level(true);
         self.announce(pos);
         Opened::Yes
     }
@@ -516,7 +580,101 @@ impl Feeder {
             tempo,
             marked,
             info: self.entry_info.clone(),
+            level: self.level,
         }));
+    }
+
+    /// Work out the open track's leveling gain. `start` is a new track,
+    /// which takes its gain from its first sample; otherwise the gain
+    /// glides there.
+    fn set_level(&mut self, start: bool) {
+        self.level_gen = self.shared.level.generation.load(Ordering::Acquire);
+        let Some(fmt) = self.source.as_ref().map(|s| s.format()) else {
+            return;
+        };
+        let cfg = self.shared.level.get();
+        let info = &self.entry_info;
+        let stream = info.is_live() || info.kind == MediaKind::Podcast;
+        let bit_perfect = self.exclusive.is_some();
+        let album_in_order = cfg.mode == LevelMode::Smart
+            && !stream
+            && !self.shared.level.mixing.load(Ordering::Relaxed)
+            && {
+                let q = self.queue.lock().unwrap();
+                let near = |d| {
+                    q.step(self.entry, d)
+                        .and_then(|id| q.get(id))
+                        .map(|e| e.info.clone())
+                };
+                let (prev, next) = (near(-1), near(1));
+                !q.shuffle() && level::album_in_order(prev.as_ref(), info, next.as_ref())
+            };
+        let gains = if cfg.mode == LevelMode::Off || stream || bit_perfect {
+            level::Gains::default()
+        } else {
+            level::lookup::gains(info)
+        };
+        let lv = level::resolve(
+            &cfg,
+            &gains,
+            level::Context {
+                stream,
+                album_in_order,
+                bit_perfect,
+            },
+        );
+        let was_live = self.level.live && !start;
+        self.level = lv;
+        if lv.live {
+            match self.gain.live.as_mut().filter(|_| was_live) {
+                // Already following this stream: keep its gain, take the
+                // new target.
+                Some(n) => n.set_target(cfg.target),
+                None => {
+                    let from = if start {
+                        lv.gain_db
+                    } else {
+                        level::lin_to_db(self.gain.cur)
+                    };
+                    self.gain.live = LiveNorm::new(fmt.channels, fmt.rate, from, cfg.target);
+                    if let Some(n) = &self.gain.live {
+                        self.shared.level.live_db.store(n.gain_db());
+                    }
+                }
+            }
+            return;
+        }
+        let lin = lv.linear();
+        if let Some(n) = self.gain.live.take() {
+            self.gain.cur = level::db_to_lin(n.gain_db());
+        }
+        self.gain.target = lin;
+        if start {
+            self.gain.cur = lin;
+            self.gain.ramp = 0;
+        } else {
+            self.gain.ramp = fmt.rate as usize * RAMP_MS / 1000;
+        }
+    }
+
+    /// Tell the core the gain changed mid-track, for the bottom bar. A
+    /// segment at the current write point, same track, same position line.
+    fn announce_level(&mut self) {
+        let pos = self.position_at(
+            self.written
+                + (self.pending.len() - self.pending_off) as u64
+                    / self.format.map(|f| f.channels as u64).unwrap_or(1),
+        );
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|s| s.source_position().is_some())
+        {
+            // Filtered playback keeps its position from marks; a new
+            // segment would reset it. The bar catches up next track.
+            return;
+        }
+        self.announce(pos);
     }
 
     /// Wait until the renderer has played everything in the current ring.
@@ -587,6 +745,19 @@ impl Feeder {
                     if self.source.as_mut().unwrap().take_format_change() {
                         self.follow_format_change();
                     }
+                    if self.shared.level.generation.load(Ordering::Acquire) != self.level_gen {
+                        // A setting changed: this track's gain too, from
+                        // here on (what's already in the ring plays out).
+                        self.set_level(false);
+                        self.announce_level();
+                    }
+                    if let Some(fmt) = self.source.as_ref().map(|s| s.format()) {
+                        let fresh = &mut self.pending[self.pending_off..];
+                        self.gain.process(fresh, fmt);
+                        if let Some(n) = &self.gain.live {
+                            self.shared.level.live_db.store(n.gain_db());
+                        }
+                    }
                 }
                 Err(e) if live => {
                     self.source = None;
@@ -634,6 +805,14 @@ impl Feeder {
             return;
         }
         self.new_ring(fmt);
+        if let Some(n) = self
+            .gain
+            .live
+            .as_ref()
+            .and_then(|n| n.reformat(fmt.channels, fmt.rate))
+        {
+            self.gain.live = Some(n);
+        }
         self.entry_info.sample_rate = fmt.rate;
         self.entry_info.channels = fmt.channels;
         self.queue

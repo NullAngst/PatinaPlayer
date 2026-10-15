@@ -47,6 +47,18 @@ pub enum Key {
     /// Genre mixes match album tags or each song's tags.
     GenreMatch,
     LastFmKey,
+    LevelMode,
+    /// Target loudness, LUFS.
+    LevelTarget,
+    /// Gain for songs not measured yet.
+    LevelFallback,
+    ClipGuard,
+    /// The live normalizer for music not measured yet.
+    LiveMusic,
+    /// The live normalizer for radio and podcasts.
+    LiveRadio,
+    /// Measure every untagged song now, or stop.
+    MeasureLibrary,
     /// Read-only facts: where files are.
     Info(&'static str),
 }
@@ -124,6 +136,8 @@ pub struct Setting {
     /// One line on what it does, for a tooltip or the TUI's hint line.
     pub help: &'static str,
     pub control: Control,
+    /// Greyed out, and why: leveling while bit-perfect is on.
+    pub disabled: Option<&'static str>,
 }
 
 /// A change to a setting, as a frontend expresses it.
@@ -156,6 +170,10 @@ pub struct SettingsInfo {
 pub const BIT_PERFECT_WARNING: &str = "Bit-perfect takes exclusive control of this device. \
 Other apps won't be able to play sound through it until PatinaPlayer stops or you turn this off.";
 
+/// Why leveling greys out.
+pub const LEVELING_BIT_PERFECT: &str =
+    "Bit-perfect is on, and it skips leveling. Set bit-perfect to Off or Auto to level.";
+
 /// Stream choices for a server: (value, label). The value is
 /// "format" or "format:kbps".
 pub const STREAM_CHOICES: [(&str, &str); 6] = [
@@ -181,6 +199,7 @@ pub fn rows(
     podcast_trim: bool,
     devices: &[HwDevice],
     servers: &[ServerStatus],
+    measuring: Option<bool>,
 ) -> Vec<(Option<&'static str>, Setting)> {
     let mut v: Vec<(Option<&'static str>, Setting)> = Vec::new();
     let mut push = |group: &'static str, s: Setting| v.push((Some(group), s));
@@ -191,6 +210,7 @@ pub fn rows(
             push(
                 "Library",
                 Setting {
+                    disabled: None,
                     key: Key::Folder(f.clone()),
                     label: f.display().to_string(),
                     help: "A library folder. Removing it takes its tracks out of the index; the files stay where they are.",
@@ -201,6 +221,7 @@ pub fn rows(
         push(
             "Library",
             Setting {
+                disabled: None,
                 key: Key::AddFolder,
                 label: "Add a music folder".into(),
                 help: "Index another folder. The scan starts right away.",
@@ -210,6 +231,7 @@ pub fn rows(
         push(
             "Library",
             Setting {
+                disabled: None,
                 key: Key::Watch,
                 label: "Watch for changes".into(),
                 help: "Pick up added, changed and removed files while the player runs.",
@@ -234,6 +256,7 @@ pub fn rows(
                 push(
                     "Servers",
                     Setting {
+                        disabled: None,
                         key: Key::Server(sc.name.clone()),
                         label: sc.name.clone(),
                         help: "A DLNA server on your network. Sync reads its library again now. Edit renames it.",
@@ -250,6 +273,7 @@ pub fn rows(
             push(
                 "Servers",
                 Setting {
+                    disabled: None,
                     key: Key::Server(sc.name.clone()),
                     label: sc.name.clone(),
                     help: "Sync reads the server's library again now. Edit changes the address, user or password.",
@@ -274,6 +298,7 @@ pub fn rows(
             push(
                 "Servers",
                 Setting {
+                    disabled: None,
                     key: Key::ServerStream(sc.name.clone()),
                     label: format!("{}: streaming", sc.name),
                     help: "The original file keeps the sound untouched (and lets bit-perfect work). A transcode saves data on a slow line.",
@@ -284,6 +309,7 @@ pub fn rows(
         push(
             "Servers",
             Setting {
+                disabled: None,
                 key: Key::AddServer,
                 label: "Add a music server".into(),
                 help: "Navidrome, Gonic, Airsonic and other Subsonic servers, or Ampache. The password goes in your keyring.",
@@ -293,6 +319,7 @@ pub fn rows(
         push(
             "Servers",
             Setting {
+                disabled: None,
                 key: Key::FindDlna,
                 label: "Find DLNA servers".into(),
                 help: "MiniDLNA, Gerbera, Jellyfin, Plex, Serviio or a NAS on your network. No login needed.",
@@ -307,6 +334,7 @@ pub fn rows(
         push(
             "Cache and offline",
             Setting {
+                disabled: None,
                 key: Key::CacheSize,
                 label: "Cache size".into(),
                 help: "Room for recently played and prefetched songs from your servers. 0 turns it off; pinned songs don't count.",
@@ -323,6 +351,7 @@ pub fn rows(
         push(
             "Cache and offline",
             Setting {
+                disabled: None,
                 key: Key::Prefetch,
                 label: "Prefetch".into(),
                 help: "Download songs coming up in the queue, nearest first. By size suits a mix of hi-res and MP3.",
@@ -338,6 +367,7 @@ pub fn rows(
         push(
             "Cache and offline",
             Setting {
+                disabled: None,
                 key: Key::PrefetchAmount,
                 label: "Prefetch ahead".into(),
                 help: "How far ahead to download. 0 turns prefetch off. It comes out of the cache size.",
@@ -364,6 +394,7 @@ pub fn rows(
         push(
             "Cache and offline",
             Setting {
+                disabled: None,
                 key: Key::PauseMetered,
                 label: "Hold on metered connections".into(),
                 help: "Hold prefetch and offline downloads while NetworkManager says the connection is metered (a phone hotspot).",
@@ -385,6 +416,7 @@ pub fn rows(
         push(
             "Cache and offline",
             Setting {
+                disabled: None,
                 key: Key::CacheFormat,
                 label: "Keep songs as".into(),
                 help: "The original file, or a conversion the server makes to save space. Converted songs can't play bit-perfect.",
@@ -398,6 +430,7 @@ pub fn rows(
         push(
             "Mixes",
             Setting {
+                disabled: None,
                 key: Key::GenreMatch,
                 label: "Genre mixes match".into(),
                 help: "Album tags keeps half-tagged albums out; each song's tags follows the songs themselves.",
@@ -413,6 +446,7 @@ pub fn rows(
         push(
             "Mixes",
             Setting {
+                disabled: None,
                 key: Key::LastFmKey,
                 label: "Last.fm API key".into(),
                 help: "Free from last.fm/api/account/create. Artist and track mixes ask Last.fm when your server can't say who's similar.",
@@ -428,6 +462,7 @@ pub fn rows(
     push(
         "Appearance",
         Setting {
+            disabled: None,
             key: Key::Theme,
             label: "Theme".into(),
             help: "Runout, plain Light or Dark, OLED true black (saves power on OLED screens), or the pastel kawaii pair.",
@@ -448,6 +483,7 @@ pub fn rows(
     push(
         "Playback",
         Setting {
+            disabled: None,
             key: Key::StartVolume,
             label: "Starting volume".into(),
             help: "Volume the player starts at.",
@@ -464,6 +500,7 @@ pub fn rows(
     push(
         "Playback",
         Setting {
+            disabled: None,
             key: Key::FadeMs,
             label: "Fades".into(),
             help: "Fade on pause, resume, seek and stop. 0 turns it off.",
@@ -478,6 +515,93 @@ pub fn rows(
         },
     );
 
+    // Leveling
+    let lv = &cfg.leveling;
+    let off = (cfg.output.bit_perfect == BitPerfect::On).then_some(LEVELING_BIT_PERFECT);
+    let mut lpush = |s: Setting| push("Leveling", Setting { disabled: off, ..s });
+    lpush(Setting {
+        key: Key::LevelMode,
+        label: "Leveling".into(),
+        help: "Evens out loudness between songs. Smart keeps an album's own dynamics while it plays in order and levels song by song on shuffle and in mixes.",
+        control: Control::Choice {
+            options: crate::level::LevelMode::ALL
+                .iter()
+                .map(|m| (m.as_str().to_string(), m.label().to_string()))
+                .collect(),
+            index: crate::level::LevelMode::ALL
+                .iter()
+                .position(|m| *m == lv.mode)
+                .unwrap_or(3),
+        },
+        disabled: None,
+    });
+    lpush(Setting {
+        key: Key::LevelTarget,
+        label: "Target loudness".into(),
+        help: "-18 LUFS is the ReplayGain reference. Higher is louder, with less room before peaks have to be held back.",
+        control: Control::Number {
+            value: lv.target.round() as i64,
+            min: crate::level::TARGET_MIN as i64,
+            max: crate::level::TARGET_MAX as i64,
+            step: 1,
+            scale: 1,
+            unit: " LUFS",
+        },
+        disabled: None,
+    });
+    lpush(Setting {
+        key: Key::LevelFallback,
+        label: "Gain before measuring".into(),
+        help: "For a song with no ReplayGain that hasn't been measured yet. It gets measured as it downloads or comes up in the queue.",
+        control: Control::Number {
+            value: lv.fallback.round() as i64,
+            min: crate::level::FALLBACK_MIN as i64,
+            max: crate::level::FALLBACK_MAX as i64,
+            step: 1,
+            scale: 1,
+            unit: " dB",
+        },
+        disabled: None,
+    });
+    lpush(Setting {
+        key: Key::ClipGuard,
+        label: "Keep peaks from clipping".into(),
+        help: "Holds the gain down so a song's loudest peak stays under full scale.",
+        control: Control::Toggle(lv.clip_guard),
+        disabled: None,
+    });
+    lpush(Setting {
+        key: Key::LiveMusic,
+        label: "Live normalizer: music".into(),
+        help: "Follows songs not measured yet as they play, instead of the fixed gain. Audibly worse than a measured gain.",
+        control: Control::Toggle(lv.live_music),
+        disabled: None,
+    });
+    lpush(Setting {
+        key: Key::LiveRadio,
+        label: "Live normalizer: radio".into(),
+        help: "Radio and podcasts can't be measured ahead, so this rides their level as they play.",
+        control: Control::Toggle(lv.live_streams),
+        disabled: None,
+    });
+    if let Some(running) = measuring {
+        // Measuring only fills in the index, so it stays open either way.
+        push(
+            "Leveling",
+            Setting {
+                key: Key::MeasureLibrary,
+                label: "Measure the library".into(),
+                help: "Measure every local song without ReplayGain tags now, in the background, instead of as each comes up.",
+                control: Control::Action(if running {
+                    "Stop measuring"
+                } else {
+                    "Measure now"
+                }),
+                disabled: None,
+            },
+        );
+    }
+
     // Output
     let backends = [
         (Backend::Auto, "auto", "PipeWire, else ALSA"),
@@ -488,6 +612,7 @@ pub fn rows(
     push(
         "Output",
         Setting {
+            disabled: None,
             key: Key::Backend,
             label: "Output".into(),
             help: "Where sound goes when it isn't playing bit-perfect.",
@@ -506,6 +631,7 @@ pub fn rows(
     push(
         "Output",
         Setting {
+            disabled: None,
             key: Key::Device,
             label: "Device".into(),
             help: "An ALSA device (\"default\", \"hw:1,0\") or a PipeWire node name.",
@@ -518,6 +644,7 @@ pub fn rows(
     push(
         "Output",
         Setting {
+            disabled: None,
             key: Key::BufferMs,
             label: "Buffer".into(),
             help: "Output latency. Raise it if you hear dropouts.",
@@ -536,11 +663,15 @@ pub fn rows(
     let modes = [
         (BitPerfect::Off, "Off"),
         (BitPerfect::On, "On, for local files"),
-        (BitPerfect::Auto, "Auto, whenever nothing changes the sound"),
+        (
+            BitPerfect::Auto,
+            "Auto, whenever nothing changes the sound (leveling off)",
+        ),
     ];
     push(
         "Bit-perfect",
         Setting {
+            disabled: None,
             key: Key::BitPerfect,
             label: "Bit-perfect".into(),
             help: "Local files go straight to the DAC, untouched. Takes the card for itself while playing.",
@@ -572,6 +703,7 @@ pub fn rows(
     push(
         "Bit-perfect",
         Setting {
+            disabled: None,
             key: Key::BitPerfectDevice,
             label: "Bit-perfect device".into(),
             help: "The sound card bit-perfect playback takes over.",
@@ -586,6 +718,7 @@ pub fn rows(
     push(
         "Podcasts",
         Setting {
+            disabled: None,
             key: Key::PodcastSpeed,
             label: "Podcast speed".into(),
             help: "Speed with pitch kept. Podcasts only; music and radio never change speed.",
@@ -602,6 +735,7 @@ pub fn rows(
     push(
         "Podcasts",
         Setting {
+            disabled: None,
             key: Key::PodcastTrim,
             label: "Trim silences".into(),
             help: "Cut pauses over 0.7 s down to a quarter second. Podcasts only.",
@@ -611,6 +745,7 @@ pub fn rows(
 
     // Files
     let file = |label: &'static str, p: &PathBuf| Setting {
+        disabled: None,
         key: Key::Info(label),
         label: label.into(),
         help: "",

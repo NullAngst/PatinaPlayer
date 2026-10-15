@@ -177,7 +177,8 @@ impl Renderer {
             }
         }
 
-        // 2. Leveling gain plus preamp            (milestone 7)
+        // 2. Leveling gain: applied by the decoder thread before the ring,
+        //    so it switches at the exact sample one track becomes the next.
         // 3. Transition mixer, crossfade          (milestone 10)
         // 4. Amp stack                            (milestone 11)
         // 5. EQ                                   (milestone 8)

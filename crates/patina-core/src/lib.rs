@@ -7,6 +7,7 @@ pub mod browse;
 pub mod cache;
 pub mod config;
 pub mod lastfm;
+pub mod level;
 pub mod library;
 pub mod mix;
 pub mod player;

@@ -43,7 +43,12 @@ impl Browser {
         let mut episodes = false;
         for ev in events {
             match ev {
-                CacheEvent::Changed => changed = true,
+                CacheEvent::Changed => {
+                    changed = true;
+                    if let Some(l) = &self.level {
+                        l.cache_changed();
+                    }
+                }
                 CacheEvent::EpisodeDone(id) => {
                     episodes = true;
                     let title = self

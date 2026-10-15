@@ -4,6 +4,7 @@
 //! library, the queue or the config. That's how the two stay identical.
 
 mod downloads;
+mod leveling;
 mod mixes;
 pub mod model;
 pub mod offline;
@@ -78,6 +79,8 @@ pub struct Startup {
     pub cache: Option<crate::cache::CacheService>,
     /// Genre, artist and track mixes. None without the library.
     pub mixes: Option<crate::mix::MixService>,
+    /// Loudness measuring for leveling. None without the library.
+    pub level: Option<crate::level::LevelService>,
     /// The config as loaded. Settings edits it, and the file, together.
     pub config: Config,
     pub settings_info: SettingsInfo,
@@ -91,6 +94,9 @@ pub struct Browser {
     pub remote: Option<RemoteService>,
     pub cache: Option<crate::cache::CacheService>,
     pub mixes: Option<crate::mix::MixService>,
+    pub level: Option<crate::level::LevelService>,
+    /// The songs last handed to the measuring thread.
+    sent_ahead: Vec<Vec<u8>>,
     /// The mix playing, if one is.
     pub mix: Option<mixes::MixRun>,
     mix_runs: u64,
@@ -186,6 +192,8 @@ impl Browser {
             cache_status: s.cache.as_ref().map(|c| c.status()).unwrap_or_default(),
             cache: s.cache,
             mixes: s.mixes,
+            level: s.level,
+            sent_ahead: Vec::new(),
             mix: None,
             mix_runs: 0,
             genre_marks: Vec::new(),
@@ -261,9 +269,11 @@ impl Browser {
         self.poll_mixes();
         if queue_moved {
             self.feed_prefetch();
+            self.feed_level();
             self.mix_tick();
         }
         self.poll_cache();
+        self.poll_level();
         if events.iter().any(|e| matches!(e, Event::Played(_))) {
             for s in Section::STATS {
                 self.refresh_section(s);
@@ -490,6 +500,7 @@ impl Browser {
                 devices: &self.devices,
                 podcast_tempo: self.podcast_tempo,
                 podcast_trim: self.podcast_trim,
+                measuring: self.measuring_library(),
             },
             stations: &self.stations,
             checks: &self.checks,
@@ -1256,6 +1267,7 @@ impl Browser {
             self.podcast_trim,
             &self.devices,
             &self.servers,
+            self.measuring_library(),
         )
         .into_iter()
         .map(|(_, s)| s)
@@ -1268,6 +1280,12 @@ impl Browser {
         let Some(row) = self.settings_row(key) else {
             return;
         };
+        if let Some(why) = row.disabled {
+            return self.note(why);
+        }
+        if *key == Key::MeasureLibrary {
+            return self.toggle_measure_library();
+        }
         let Some(new) = settings::stepped(&row.control, &change) else {
             return;
         };
@@ -1355,6 +1373,15 @@ impl Browser {
                     self.set_podcast_playback(self.podcast_tempo, *on);
                 }
                 (Key::GenreMatch | Key::LastFmKey, _) => self.change_mix_setting(key, &new)?,
+                (
+                    Key::LevelMode
+                    | Key::LevelTarget
+                    | Key::LevelFallback
+                    | Key::ClipGuard
+                    | Key::LiveMusic
+                    | Key::LiveRadio,
+                    _,
+                ) => self.change_level_setting(key, &new)?,
                 (
                     Key::CacheSize
                     | Key::Prefetch

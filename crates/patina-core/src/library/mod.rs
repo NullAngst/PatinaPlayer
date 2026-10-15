@@ -5,6 +5,7 @@
 //! thread opens its own; SQLite in WAL mode lets readers run while the
 //! scanner writes. [`service::LibraryService`] owns scanning and watching.
 
+pub mod loudness;
 pub mod mixes;
 pub mod podcasts;
 pub mod scan;

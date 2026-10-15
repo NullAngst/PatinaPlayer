@@ -496,6 +496,7 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
     };
     // In Settings, the selected option's help sits under the list.
     let help = match level.items.get(level.selected) {
+        Some(Item::Setting(st)) if st.disabled.is_some() => st.disabled,
         Some(Item::Setting(st)) if !st.help.is_empty() => Some(st.help),
         _ => None,
     };
@@ -1032,6 +1033,15 @@ fn item_row<'a>(
                     Span::styled(v.clone(), text),
                 ),
             };
+            // Greyed out (leveling under bit-perfect): same row, all muted.
+            let (label, value) = if st.disabled.is_some() {
+                (
+                    Span::styled(label.content, muted),
+                    Span::styled(value.content, muted),
+                )
+            } else {
+                (label, value)
+            };
             vec![
                 Cell::from(""),
                 Cell::from(""),
@@ -1342,6 +1352,18 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
             right.push(Span::raw(" "));
         }
         _ => {}
+    }
+    // The leveling gain on what's playing: "-4.2 dB", "-6.0 dB?" while it's
+    // a guess, "~-9.1 dB" under the live normalizer.
+    if let Some(l) = s.level {
+        let txt = l.short();
+        if !txt.is_empty() {
+            right.push(Span::styled(
+                format!(" {txt} "),
+                Style::default().fg(t.muted).bg(t.raised),
+            ));
+            right.push(Span::raw(" "));
+        }
     }
     if let Some(info) = &s.track {
         let badge = info.badge();

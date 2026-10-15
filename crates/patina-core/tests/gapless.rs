@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use patina_core::audio::decoder::Source;
 use patina_core::audio::output::null::NullOutput;
+use patina_core::level::{LevelConfig, LevelMode, db_to_lin};
 use patina_core::player::{Hooks, OutputFactory};
 use patina_core::{Command, Event, Player, PlayerConfig};
 
@@ -73,7 +74,18 @@ fn decode_all(path: &Path) -> Vec<f64> {
     out
 }
 
+/// Play with leveling off: these tests are about the joins.
 fn play_captured(parts: Vec<PathBuf>) -> Vec<f64> {
+    play_leveled(
+        parts,
+        LevelConfig {
+            mode: LevelMode::Off,
+            ..Default::default()
+        },
+    )
+}
+
+fn play_leveled(parts: Vec<PathBuf>, leveling: LevelConfig) -> Vec<f64> {
     let capture = Arc::new(Mutex::new(Vec::new()));
     let cap2 = capture.clone();
     let factory: OutputFactory =
@@ -81,6 +93,7 @@ fn play_captured(parts: Vec<PathBuf>) -> Vec<f64> {
     let cfg = PlayerConfig {
         volume: 1.0,
         fade_ms: 0,
+        leveling,
         ..Default::default()
     };
     let player = Player::spawn_with(
@@ -114,6 +127,20 @@ fn flac_joins_are_sample_exact() {
     let reference = decode_all(&whole);
     assert_eq!(reference.len() as u64, TOTAL * 2);
     let got = play_captured(parts);
+    assert_eq!(got.len(), reference.len(), "frame count differs");
+    let first_bad = got.iter().zip(&reference).position(|(a, b)| a != b);
+    assert_eq!(first_bad, None, "sample mismatch at index {first_bad:?}");
+}
+
+#[test]
+fn leveling_gain_keeps_joins_exact() {
+    // Untagged, unmeasured parts all play at the fallback gain. The gain
+    // is applied per track before the ring, so the joins stay exact: the
+    // capture is the original scaled, sample for sample.
+    let (whole, parts) = fixtures("level", "flac", &["-c:a", "flac"]);
+    let g = db_to_lin(-6.0);
+    let reference: Vec<f64> = decode_all(&whole).iter().map(|s| s * g).collect();
+    let got = play_leveled(parts, LevelConfig::default());
     assert_eq!(got.len(), reference.len(), "frame count differs");
     let first_bad = got.iter().zip(&reference).position(|(a, b)| a != b);
     assert_eq!(first_bad, None, "sample mismatch at index {first_bad:?}");
