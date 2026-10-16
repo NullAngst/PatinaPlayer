@@ -160,6 +160,12 @@ pub struct App {
     pub volume_area: Rect,
     last_click: Option<(Instant, u16, u16)>,
     quit: bool,
+    /// MPRIS2, for media keys and the desktop's media widget, when there's
+    /// a session bus to offer it on.
+    mpris: Option<(
+        patina_core::mpris::Mpris,
+        crossbeam_channel::Receiver<patina_core::mpris::Request>,
+    )>,
 }
 
 const ERROR_TIME: Duration = Duration::from_secs(8);
@@ -167,7 +173,15 @@ const NOTE_TIME: Duration = Duration::from_secs(3);
 
 impl App {
     pub fn new(b: Browser, art: ArtView) -> Self {
+        // No window to raise: the desktop is told so, and won't offer it.
+        let mpris = patina_core::mpris::Mpris::start(
+            b.player.clone(),
+            patina_core::mpris::Abilities { raise: false },
+        )
+        .map_err(|e| log::info!("no MPRIS: {e}"))
+        .ok();
         Self {
+            mpris,
             theme: Theme::new(b.config.appearance.theme),
             b,
             snap: Snapshot::default(),
@@ -211,6 +225,20 @@ impl App {
                 self.modal = Modal::PickDlna { found, selected: 0 };
             }
             self.snap = self.b.player.snapshot();
+            if let Some((m, rx)) = &mut self.mpris {
+                let (len, next) = {
+                    let q = self.b.player.queue();
+                    let next = self.snap.current.is_some_and(|c| q.upcoming(c).is_some());
+                    (q.len(), next)
+                };
+                m.update(&self.snap, len, next);
+                if rx
+                    .try_iter()
+                    .any(|r| r == patina_core::mpris::Request::Quit)
+                {
+                    self.quit = true;
+                }
+            }
             if self.theme.kind != self.b.config.appearance.theme {
                 self.theme = Theme::new(self.b.config.appearance.theme);
             }

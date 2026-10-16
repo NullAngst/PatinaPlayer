@@ -14,6 +14,7 @@ pub mod level;
 pub mod library;
 pub mod lyrics;
 pub mod mix;
+pub mod mpris;
 pub mod player;
 pub mod podcast;
 pub mod queue;

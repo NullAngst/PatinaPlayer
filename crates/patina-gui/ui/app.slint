@@ -282,6 +282,7 @@ export global Icons {
     out property <string> heart: "M12 21C10 19 3 14 3 8.5A4.5 4.5 0 0 1 12 6a4.5 4.5 0 0 1 9 2.5C21 14 14 19 12 21z";
     // A four-point sparkle.
     out property <string> sparkle: "M12 2C12.8 8 16 11.2 22 12C16 12.8 12.8 16 12 22C11.2 16 8 12.8 2 12C8 11.2 11.2 8 12 2z";
+    out property <string> menu: "M4 6h16M4 12h16M4 18h16";
 }
 
 component IconButton inherits Rectangle {
@@ -573,6 +574,8 @@ component ListRow inherits Rectangle {
     callback select;
     callback activate;
     callback act(string);
+    // A narrow list drops the third column and tightens the rest.
+    property <bool> slim: self.width < 560px;
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
     background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent));
     border-radius: 6px * P.round;
@@ -633,7 +636,7 @@ component ListRow inherits Rectangle {
             // Settings rows give the value most of the room.
             horizontal-stretch: item.kind == 10 ? 1.2 : 4;
             preferred-width: 0px;
-            min-width: 120px;
+            min-width: 60px;
             text: item.kind == 11 ? "missing: " + item.title : item.title;
             overflow: elide;
             vertical-alignment: center;
@@ -650,14 +653,14 @@ component ListRow inherits Rectangle {
         if item.sub != "" || item.kind <= 2: Text {
             horizontal-stretch: item.kind == 10 ? 5 : 2.5;
             preferred-width: 0px;
-            min-width: 80px;
+            min-width: 40px;
             text: item.sub;
             overflow: elide;
             vertical-alignment: center;
             font-size: 12.5px;
             color: item.warn ? P.copper : (item.playing ? P.accent-text : (item.off ? P.wave : P.muted));
         }
-        if item.meta != "" || item.kind <= 2: Text {
+        if (item.meta != "" || item.kind <= 2) && (!slim || item.kind == 10): Text {
             horizontal-stretch: 2.5;
             preferred-width: 0px;
             min-width: 60px;
@@ -668,7 +671,7 @@ component ListRow inherits Rectangle {
             color: item.warn ? P.copper : (item.playing ? P.accent-text : (item.off ? P.wave : P.muted));
         }
         Text {
-            min-width: 64px;
+            min-width: root.width < 400px ? 44px : 64px;
             text: item.right;
             horizontal-alignment: right;
             vertical-alignment: center;
@@ -1353,9 +1356,42 @@ export component AppWindow inherits Window {
     icon: @image-url("../../../assets/patinaplayer.png");
     preferred-width: 1360px;
     preferred-height: 860px;
-    min-width: 960px;
-    min-height: 600px;
+    // Small enough for a phone-sized window. The layout steps down in
+    // tiers as the window narrows, and the views scroll when it's short.
+    min-width: 360px;
+    min-height: 420px;
     background: P.bg;
+
+    // The window's size, copied over when it changes. The tiers below hang
+    // off these copies rather than the size itself: the tiers change what
+    // the layout needs, and the layout feeds the window's size, so binding
+    // to it directly would be a loop.
+    property <length> win-w: 1360px;
+    property <length> win-h: 860px;
+    changed width => { self.win-w = self.width; }
+    changed height => { self.win-h = self.height; }
+    // Size tiers, widest first.
+    // compact: the bottom bar drops the format badge and output chip.
+    out property <bool> compact: win-w < 1180px;
+    // narrow: the sidebar folds to icons.
+    out property <bool> narrow: win-w < 1000px;
+    // tight: the bottom bar takes two rows, view buttons go under the title.
+    out property <bool> tight: win-w < 820px;
+    // tiny: the sidebar becomes a drawer, side panels cover the view.
+    out property <bool> tiny: win-w < 600px;
+    // short: a smaller album header.
+    property <bool> short: win-h < 700px;
+    in-out property <bool> drawer-open: false;
+    property <length> side-w: tiny ? 0px : (narrow ? 64px : 228px);
+    property <length> bar-h: tight ? 132px : 84px;
+    property <length> lyrics-w: tiny ? 0px : clamp(win-w * 0.3, 240px, 340px);
+    property <length> queue-w: tiny ? 0px : clamp(win-w * 0.26, 220px, 300px);
+    property <length> pad: tight ? 16px : 32px;
+    // Roughly the list's width, for the column header's choices.
+    property <length> list-w: win-w - side-w - (lyrics-open ? lyrics-w : 0px) - (queue-panel ? queue-w : 0px) - 2 * pad;
+    // The sidebar's hover label while it's folded to icons.
+    property <string> side-tip;
+    property <length> side-tip-y;
     default-font-family: P.sans;
     default-font-size: 13px;
 
@@ -1495,8 +1531,6 @@ export component AppWindow inherits Window {
     // "44.1→48k" while the song is resampled.
     in property <string> resample-label;
     in property <string> speed-label;
-    // Narrow window: fewer things in the bottom bar.
-    in property <bool> compact;
     in property <string> status-line;
     in property <bool> status-warn;
     in property <bool> shuffle;
@@ -1565,6 +1599,7 @@ export component AppWindow inherits Window {
     }
     public function scroll-top() {
         list.content-y = 0;
+        body.content-y = 0;
         grid.content-y = 0;
     }
 
@@ -1594,197 +1629,9 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 vertical-stretch: 1;
 
-                // ----- Sidebar -----
-                Rectangle {
-                    width: 228px;
-                    background: P.surface;
-                    Rectangle {
-                        x: parent.width - 1px;
-                        width: 1px;
-                        background: P.border;
-                    }
-                    VerticalLayout {
-                        padding: 12px;
-                        padding-top: 16px;
-                        spacing: 2px;
-                        VerticalLayout {
-                            padding-left: 10px;
-                            padding-bottom: P.kawaii ? 10px : 14px;
-                            spacing: 2px;
-                            HorizontalLayout {
-                                spacing: 0px;
-                                Text {
-                                    text: "Patina";
-                                    font-family: P.serif;
-                                    font-weight: P.kawaii ? 900 : 700;
-                                    font-size: P.kawaii ? 22px : 20px;
-                                    color: P.text;
-                                }
-                                Text {
-                                    text: "Player";
-                                    font-family: P.serif;
-                                    font-weight: P.kawaii ? 900 : 700;
-                                    font-size: P.kawaii ? 22px : 20px;
-                                    color: P.accent-text;
-                                }
-                                if P.kawaii: Rectangle {
-                                    width: 26px;
-                                    Icon {
-                                        x: 6px;
-                                        y: (parent.height - self.height) / 2 + 1px;
-                                        d: Icons.heart;
-                                        size: 18px;
-                                        stroke: P.verdigris;
-                                        stroke-width: 2px;
-                                    }
-                                }
-                                Rectangle {}
-                            }
-                            if P.kawaii: Text {
-                                text: P.light ? "おんがく の じかん" : "よる の おんがく";
-                                font-size: 10.5px;
-                                letter-spacing: 2px;
-                                color: P.muted;
-                            }
-                        }
-                        Flickable {
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 2px;
-                                for item[i] in root.side: Rectangle {
-                                    // Kawaii: the open one is a pink pill.
-                                    property <bool> pill: item.active && P.kawaii && item.kind == 0;
-                                    // Favorites sit like sections, with a menu.
-                                    property <bool> entry: item.kind <= 1 || item.kind == 4;
-                                    height: item.kind == 3 ? 12px : (item.kind == 2 ? 28px : 34px);
-                                    border-radius: 6px * P.round;
-                                    border-width: 1px;
-                                    border-color: pill ? P.verdigris : (item.active ? P.verdigris-dim : transparent);
-                                    background: pill ? P.verdigris : (item.active ? P.raised : (sta.has-hover && entry ? P.raised : transparent));
-                                    drop-shadow-offset-y: pill ? 3px : 0px;
-                                    drop-shadow-color: pill ? P.accent-edge : transparent;
-                                    if item.kind == 2: Text {
-                                        x: 10px;
-                                        y: parent.height - self.height - 4px;
-                                        text: item.sub != "" ? item.label + "  ·  " + item.sub : item.label;
-                                        font-size: 11px;
-                                        letter-spacing: 0.9px;
-                                        color: P.muted;
-                                    }
-                                    if entry: HorizontalLayout {
-                                        padding-left: 10px;
-                                        padding-right: 10px;
-                                        spacing: 10px;
-                                        if item.kind == 0 && !P.kawaii: Rectangle {
-                                            width: 16px;
-                                            Icon {
-                                                y: (parent.height - self.height) / 2;
-                                                d: item.icon;
-                                                stroke: item.active ? P.verdigris : (sta.has-hover ? P.text : P.muted);
-                                            }
-                                        }
-                                        // Kawaii: the icon sits in a round bubble.
-                                        if item.kind == 0 && P.kawaii: Rectangle {
-                                            width: 24px;
-                                            Rectangle {
-                                                y: (parent.height - self.height) / 2;
-                                                width: 24px;
-                                                height: 24px;
-                                                border-radius: 12px;
-                                                background: pill ? P.on-accent : P.raised;
-                                                Icon {
-                                                    x: 5px;
-                                                    y: 5px;
-                                                    size: 14px;
-                                                    d: item.icon;
-                                                    stroke: P.verdigris;
-                                                    stroke-width: 2px;
-                                                }
-                                            }
-                                        }
-                                        if item.kind == 4: Rectangle {
-                                            width: 16px;
-                                            Icon {
-                                                y: (parent.height - self.height) / 2;
-                                                d: Icons.star;
-                                                stroke: P.copper;
-                                            }
-                                        }
-                                        if item.kind == 1: Rectangle {
-                                            width: 16px;
-                                            Rectangle {
-                                                x: 4px;
-                                                y: (parent.height - self.height) / 2;
-                                                width: 8px;
-                                                height: 8px;
-                                                border-radius: 4px;
-                                                background: item.dot == 0 ? (P.kawaii ? P.mint : P.verdigris) : (item.dot == 1 ? P.verdigris-dim : (item.dot == 2 ? P.copper : P.muted));
-                                            }
-                                        }
-                                        if item.sub == "": Text {
-                                            text: item.label;
-                                            overflow: elide;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                            font-size: 13px;
-                                            font-weight: P.kawaii ? 500 : 400;
-                                            color: pill ? P.on-accent : (item.active ? P.accent-text : (sta.has-hover || P.kawaii ? P.text : P.muted));
-                                        }
-                                        // The Japanese name follows on the same line, small,
-                                        // so the sidebar keeps its height.
-                                        if item.sub != "": HorizontalLayout {
-                                            horizontal-stretch: 1;
-                                            spacing: 6px;
-                                            Text {
-                                                text: item.label;
-                                                vertical-alignment: center;
-                                                font-size: 13px;
-                                                font-weight: 500;
-                                                color: pill ? P.on-accent : P.text;
-                                            }
-                                            Text {
-                                                horizontal-stretch: 1;
-                                                text: item.sub;
-                                                overflow: elide;
-                                                vertical-alignment: center;
-                                                font-size: 9.5px;
-                                                color: pill ? P.on-accent : P.muted;
-                                            }
-                                        }
-                                        Text {
-                                            text: item.count;
-                                            vertical-alignment: center;
-                                            font-family: P.mono;
-                                            font-size: 11px;
-                                            color: pill ? P.on-accent : (item.dot == 2 ? P.copper : P.muted);
-                                        }
-                                    }
-                                    scm := ContextMenuArea {
-                                        enabled: item.kind == 4;
-                                        Menu {
-                                            MenuItem { title: "Move up"; activated => { root.side-act(i, "up"); } }
-                                            MenuItem { title: "Move down"; activated => { root.side-act(i, "down"); } }
-                                            MenuItem { title: "Remove from Favorites"; activated => { root.side-act(i, "remove"); } }
-                                        }
-                                        sta := TouchArea {
-                                            enabled: entry;
-                                            mouse-cursor: entry ? pointer : default;
-                                            pointer-event(e) => {
-                                                if e.kind == PointerEventKind.down && e.button == PointerEventButton.right && item.kind == 4 {
-                                                    scm.show({ x: self.mouse-x, y: self.mouse-y });
-                                                }
-                                            }
-                                            clicked => {
-                                                root.side-clicked(i);
-                                                keys.focus();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // The sidebar and side panels are drawn over these, below,
+                // so on a tiny window they can slide over the view instead.
+                Rectangle { width: root.side-w; }
 
                 // ----- Main column -----
                 VerticalLayout {
@@ -1798,9 +1645,17 @@ export component AppWindow inherits Window {
                             background: P.border;
                         }
                         HorizontalLayout {
-                            padding-left: 24px;
-                            padding-right: 24px;
-                            spacing: 8px;
+                            padding-left: root.tight ? 12px : 24px;
+                            padding-right: root.tight ? 12px : 24px;
+                            spacing: root.tiny ? 4px : 8px;
+                            // Tiny window: the sidebar opens as a drawer.
+                            if root.tiny: IconButton {
+                                y: (parent.height - self.height) / 2;
+                                icon: Icons.menu;
+                                tip: "Menu";
+                                active: root.drawer-open;
+                                clicked => { root.drawer-open = !root.drawer-open; keys.focus(); }
+                            }
                             IconButton {
                                 y: (parent.height - self.height) / 2;
                                 icon: Icons.back;
@@ -1816,7 +1671,10 @@ export component AppWindow inherits Window {
                                 clicked => { root.forward(); keys.focus(); }
                             }
                             Rectangle {
-                                width: 480px;
+                                horizontal-stretch: 1;
+                                min-width: 100px;
+                                preferred-width: 480px;
+                                max-width: 480px;
                                 height: 36px;
                                 y: (parent.height - self.height) / 2;
                                 border-radius: 6px * P.round;
@@ -1857,12 +1715,13 @@ export component AppWindow inherits Window {
                                         if search-input.text == "": Text {
                                             x: 0;
                                             width: parent.width;
-                                            text: "Search artists, albums, songs";
+                                            overflow: elide;
+                                            text: root.tight ? "Search" : "Search artists, albums, songs";
                                             color: P.wave;
                                             vertical-alignment: center;
                                         }
                                     }
-                                    Rectangle {
+                                    if !root.tiny: Rectangle {
                                         width: 18px;
                                         height: 18px;
                                         y: (parent.height - self.height) / 2;
@@ -1878,7 +1737,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle { horizontal-stretch: 0.001; }
                             if P.kawaii && !root.compact: Text {
                                 text: P.light ? "ようこそ ♡ (｡•‿•｡)" : "おやすみ ☾ (っ˘ω˘ς )";
                                 vertical-alignment: center;
@@ -1892,13 +1751,19 @@ export component AppWindow inherits Window {
                     Rectangle {
                         vertical-stretch: 1;
 
-                        // Album hero and track list.
-                        Rectangle {
+                        // Album hero and track list. When the window is too
+                        // short for the header, panels and some of the list,
+                        // the whole view scrolls; the list keeps a minimum.
+                        body := Flickable {
                         visible: root.layout == 0;
-                        VerticalLayout {
-                            padding-left: 32px;
-                            padding-right: 32px;
-                            padding-top: root.hero.show ? 28px : 20px;
+                        content-height: lv.height;
+                        content-width: self.width;
+                        lv := VerticalLayout {
+                            width: body.width;
+                            height: max(body.height, self.min-height);
+                            padding-left: root.pad;
+                            padding-right: root.pad;
+                            padding-top: root.hero.show ? (root.short ? 16px : 28px) : (root.short ? 12px : 20px);
                             spacing: 0px;
 
                             if root.hero.show: Rectangle {
@@ -1927,11 +1792,13 @@ export component AppWindow inherits Window {
                                     y: 0;
                                     height: self.preferred-height;
                                     padding: parent.pad;
-                                    spacing: 28px;
-                                    padding-bottom: P.kawaii ? parent.pad : 24px;
+                                    spacing: root.tight ? 16px : 28px;
+                                    padding-bottom: P.kawaii ? parent.pad : (root.short ? 16px : 24px);
                                     Cover {
-                                        width: P.kawaii ? 176px : 200px;
-                                        height: P.kawaii ? 176px : 200px;
+                                        // Smaller on a small window.
+                                        property <length> side: root.tiny ? 96px : (root.short || root.tight ? 136px : (P.kawaii ? 176px : 200px));
+                                        width: self.side;
+                                        height: self.side;
                                         art: root.hero.art;
                                         has-art: root.hero.has-art;
                                         radius: 8px;
@@ -1965,7 +1832,7 @@ export component AppWindow inherits Window {
                                             text: root.hero.title;
                                             font-family: P.serif;
                                             font-weight: P.kawaii ? 900 : 700;
-                                            font-size: P.kawaii ? 36px : 40px;
+                                            font-size: root.tight ? 24px : (root.short ? 32px : (P.kawaii ? 36px : 40px));
                                             overflow: elide;
                                             color: P.text;
                                         }
@@ -1997,15 +1864,15 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         HorizontalLayout {
-                                            padding-top: 12px;
+                                            padding-top: root.short ? 6px : 12px;
                                             padding-bottom: P.kawaii ? 3px : 0px;
-                                            spacing: 8px;
+                                            spacing: root.tight ? 6px : 8px;
                                             alignment: start;
                                             for a[i] in root.actions: Chip {
-                                                h: P.kawaii ? 36px : 40px;
+                                                h: root.tight ? 32px : (P.kawaii ? 36px : 40px);
                                                 text: root.action-labels[i];
                                                 primary: i == 0;
-                                                icon-only: root.compact && i > 1;
+                                                icon-only: (root.compact && i > 1) || (root.tight && i > 0) || root.tiny;
                                                 icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "queue" ? Icons.plus : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                                 clicked => { root.view-action(a); keys.focus(); }
                                             }
@@ -2028,6 +1895,7 @@ export component AppWindow inherits Window {
                                             if i > 0: Text { text: "›"; color: P.wave; font-size: 12px; }
                                             Text {
                                                 text: c;
+                                                overflow: elide;
                                                 font-size: 12px;
                                                 color: i == root.crumbs.length - 1 ? P.text : (cta.has-hover ? P.text : P.muted);
                                                 cta := TouchArea {
@@ -2045,10 +1913,10 @@ export component AppWindow inherits Window {
                                         color: P.text;
                                         overflow: elide;
                                     }
-                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; }
+                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
-                                HorizontalLayout {
+                                if !root.tight: HorizontalLayout {
                                     spacing: 8px;
                                     alignment: end;
                                     for a[i] in root.actions: Chip {
@@ -2059,6 +1927,19 @@ export component AppWindow inherits Window {
                                         primary: a == "play";
                                         clicked => { root.view-action(a); keys.focus(); }
                                     }
+                                }
+                            }
+                            // Tight window: the buttons go under the title.
+                            if !root.hero.show && root.tight && root.actions.length > 0: HorizontalLayout {
+                                padding-bottom: 12px;
+                                spacing: 6px;
+                                alignment: start;
+                                for a[i] in root.actions: Chip {
+                                    text: root.action-labels[i];
+                                    icon: a == "new" || a == "subscribe" || a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
+                                    icon-only: root.tiny && (a == "queue" || a == "playlist" || a == "shuffle");
+                                    primary: a == "play";
+                                    clicked => { root.view-action(a); keys.focus(); }
                                 }
                             }
 
@@ -2095,15 +1976,18 @@ export component AppWindow inherits Window {
                                     spacing: 12px;
                                     Text { width: 32px; text: root.columns[0]; horizontal-alignment: right; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
                                     if root.covers: Rectangle { width: 30px; }
-                                    Text { horizontal-stretch: 4; preferred-width: 0px; min-width: 120px; text: root.columns[1]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
-                                    if root.columns[2] != "": Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 80px; text: root.columns[2]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
-                                    if root.columns[3] != "": Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 60px; text: root.columns[3]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
-                                    Text { min-width: 64px; text: root.columns[4]; horizontal-alignment: right; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    Text { horizontal-stretch: 4; preferred-width: 0px; min-width: 60px; text: root.columns[1]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    if root.columns[2] != "": Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 40px; text: root.columns[2]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    if root.columns[3] != "" && root.list-w >= 560px: Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 60px; text: root.columns[3]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    Text { min-width: root.list-w < 400px ? 44px : 64px; text: root.columns[4]; horizontal-alignment: right; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
                                 }
                             }
 
                             Rectangle {
                                 vertical-stretch: 1;
+                                // When the view is short, this much list stays,
+                                // and the view around it scrolls instead.
+                                min-height: 180px;
                                 list := ListView {
                                     for r[i] in root.layout == 0 ? root.rows : []: ListRow {
                                         item: r;
@@ -2131,9 +2015,9 @@ export component AppWindow inherits Window {
                         Rectangle {
                         visible: root.layout == 1;
                         VerticalLayout {
-                            padding-left: 24px;
-                            padding-right: 24px;
-                            padding-top: 20px;
+                            padding-left: root.tight ? 8px : 24px;
+                            padding-right: root.tight ? 8px : 24px;
+                            padding-top: root.short ? 12px : 20px;
                             HorizontalLayout {
                                 padding-left: 8px;
                                 padding-bottom: 12px;
@@ -2148,6 +2032,7 @@ export component AppWindow inherits Window {
                                             if i > 0: Text { text: "›"; color: P.wave; font-size: 12px; }
                                             Text {
                                                 text: c;
+                                                overflow: elide;
                                                 font-size: 12px;
                                                 color: i == root.crumbs.length - 1 ? P.text : (gta.has-hover ? P.text : P.muted);
                                                 gta := TouchArea {
@@ -2163,11 +2048,12 @@ export component AppWindow inherits Window {
                                         font-weight: P.kawaii ? 900 : 700;
                                         font-size: 28px;
                                         color: P.text;
+                                        overflow: elide;
                                     }
-                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; }
+                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
-                                HorizontalLayout {
+                                if !root.tight: HorizontalLayout {
                                     spacing: 8px;
                                     alignment: end;
                                     for a[i] in root.actions: Chip {
@@ -2180,9 +2066,22 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                            if root.tight && root.actions.length > 0: HorizontalLayout {
+                                padding-left: 8px;
+                                padding-bottom: 12px;
+                                spacing: 6px;
+                                alignment: start;
+                                for a[i] in root.actions: Chip {
+                                    text: root.action-labels[i];
+                                    icon: a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
+                                    icon-only: root.tiny && (a == "queue" || a == "playlist" || a == "shuffle");
+                                    primary: a == "play";
+                                    clicked => { root.view-action(a); keys.focus(); }
+                                }
+                            }
                             grid := Flickable {
                                 vertical-stretch: 1;
-                                property <int> cols: max(1, floor(self.width / 188px));
+                                property <int> cols: max(root.tiny ? 2 : 1, floor(self.width / 188px));
                                 property <length> cell: self.width / cols;
                                 content-height: ceil(root.rows.length / cols) * (cell + 44px);
                                 for r[i] in root.layout == 1 ? root.rows : []: AlbumTile {
@@ -2204,25 +2103,37 @@ export component AppWindow inherits Window {
                         Rectangle {
                         visible: root.layout == 2;
                         VerticalLayout {
-                            padding-left: 32px;
-                            padding-right: 32px;
-                            padding-top: 20px;
+                            padding-left: root.pad;
+                            padding-right: root.pad;
+                            padding-top: root.short ? 12px : 20px;
                             HorizontalLayout {
-                                padding-bottom: 18px;
+                                padding-bottom: root.tight ? 10px : 18px;
                                 spacing: 8px;
                                 VerticalLayout {
                                     Text { text: "Queue"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 28px; color: P.text; }
-                                    Text { text: root.queue-summary; font-size: 12.5px; color: P.muted; }
+                                    Text { text: root.queue-summary; font-size: 12.5px; color: P.muted; overflow: elide; }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
-                                for srv in root.queue-servers: Chip {
-                                    y: parent.height - self.height;
-                                    text: "Queue from " + srv;
-                                    clicked => { root.queue-load(srv); keys.focus(); }
+                                if !root.tight: HorizontalLayout {
+                                    spacing: 8px;
+                                    for srv in root.queue-servers: Chip {
+                                        y: parent.height - self.height;
+                                        text: "Queue from " + srv;
+                                        clicked => { root.queue-load(srv); keys.focus(); }
+                                    }
+                                    if root.queue-mix-unsaved: Chip { y: parent.height - self.height; text: "Save mix"; clicked => { root.view-action("save-mix"); keys.focus(); } }
+                                    Chip { y: parent.height - self.height; text: "Add to playlist"; clicked => { root.queue-save(); } }
+                                    Chip { y: parent.height - self.height; text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
                                 }
-                                if root.queue-mix-unsaved: Chip { y: parent.height - self.height; text: "Save mix"; clicked => { root.view-action("save-mix"); keys.focus(); } }
-                                Chip { y: parent.height - self.height; text: "Add to playlist"; clicked => { root.queue-save(); } }
-                                Chip { y: parent.height - self.height; text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
+                            }
+                            if root.tight: HorizontalLayout {
+                                padding-bottom: 12px;
+                                spacing: 6px;
+                                alignment: start;
+                                for srv in root.queue-servers: Chip { text: "From " + srv; clicked => { root.queue-load(srv); keys.focus(); } }
+                                if root.queue-mix-unsaved: Chip { text: "Save mix"; clicked => { root.view-action("save-mix"); keys.focus(); } }
+                                Chip { text: "To playlist"; clicked => { root.queue-save(); } }
+                                Chip { text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
                             }
                             qlist := ListView {
                                 vertical-stretch: 1;
@@ -2274,153 +2185,46 @@ export component AppWindow inherits Window {
                                 text: "The queue is empty. Play something, or add it with Add to queue." + (P.kawaii ? "  (｡•‿•｡)" : "");
                                 color: P.muted;
                                 horizontal-alignment: center;
+                                wrap: word-wrap;
                             }
                         }
                         }
                     }
                 }
 
-                // ----- Lyrics panel -----
-                if root.lyrics-open: Rectangle {
-                    width: 340px;
-                    background: P.surface;
-                    Rectangle { width: 1px; x: 0; background: P.border; }
-                    VerticalLayout {
-                        padding-top: 16px;
-                        padding-left: 18px;
-                        padding-right: 16px;
-                        padding-bottom: 12px;
-                        spacing: 6px;
-                        HorizontalLayout {
-                            Text { text: "Lyrics"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
-                            Rectangle { horizontal-stretch: 1; }
-                            IconButton { icon: Icons.close; tip: "Close (Ctrl+L)"; clicked => { root.lyrics-clicked(); keys.focus(); } }
-                        }
-                        Text { text: root.lyrics-title; overflow: elide; font-weight: 600; color: P.text; }
-                        Text { text: root.lyrics-note; wrap: word-wrap; font-size: 11.5px; color: root.lyrics-warn ? P.copper : P.muted; }
-                        Rectangle { height: 6px; }
-                        // Synced: the lines from a little before the one
-                        // playing, which the app picks, so it stays in view.
-                        if root.lyrics-synced: Rectangle {
-                            vertical-stretch: 1;
-                            clip: true;
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 6px;
-                                for l[i] in root.lyrics-lines: Text {
-                                    text: l;
-                                    wrap: word-wrap;
-                                    font-size: i == root.lyrics-current ? 15px : 13.5px;
-                                    font-weight: i == root.lyrics-current ? 700 : 400;
-                                    color: i == root.lyrics-current ? P.accent-text : (i < root.lyrics-current ? P.muted : P.text);
-                                }
-                            }
-                        }
-                        if !root.lyrics-synced: Flickable {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 4px;
-                                for l in root.lyrics-lines: Text {
-                                    text: l;
-                                    wrap: word-wrap;
-                                    font-size: 13.5px;
-                                    color: P.text;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ----- Queue panel -----
-                if root.queue-panel: Rectangle {
-                    width: 300px;
-                    background: P.surface;
-                    Rectangle { width: 1px; x: 0; background: P.border; }
-                    VerticalLayout {
-                        padding-top: 16px;
-                        HorizontalLayout {
-                            padding-left: 16px;
-                            padding-right: 16px;
-                            padding-bottom: 10px;
-                            Text { text: "Queue"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
-                            Rectangle { horizontal-stretch: 1; }
-                            Text { text: root.queue-summary; font-size: 11.5px; color: P.muted; vertical-alignment: center; }
-                        }
-                        // A ListView, so only the rows in view exist, however
-                        // long the queue gets.
-                        ListView {
-                            vertical-stretch: 1;
-                            content-y <=> root.panel-scroll;
-                            for q[i] in root.queue: Rectangle {
-                                height: 54px;
-                                Rectangle {
-                                    x: 8px;
-                                    y: 1px;
-                                    width: parent.width - 16px;
-                                    height: 52px;
-                                    border-radius: 6px * P.round;
-                                    border-width: q.playing ? (P.kawaii ? 2px : 1px) : 0px;
-                                    border-color: P.kawaii ? P.verdigris : P.verdigris-dim;
-                                    background: q.playing ? P.playing-bg : (pta.has-hover ? P.raised : transparent);
-                                    HorizontalLayout {
-                                        padding: 7px;
-                                        spacing: 10px;
-                                        Cover { width: 36px; height: 36px; radius: 4px; art: q.art; has-art: q.has-art; }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.playing ? P.accent-text : P.text; }
-                                            Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
-                                        }
-                                    }
-                                    pta := TouchArea {
-                                        double-clicked => { root.queue-activate(i); }
-                                    }
-                                }
-                            }
-                        }
-                        if P.kawaii && root.queue.length > 0: Text {
-                            height: 30px;
-                            text: P.light ? "ゆっくり きいてね ♪  (っ˘ω˘ς )" : "☆ﾐ(o*･ω･)ﾉ  いい ゆめ を ♪";
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            font-size: 11.5px;
-                            color: P.muted;
-                        }
-                        Rectangle {
-                            height: 58px;
-                            Rectangle { height: 1px; y: 0; background: P.border; }
-                            HorizontalLayout {
-                                padding: 12px;
-                                padding-left: 16px;
-                                spacing: 8px;
-                                alignment: start;
-                                Chip { text: "Add to playlist"; clicked => { root.queue-save(); } }
-                                Chip { text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
-                            }
-                        }
-                    }
-                }
+                Rectangle { width: root.lyrics-open ? root.lyrics-w : 0px; }
+                Rectangle { width: root.queue-panel ? root.queue-w : 0px; }
             }
 
             // ----- Bottom bar -----
-            Rectangle {
-                height: 84px;
+            // Placed by hand rather than by a layout, so it can switch
+            // between one row (now playing, transport, controls) and, on a
+            // tight window, two rows (now playing and controls, then the
+            // transport across the whole width).
+            bar := Rectangle {
+                height: root.bar-h;
                 background: P.surface;
+                property <length> bp: root.tight ? 12px : 20px;
+                property <length> gap: root.tight ? 10px : 20px;
+                // Controls on the right: as wide as they need, within reason.
+                property <length> rw: min(rgt.preferred-width, self.width * 0.6);
+                // One row: the transport sits in the middle where it fits,
+                // and moves right of center when the now-playing side needs room.
+                property <length> tw: max(240px, min(clamp(self.width * 0.42, 300px, 560px), self.width - 2 * bp - 2 * gap - rw - 180px));
+                property <length> tx: max(bp + 180px + gap, min((self.width - tw) / 2, self.width - bp - rw - gap - tw));
+                property <length> row-h: root.tight ? 66px : self.height;
                 Rectangle { height: 1px; y: 0; background: P.border; }
-                HorizontalLayout {
-                    padding-left: 20px;
-                    padding-right: 20px;
-                    spacing: 20px;
 
                     // Now playing.
                     HorizontalLayout {
-                        horizontal-stretch: 1;
-                        min-width: 240px;
-                        spacing: 12px;
+                        x: bar.bp;
+                        y: 0;
+                        width: root.tight ? bar.width - 2 * bar.bp - bar.gap - bar.rw : bar.tx - bar.gap - bar.bp;
+                        height: bar.row-h;
+                        spacing: root.tight ? 10px : 12px;
                         Cover {
-                            width: 56px;
-                            height: 56px;
+                            width: root.tight ? 44px : 56px;
+                            height: root.tight ? 44px : 56px;
                             y: (parent.height - self.height) / 2;
                             art: root.np-art;
                             has-art: root.np-has-art;
@@ -2469,8 +2273,10 @@ export component AppWindow inherits Window {
 
                     // Transport and seek.
                     VerticalLayout {
-                        horizontal-stretch: 2;
-                        min-width: 380px;
+                        x: root.tight ? bar.bp : bar.tx;
+                        y: root.tight ? bar.row-h - 6px : 0px;
+                        width: root.tight ? bar.width - 2 * bar.bp : bar.tw;
+                        height: root.tight ? bar.height - bar.row-h + 6px : bar.height;
                         alignment: center;
                         spacing: 2px;
                         HorizontalLayout {
@@ -2575,12 +2381,14 @@ export component AppWindow inherits Window {
                     }
 
                     // Badges, output, queue toggle, volume.
-                    HorizontalLayout {
-                        horizontal-stretch: 1;
-                        min-width: 300px;
+                    rgt := HorizontalLayout {
+                        x: bar.width - bar.bp - bar.rw;
+                        y: 0;
+                        width: bar.rw;
+                        height: bar.row-h;
                         alignment: end;
-                        spacing: 8px;
-                        if root.speed-label != "": Rectangle {
+                        spacing: root.tiny ? 4px : 8px;
+                        if root.speed-label != "" && !root.tight: Rectangle {
                             width: sp.preferred-width + 16px;
                             height: 22px;
                             y: (parent.height - self.height) / 2;
@@ -2598,7 +2406,7 @@ export component AppWindow inherits Window {
                             TouchArea { mouse-cursor: pointer; clicked => { root.speed-clicked(); } }
                         }
                         // Click it to hear why (or what device, and how).
-                        if root.bp-badge != "": Rectangle {
+                        if root.bp-badge != "" && !root.tiny: Rectangle {
                             width: bpb.width;
                             bpb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -2610,14 +2418,14 @@ export component AppWindow inherits Window {
                                 clicked => { root.bp-clicked(); }
                             }
                         }
-                        if root.limit-label != "": Badge {
+                        if root.limit-label != "" && !root.tight: Badge {
                             y: (parent.height - self.height) / 2;
                             text: root.limit-label;
                             fg: P.copper;
                         }
                         // The EQ: lit when it's on and shaping the sound.
                         // Click it for the EQ view.
-                        Rectangle {
+                        if !root.tiny: Rectangle {
                             width: eqb.width;
                             eqb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -2630,7 +2438,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // The amp stack: lit copper when it's working.
-                        Rectangle {
+                        if !root.tiny: Rectangle {
                             width: ampb.width;
                             ampb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -2643,7 +2451,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // Click it for where the gain came from.
-                        if root.level-label != "": Rectangle {
+                        if root.level-label != "" && !root.tight: Rectangle {
                             width: lvb.width;
                             lvb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -2692,7 +2500,7 @@ export component AppWindow inherits Window {
                             clicked => { root.toggle-mute(); keys.focus(); }
                         }
                         Bar {
-                            width: 96px;
+                            width: root.tiny ? 64px : (root.tight ? 80px : 96px);
                             y: (parent.height - self.height) / 2;
                             label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
                             value: root.volume-locked ? 1.0 : root.volume;
@@ -2703,6 +2511,387 @@ export component AppWindow inherits Window {
                             changed(v) => { root.set-volume(v); }
                         }
                     }
+            }
+        }
+
+        // Tiny window: the sidebar is a drawer over the view, with a scrim
+        // behind it that closes it.
+        if root.tiny && root.drawer-open: Rectangle {
+            y: 0;
+            height: root.height - root.bar-h;
+            background: P.scrim;
+            TouchArea { clicked => { root.drawer-open = false; keys.focus(); } }
+        }
+
+        // ----- Sidebar -----
+        sidebar := Rectangle {
+            // Folded to icons on a narrow window.
+            property <bool> folded: root.narrow && !root.tiny;
+            x: 0;
+            y: 0;
+            width: root.tiny ? 228px : root.side-w;
+            height: root.height - root.bar-h;
+            visible: !root.tiny || root.drawer-open;
+            background: P.surface;
+            drop-shadow-blur: root.tiny ? 18px : 0px;
+            drop-shadow-color: P.shadow;
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: P.border;
+            }
+            VerticalLayout {
+                padding: sidebar.folded ? 8px : 12px;
+                padding-top: 16px;
+                spacing: 2px;
+                if sidebar.folded: Text {
+                    height: 38px;
+                    text: "P";
+                    horizontal-alignment: center;
+                    font-family: P.serif;
+                    font-weight: P.kawaii ? 900 : 700;
+                    font-size: 22px;
+                    color: P.accent-text;
+                }
+                if !sidebar.folded: VerticalLayout {
+                    padding-left: 10px;
+                    padding-bottom: P.kawaii ? 10px : 14px;
+                    spacing: 2px;
+                    HorizontalLayout {
+                        spacing: 0px;
+                        Text {
+                            text: "Patina";
+                            font-family: P.serif;
+                            font-weight: P.kawaii ? 900 : 700;
+                            font-size: P.kawaii ? 22px : 20px;
+                            color: P.text;
+                        }
+                        Text {
+                            text: "Player";
+                            font-family: P.serif;
+                            font-weight: P.kawaii ? 900 : 700;
+                            font-size: P.kawaii ? 22px : 20px;
+                            color: P.accent-text;
+                        }
+                        if P.kawaii: Rectangle {
+                            width: 26px;
+                            Icon {
+                                x: 6px;
+                                y: (parent.height - self.height) / 2 + 1px;
+                                d: Icons.heart;
+                                size: 18px;
+                                stroke: P.verdigris;
+                                stroke-width: 2px;
+                            }
+                        }
+                        Rectangle {}
+                    }
+                    if P.kawaii: Text {
+                        text: P.light ? "おんがく の じかん" : "よる の おんがく";
+                        font-size: 10.5px;
+                        letter-spacing: 2px;
+                        color: P.muted;
+                    }
+                }
+                Flickable {
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 2px;
+                        for item[i] in root.side: Rectangle {
+                            // Kawaii: the open one is a pink pill.
+                            property <bool> pill: item.active && P.kawaii && item.kind == 0;
+                            // Favorites sit like sections, with a menu.
+                            property <bool> entry: item.kind <= 1 || item.kind == 4;
+                            height: item.kind == 3 ? 12px : (item.kind == 2 ? 28px : 34px);
+                            border-radius: 6px * P.round;
+                            border-width: 1px;
+                            border-color: pill ? P.verdigris : (item.active ? P.verdigris-dim : transparent);
+                            background: pill ? P.verdigris : (item.active ? P.raised : (sta.has-hover && entry ? P.raised : transparent));
+                            drop-shadow-offset-y: pill ? 3px : 0px;
+                            drop-shadow-color: pill ? P.accent-edge : transparent;
+                            if item.kind == 2 && sidebar.folded: Rectangle {
+                                x: 8px;
+                                y: parent.height - 8px;
+                                width: parent.width - 16px;
+                                height: 1px;
+                                background: P.border;
+                            }
+                            if item.kind == 2 && !sidebar.folded: Text {
+                                x: 10px;
+                                y: parent.height - self.height - 4px;
+                                text: item.sub != "" ? item.label + "  ·  " + item.sub : item.label;
+                                font-size: 11px;
+                                letter-spacing: 0.9px;
+                                color: P.muted;
+                            }
+                            if entry: HorizontalLayout {
+                                padding-left: sidebar.folded ? (item.kind == 0 && P.kawaii ? 12px : 16px) : 10px;
+                                padding-right: sidebar.folded ? 0px : 10px;
+                                spacing: 10px;
+                                if item.kind == 0 && !P.kawaii: Rectangle {
+                                    width: 16px;
+                                    Icon {
+                                        y: (parent.height - self.height) / 2;
+                                        d: item.icon;
+                                        stroke: item.active ? P.verdigris : (sta.has-hover ? P.text : P.muted);
+                                    }
+                                }
+                                // Kawaii: the icon sits in a round bubble.
+                                if item.kind == 0 && P.kawaii: Rectangle {
+                                    width: 24px;
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: 24px;
+                                        height: 24px;
+                                        border-radius: 12px;
+                                        background: pill ? P.on-accent : P.raised;
+                                        Icon {
+                                            x: 5px;
+                                            y: 5px;
+                                            size: 14px;
+                                            d: item.icon;
+                                            stroke: P.verdigris;
+                                            stroke-width: 2px;
+                                        }
+                                    }
+                                }
+                                if item.kind == 4: Rectangle {
+                                    width: 16px;
+                                    Icon {
+                                        y: (parent.height - self.height) / 2;
+                                        d: Icons.star;
+                                        stroke: P.copper;
+                                    }
+                                }
+                                if item.kind == 1: Rectangle {
+                                    width: 16px;
+                                    Rectangle {
+                                        x: 4px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 4px;
+                                        background: item.dot == 0 ? (P.kawaii ? P.mint : P.verdigris) : (item.dot == 1 ? P.verdigris-dim : (item.dot == 2 ? P.copper : P.muted));
+                                    }
+                                }
+                                if item.sub == "" && !sidebar.folded: Text {
+                                    text: item.label;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    font-size: 13px;
+                                    font-weight: P.kawaii ? 500 : 400;
+                                    color: pill ? P.on-accent : (item.active ? P.accent-text : (sta.has-hover || P.kawaii ? P.text : P.muted));
+                                }
+                                // The Japanese name follows on the same line, small,
+                                // so the sidebar keeps its height.
+                                if item.sub != "" && !sidebar.folded: HorizontalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 6px;
+                                    Text {
+                                        text: item.label;
+                                        vertical-alignment: center;
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                        color: pill ? P.on-accent : P.text;
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: item.sub;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                        font-size: 9.5px;
+                                        color: pill ? P.on-accent : P.muted;
+                                    }
+                                }
+                                if !sidebar.folded: Text {
+                                    text: item.count;
+                                    vertical-alignment: center;
+                                    font-family: P.mono;
+                                    font-size: 11px;
+                                    color: pill ? P.on-accent : (item.dot == 2 ? P.copper : P.muted);
+                                }
+                            }
+                            scm := ContextMenuArea {
+                                enabled: item.kind == 4;
+                                Menu {
+                                    MenuItem { title: "Move up"; activated => { root.side-act(i, "up"); } }
+                                    MenuItem { title: "Move down"; activated => { root.side-act(i, "down"); } }
+                                    MenuItem { title: "Remove from Favorites"; activated => { root.side-act(i, "remove"); } }
+                                }
+                                sta := TouchArea {
+                                    enabled: entry;
+                                    mouse-cursor: entry ? pointer : default;
+                                    pointer-event(e) => {
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.right && item.kind == 4 {
+                                            scm.show({ x: self.mouse-x, y: self.mouse-y });
+                                        }
+                                    }
+                                    changed has-hover => {
+                                        if self.has-hover && sidebar.folded {
+                                            root.side-tip = item.sub != "" ? item.label + "  " + item.sub : item.label;
+                                            root.side-tip-y = self.absolute-position.y + (self.height - 26px) / 2;
+                                        } else if !self.has-hover {
+                                            root.side-tip = "";
+                                        }
+                                    }
+                                    clicked => {
+                                        root.side-tip = "";
+                                        root.drawer-open = false;
+                                        root.side-clicked(i);
+                                        keys.focus();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The folded sidebar's label for the icon under the pointer.
+        if root.side-tip != "" && sidebar.folded: Rectangle {
+            x: root.side-w + 6px;
+            y: root.side-tip-y;
+            width: stt.preferred-width + 20px;
+            height: 26px;
+            border-radius: 6px * P.round;
+            border-width: 1px;
+            border-color: P.border;
+            background: P.raised;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: P.shadow;
+            stt := Text { text: root.side-tip; font-size: 12px; color: P.text; }
+        }
+
+        // ----- Lyrics panel -----
+        if root.lyrics-open: Rectangle {
+            x: root.tiny ? 0px : root.width - root.lyrics-w - (root.queue-panel ? root.queue-w : 0px);
+            y: 0;
+            width: root.tiny ? root.width : root.lyrics-w;
+            height: root.height - root.bar-h;
+            background: P.surface;
+            // Takes the clicks, so none reach the view under it.
+            TouchArea {}
+            Rectangle { width: 1px; x: 0; background: P.border; }
+            VerticalLayout {
+                padding-top: 16px;
+                padding-left: 18px;
+                padding-right: 16px;
+                padding-bottom: 12px;
+                spacing: 6px;
+                HorizontalLayout {
+                    Text { text: "Lyrics"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton { icon: Icons.close; tip: "Close (Ctrl+L)"; clicked => { root.lyrics-clicked(); keys.focus(); } }
+                }
+                Text { text: root.lyrics-title; overflow: elide; font-weight: 600; color: P.text; }
+                Text { text: root.lyrics-note; wrap: word-wrap; font-size: 11.5px; color: root.lyrics-warn ? P.copper : P.muted; }
+                Rectangle { height: 6px; }
+                // Synced: the lines from a little before the one
+                // playing, which the app picks, so it stays in view.
+                if root.lyrics-synced: Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 6px;
+                        for l[i] in root.lyrics-lines: Text {
+                            text: l;
+                            wrap: word-wrap;
+                            font-size: i == root.lyrics-current ? 15px : 13.5px;
+                            font-weight: i == root.lyrics-current ? 700 : 400;
+                            color: i == root.lyrics-current ? P.accent-text : (i < root.lyrics-current ? P.muted : P.text);
+                        }
+                    }
+                }
+                if !root.lyrics-synced: Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 4px;
+                        for l in root.lyrics-lines: Text {
+                            text: l;
+                            wrap: word-wrap;
+                            font-size: 13.5px;
+                            color: P.text;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ----- Queue panel -----
+        if root.queue-panel: Rectangle {
+            x: root.tiny ? 0px : root.width - root.queue-w;
+            y: 0;
+            width: root.tiny ? root.width : root.queue-w;
+            height: root.height - root.bar-h;
+            background: P.surface;
+            TouchArea {}
+            Rectangle { width: 1px; x: 0; background: P.border; }
+            VerticalLayout {
+                padding-top: 16px;
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-bottom: 10px;
+                    Text { text: "Queue"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text { text: root.queue-summary; font-size: 11.5px; color: P.muted; vertical-alignment: center; }
+                    if root.tiny: IconButton { icon: Icons.close; tip: "Close"; clicked => { root.toggle-queue(); keys.focus(); } }
+                }
+                // A ListView, so only the rows in view exist, however
+                // long the queue gets.
+                ListView {
+                    vertical-stretch: 1;
+                    content-y <=> root.panel-scroll;
+                    for q[i] in root.queue: Rectangle {
+                        height: 54px;
+                        Rectangle {
+                            x: 8px;
+                            y: 1px;
+                            width: parent.width - 16px;
+                            height: 52px;
+                            border-radius: 6px * P.round;
+                            border-width: q.playing ? (P.kawaii ? 2px : 1px) : 0px;
+                            border-color: P.kawaii ? P.verdigris : P.verdigris-dim;
+                            background: q.playing ? P.playing-bg : (pta.has-hover ? P.raised : transparent);
+                            HorizontalLayout {
+                                padding: 7px;
+                                spacing: 10px;
+                                Cover { width: 36px; height: 36px; radius: 4px; art: q.art; has-art: q.has-art; }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.playing ? P.accent-text : P.text; }
+                                    Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
+                                }
+                            }
+                            pta := TouchArea {
+                                double-clicked => { root.queue-activate(i); }
+                            }
+                        }
+                    }
+                }
+                if P.kawaii && root.queue.length > 0: Text {
+                    height: 30px;
+                    text: P.light ? "ゆっくり きいてね ♪  (っ˘ω˘ς )" : "☆ﾐ(o*･ω･)ﾉ  いい ゆめ を ♪";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 11.5px;
+                    color: P.muted;
+                }
+                Rectangle {
+                    height: 58px;
+                    Rectangle { height: 1px; y: 0; background: P.border; }
+                    HorizontalLayout {
+                        padding: 12px;
+                        padding-left: 16px;
+                        spacing: 8px;
+                        alignment: start;
+                        Chip { text: "Add to playlist"; clicked => { root.queue-save(); } }
+                        Chip { text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
+                    }
                 }
             }
         }
@@ -2710,8 +2899,8 @@ export component AppWindow inherits Window {
         // ----- Toast -----
         if root.toast != "": Rectangle {
             x: parent.width - self.width - 24px;
-            y: parent.height - 84px - self.height - 16px;
-            width: min(tt.preferred-width + 36px, 520px);
+            y: parent.height - root.bar-h - self.height - 16px;
+            width: min(tt.preferred-width + 36px, 520px, root.width - 48px);
             height: tt.preferred-height + 20px;
             border-radius: 8px * P.round;
             border-width: 1px;
@@ -2734,8 +2923,9 @@ export component AppWindow inherits Window {
             background: P.scrim;
             TouchArea { clicked => { root.dlg-cancel(); } }
             Rectangle {
-                width: root.dialog == 4 ? 620px : 460px;
-                height: dlg.preferred-height;
+                width: min(root.dialog == 4 ? 620px : 460px, root.width - 24px);
+                height: min(dlg.preferred-height, root.height - 24px);
+                clip: true;
                 border-radius: 10px * P.round;
                 border-width: 1px;
                 border-color: P.border;
@@ -2792,7 +2982,7 @@ export component AppWindow inherits Window {
 
                     // Playlists to pick from. Scrolls once there are many.
                     if root.dialog == 2: ListView {
-                        height: min(root.dlg-items.length * 38px, 380px);
+                        height: min(root.dlg-items.length * 38px, 380px, root.height - 180px);
                         for it[i] in root.dlg-items: Rectangle {
                             height: 38px;
                             Rectangle {
@@ -2822,12 +3012,18 @@ export component AppWindow inherits Window {
                         color: P.text;
                     }
 
-                    if root.dialog == 4: Text {
-                        text: root.dlg-message;
-                        wrap: word-wrap;
-                        font-family: P.mono;
-                        font-size: 12px;
-                        color: P.text;
+                    // The help is long; on a short window it scrolls.
+                    if root.dialog == 4: Flickable {
+                        height: min(ht.preferred-height, root.height - 160px);
+                        content-height: ht.preferred-height;
+                        ht := Text {
+                            width: parent.width;
+                            text: root.dlg-message;
+                            wrap: word-wrap;
+                            font-family: P.mono;
+                            font-size: 12px;
+                            color: P.text;
+                        }
                     }
 
                     HorizontalLayout {

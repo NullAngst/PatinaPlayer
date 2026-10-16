@@ -4,6 +4,7 @@
 
 mod art;
 mod bridge;
+mod desktop;
 
 use std::path::PathBuf;
 
@@ -108,8 +109,20 @@ fn main() -> Result<()> {
     let playing_files = session.playing_files;
 
     let ui = AppWindow::new().context("can't open the window")?;
-    let bridge = bridge::install(&ui, session.browser, playing_files);
-    ui.run().context("the window closed with an error")?;
+    // Closing the window either quits, or hides it to the tray while the
+    // music keeps going. The bridge keeps this flag current.
+    let hide_on_close = std::rc::Rc::new(std::cell::Cell::new(false));
+    let bridge = bridge::install(&ui, session.browser, playing_files, hide_on_close.clone());
+    ui.window().on_close_requested(move || {
+        if !hide_on_close.get() {
+            let _ = slint::quit_event_loop();
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+    ui.show().context("can't show the window")?;
+    // Runs on with the window hidden in the tray, until something quits.
+    slint::run_event_loop_until_quit().context("the window closed with an error")?;
+    let _ = ui.hide();
     bridge.shutdown(fade_ms);
     Ok(())
 }

@@ -3,9 +3,9 @@
 //! allocates (after construction) or waits.
 //!
 //! Stages live here in the order from the design doc: the amp stack, the
-//! EQ, then fade and volume, then the true-peak limiter. Leveling,
-//! resampling and crossfade run earlier, in the decoder thread; channel
-//! tools slot in at their marked place when they land.
+//! EQ, the channel tools, then fade and volume, then the true-peak
+//! limiter. Leveling, resampling and crossfade run earlier, in the decoder
+//! thread.
 //!
 //! The limiter looks ahead by peeking further into the ring than the block
 //! it takes, so it adds no delay and the stream's timing is untouched.
@@ -17,6 +17,7 @@ use rtrb::Consumer;
 use super::{SharedRef, StreamFormat};
 use crate::dsp::EqRt;
 use crate::dsp::amp::AmpRt;
+use crate::dsp::channel::ChannelRt;
 use crate::dsp::limiter::{Limiter, MAX_LOOKAHEAD, TAPS_HALF};
 
 pub struct Renderer {
@@ -37,6 +38,8 @@ pub struct Renderer {
     eq_gen: u64,
     amp: AmpRt,
     amp_gen: u64,
+    channel: ChannelRt,
+    channel_gen: u64,
     limiter: Limiter,
     /// Audio past the block, peeked from the ring for the limiter.
     ahead: Vec<f64>,
@@ -62,6 +65,10 @@ impl Renderer {
         let amp_gen = shared.amp_gen.load(Ordering::Acquire);
         amp.set(&shared.amp.lock().unwrap());
         amp.reset();
+        let mut channel = ChannelRt::new(ch, format.rate);
+        let channel_gen = shared.channel_gen.load(Ordering::Acquire);
+        channel.set(&shared.channel.lock().unwrap());
+        channel.reset();
         Self {
             ring,
             format,
@@ -75,6 +82,8 @@ impl Renderer {
             eq_gen,
             amp,
             amp_gen,
+            channel,
+            channel_gen,
             limiter: Limiter::new(ch, format.rate, MAX_BLOCK_FRAMES),
             ahead: vec![0.0; (MAX_LOOKAHEAD + 2 * TAPS_HALF) * ch],
             shared,
@@ -146,6 +155,13 @@ impl Renderer {
                 self.amp.set(&p);
                 self.amp_gen = g;
             }
+            let g = shared.channel_gen.load(Ordering::Acquire);
+            if g != self.channel_gen
+                && let Ok(p) = shared.channel.try_lock()
+            {
+                self.channel.set(&p);
+                self.channel_gen = g;
+            }
         }
         self.last_from_ring = 0;
         self.last_flush = false;
@@ -178,6 +194,7 @@ impl Renderer {
             self.fade = 0.0;
             self.eq.reset();
             self.amp.reset();
+            self.channel.reset();
             self.limiter.reset();
             shared.silent.store(true, Ordering::Relaxed);
             self.last_flush = true;
@@ -249,11 +266,12 @@ impl Renderer {
         // 3. Transition mixer: crossfade, in the decoder thread too.
         // 4. Amp stack
         // 5. EQ
+        // 6. Channel tools
         if !exact {
             self.amp.process(&mut self.buf[..n]);
             self.eq.process(&mut self.buf[..n]);
+            self.channel.process(&mut self.buf[..n]);
         }
-        // 6. Channel tools                        (later)
 
         // Fade (pause, resume, seek, stop) and 7. Volume, as one gain ramp.
         let fade_frames = (shared.fade_ms.load(Ordering::Relaxed) as f64 * self.format.rate as f64
@@ -297,6 +315,10 @@ impl Renderer {
                 }
             }
             self.eq.preview(ahead);
+            // The channel tools are small enough to copy: run the look
+            // ahead through a copy so the real one doesn't move.
+            let mut ct = self.channel.clone();
+            ct.process(ahead);
             let fg = (self.fade * std::f64::consts::FRAC_PI_2).sin();
             let g = fg * fg * vol_target;
             if g != 1.0 {

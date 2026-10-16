@@ -21,6 +21,18 @@ pub enum Backend {
     Null,
 }
 
+impl Backend {
+    /// As written in config.toml and on the command line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Backend::Auto => "auto",
+            Backend::PipeWire => "pipewire",
+            Backend::Alsa => "alsa",
+            Backend::Null => "null",
+        }
+    }
+}
+
 impl std::str::FromStr for Backend {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {

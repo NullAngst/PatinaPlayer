@@ -488,6 +488,47 @@ impl Browser {
         }
     }
 
+    pub(super) fn change_channel(&mut self, key: &Key, new: &Control) -> Result<(), String> {
+        let path = self.config_path.clone();
+        let w = |r: Result<bool, config::ConfigError>| r.map(|_| ()).map_err(|e| e.to_string());
+        let c = &mut self.config.channel;
+        match (key, new) {
+            (Key::ChannelOn, Control::Toggle(on)) => {
+                w(config::set_value(&path, "channel", "on", *on))?;
+                c.on = *on;
+            }
+            (Key::ChannelMono, Control::Toggle(on)) => {
+                w(config::set_value(&path, "channel", "mono", *on))?;
+                c.mono = *on;
+            }
+            (Key::ChannelWidth, Control::Number { value, .. }) => {
+                let v = (*value).clamp(0, 200);
+                w(config::set_value(&path, "channel", "width", v))?;
+                c.width = v as u32;
+            }
+            (Key::ChannelCrossfeed, Control::Choice { options, index }) => {
+                let name = options[*index].0.clone();
+                let cf = crate::dsp::channel::Crossfeed::parse(&name).unwrap_or_default();
+                w(config::set_value(
+                    &path,
+                    "channel",
+                    "crossfeed",
+                    cf.as_str(),
+                ))?;
+                c.crossfeed = cf;
+            }
+            (Key::ChannelBalance, Control::Number { value, .. }) => {
+                let v = (*value).clamp(-100, 100);
+                w(config::set_value(&path, "channel", "balance", v))?;
+                c.balance = v as i32;
+            }
+            _ => return Ok(()),
+        }
+        self.player
+            .send(Command::SetChannel(self.config.channel.params()));
+        Ok(())
+    }
+
     pub(super) fn change_limiter(&mut self, key: &Key, new: &Control) -> Result<(), String> {
         let path = self.config_path.clone();
         let w = |r: Result<bool, config::ConfigError>| r.map(|_| ()).map_err(|e| e.to_string());

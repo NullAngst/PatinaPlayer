@@ -168,12 +168,17 @@ pub fn load_dir(dir: &Path, size: u32) -> Option<RgbaImage> {
 
 /// A server cover, from the disk cache if it's been fetched before at
 /// this size, else from the server.
-fn load_remote(path: &Path, size: u32) -> Option<RgbaImage> {
+fn remote_cache_path(path: &Path, size: u32) -> Option<(PathBuf, String, String)> {
     let (server, cover) = crate::remote::registry().cover_id(path)?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     server.hash(&mut h);
     cover.hash(&mut h);
     let cached = cache_dir().join(format!("srv-{:016x}-{size}.png", h.finish()));
+    Some((cached, server, cover))
+}
+
+fn load_remote(path: &Path, size: u32) -> Option<RgbaImage> {
+    let (cached, server, cover) = remote_cache_path(path, size)?;
     if let Ok(img) = image::open(&cached) {
         return Some(img.to_rgba8());
     }
@@ -191,6 +196,22 @@ fn load_remote(path: &Path, size: u32) -> Option<RgbaImage> {
         let _ = std::fs::write(&cached, buf.into_inner());
     }
     Some(img)
+}
+
+/// A PNG file of a track's art at `size` pixels, for things outside the
+/// app that want a path rather than pixels (the desktop's media controls).
+/// Fills the cache entry first if it isn't there yet. Can be slow: it may
+/// decode the art, or fetch it from a server.
+pub fn cached_file(track: &Path, size: u32) -> Option<PathBuf> {
+    let path = if crate::remote::is_remote(track) {
+        remote_cache_path(track, size)?.0
+    } else {
+        cache_path(&find(track)?, size)
+    };
+    if !path.exists() {
+        load(track, size)?;
+    }
+    path.exists().then_some(path)
 }
 
 pub fn load_origin(origin: &Origin, size: u32) -> Option<RgbaImage> {

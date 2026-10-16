@@ -122,6 +122,9 @@ pub struct Shared {
     /// The amp stack, and its change counter, the same way as the EQ.
     pub amp: std::sync::Mutex<crate::dsp::amp::AmpParams>,
     pub amp_gen: AtomicU64,
+    /// Channel tools, the same way again.
+    pub channel: std::sync::Mutex<crate::dsp::channel::ChannelParams>,
+    pub channel_gen: AtomicU64,
 }
 
 impl Default for Shared {
@@ -153,6 +156,8 @@ impl Default for Shared {
             crossfade_ms: AtomicU32::new(0),
             amp: std::sync::Mutex::new(crate::dsp::amp::AmpParams::default()),
             amp_gen: AtomicU64::new(0),
+            channel: std::sync::Mutex::new(crate::dsp::channel::ChannelParams::default()),
+            channel_gen: AtomicU64::new(0),
         }
     }
 }
@@ -168,6 +173,13 @@ impl Shared {
             || self.crossfade_ms.load(Ordering::Relaxed) != 0
             || self.eq.lock().unwrap().changes_sound()
             || self.amp.lock().unwrap().changes_sound()
+            || self.channel.lock().unwrap().changes_sound()
+    }
+
+    /// New channel tool settings for the renderer to pick up.
+    pub fn set_channel(&self, p: crate::dsp::channel::ChannelParams) {
+        *self.channel.lock().unwrap() = p;
+        self.channel_gen.fetch_add(1, Ordering::Release);
     }
 
     /// A new amp stack for the renderer to pick up.

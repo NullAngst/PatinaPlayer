@@ -122,6 +122,9 @@ pub enum Command {
     /// The amp stack, as the renderer runs it. Knobs glide; heard within
     /// one output block.
     SetAmp(Box<crate::dsp::amp::AmpParams>),
+    /// Channel tools: mono, width, crossfeed, balance. They glide; heard
+    /// within one output block.
+    SetChannel(crate::dsp::channel::ChannelParams),
     /// The true-peak limiter: on or off, and its ceiling in dBTP.
     SetLimiter {
         on: bool,
@@ -246,6 +249,7 @@ pub struct PlayerConfig {
     pub leveling: crate::level::LevelConfig,
     pub eq: crate::dsp::EqParams,
     pub amp: crate::dsp::amp::AmpParams,
+    pub channel: crate::dsp::channel::ChannelParams,
     pub limiter_on: bool,
     /// dBTP, -6 to 0.
     pub limiter_ceiling_db: f64,
@@ -262,6 +266,7 @@ impl Default for PlayerConfig {
             leveling: crate::level::LevelConfig::default(),
             eq: crate::dsp::EqParams::default(),
             amp: crate::dsp::amp::AmpParams::default(),
+            channel: crate::dsp::channel::ChannelParams::default(),
             limiter_on: true,
             limiter_ceiling_db: -1.0,
         }
@@ -402,6 +407,7 @@ impl Core {
         shared.level.set(&cfg.leveling);
         shared.set_eq(cfg.eq);
         shared.set_amp(cfg.amp);
+        shared.set_channel(cfg.channel);
         shared.limiter_on.store(cfg.limiter_on, Ordering::Relaxed);
         shared.out_rate.store(cfg.output.rate, Ordering::Relaxed);
         shared
@@ -847,6 +853,16 @@ impl Core {
             Command::SetAmp(p) => {
                 let before = self.shared.dsp_active();
                 self.shared.set_amp(*p);
+                if before != self.shared.dsp_active()
+                    && self.cfg.output.bit_perfect == BitPerfect::Auto
+                {
+                    self.exclusive_refused = None;
+                    self.restart_here();
+                }
+            }
+            Command::SetChannel(p) => {
+                let before = self.shared.dsp_active();
+                self.shared.set_channel(p);
                 if before != self.shared.dsp_active()
                     && self.cfg.output.bit_perfect == BitPerfect::Auto
                 {

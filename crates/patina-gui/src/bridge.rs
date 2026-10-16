@@ -22,6 +22,7 @@ use slint::platform::Key;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::art::{ArtCache, LARGE, Req, THUMB};
+use crate::desktop::Action;
 use crate::{AmpKnob, AmpUnit, AppWindow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem};
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
@@ -119,6 +120,11 @@ pub struct State {
     eq_pick: Option<(crossbeam_channel::Receiver<Option<PathBuf>>, Instant)>,
     /// The theme on screen, so a change in Settings redraws.
     theme: Option<Theme>,
+    /// MPRIS and the tray icon.
+    desktop: crate::desktop::Desktop,
+    /// Closing the window hides it (there's a tray icon to come back
+    /// from, and the setting says so). Read by the close handler.
+    hide_on_close: Rc<std::cell::Cell<bool>>,
 }
 
 const HELP: &str = "Space        play / pause
@@ -151,8 +157,11 @@ Right-click a song or album to rate it, a folder, album or artist to
              add it to Favorites; the album header and the bottom bar
              have stars too
 F5           check folders and feeds for changes
-Ctrl+Q       quit
+Ctrl+Q       quit. Closing the window only hides it to the tray
+             while there's a tray icon (Settings, Desktop)
 
+Media keys and the desktop's media controls work through MPRIS.
+Mono, width, crossfeed and balance are in Settings, Channel tools.
 Right-click anything for everything else you can do with it.";
 
 /// What a row's columns show, which depends on the list it's in.
@@ -227,7 +236,8 @@ fn date(ts: i64) -> String {
 }
 
 impl State {
-    fn new(b: Browser) -> Self {
+    fn new(b: Browser, hide_on_close: Rc<std::cell::Cell<bool>>) -> Self {
+        let desktop = crate::desktop::Desktop::start(b.player.clone(), b.config.desktop.tray);
         Self {
             b,
             art: ArtCache::new(),
@@ -261,6 +271,8 @@ impl State {
             folder_pick: None,
             eq_pick: None,
             theme: None,
+            desktop,
+            hide_on_close,
         }
     }
 
@@ -1260,6 +1272,7 @@ impl State {
             }
         }
         self.snap = self.b.player.snapshot();
+        self.desktop_tick(ui);
         self.poll_folder_pick();
         self.poll_eq_pick(ui);
         if let Some(found) = self.b.take_dlna_found() {
@@ -1301,15 +1314,14 @@ impl State {
         self.update_queue_art(ui, art_arrived);
         self.sync_playback(ui);
         self.notes(ui);
-        // The queue panel needs room; fold it away on a narrow window.
-        let w = ui.window().size().width as f32 / ui.window().scale_factor();
-        if ui.get_queue_panel() && w < 1100.0 {
+        // Both side panels only fit on a wide window: shrinking the window
+        // with both open folds the queue away.
+        if ui.get_queue_panel() && ui.get_lyrics_open() && narrow_window(ui) {
             ui.set_queue_panel(false);
         }
-        // Below this the bottom bar drops the format badge and output chip.
-        let compact = w < 1180.0;
-        if ui.get_compact() != compact {
-            ui.set_compact(compact);
+        // The drawer only exists on a tiny window.
+        if ui.get_drawer_open() && !ui.get_tiny() {
+            ui.set_drawer_open(false);
         }
     }
 
@@ -2107,12 +2119,47 @@ impl State {
     }
 
     /// Lyrics: up for the song playing, or closed if they already are.
-    fn toggle_lyrics(&mut self) {
+    fn toggle_lyrics(&mut self, ui: &AppWindow) {
         if self.b.lyrics().is_some() && !self.b.lyrics_stale() {
             self.b.lyrics_hide();
         } else {
             self.b.lyrics_show();
+            // No room for both panels on a narrow window.
+            if narrow_window(ui) {
+                ui.set_queue_panel(false);
+            }
         }
+    }
+
+    /// MPRIS and the tray: publish the state, and do what they asked.
+    fn desktop_tick(&mut self, ui: &AppWindow) {
+        let d = &self.b.config.desktop;
+        self.desktop.set_tray(d.tray);
+        self.hide_on_close
+            .set(d.close_to_tray && self.desktop.has_tray());
+        for a in self.desktop.tick(&self.snap) {
+            match a {
+                Action::Show => show_window(ui),
+                Action::Toggle => {
+                    if ui.window().is_visible() {
+                        let _ = ui.window().hide();
+                    } else {
+                        show_window(ui);
+                    }
+                }
+                Action::Quit => {
+                    let _ = slint::quit_event_loop();
+                }
+            }
+        }
+    }
+
+    fn toggle_queue_panel(&mut self, ui: &AppWindow) {
+        let open = !ui.get_queue_panel();
+        if open && narrow_window(ui) && self.b.lyrics().is_some() {
+            self.b.lyrics_hide();
+        }
+        ui.set_queue_panel(open);
     }
 
     fn open_amp_save(&mut self, ui: &AppWindow) {
@@ -2485,7 +2532,7 @@ impl State {
                 "e" | "E" => self.b.switch(Section::Eq),
                 "a" | "A" => self.b.switch(Section::Amp),
                 "o" | "O" => self.pick_device(ui),
-                "l" | "L" => self.toggle_lyrics(),
+                "l" | "L" => self.toggle_lyrics(ui),
                 "f" | "F" => {
                     let q = self.b.start_search();
                     ui.set_search_text(ss(q));
@@ -2560,7 +2607,7 @@ impl State {
                 "s" => p.send(Command::ToggleShuffle),
                 "r" => p.send(Command::CycleRepeat),
                 "l" => self.b.toggle_love(),
-                "q" => ui.set_queue_panel(!ui.get_queue_panel()),
+                "q" => self.toggle_queue_panel(ui),
                 "/" => {
                     let q = self.b.start_search();
                     ui.set_search_text(ss(q));
@@ -2697,13 +2744,20 @@ impl Bridge {
     }
 }
 
-pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
+/// Wire the window to the core. `hide_on_close` is kept up to date with
+/// whether closing the window should hide it to the tray.
+pub fn install(
+    ui: &AppWindow,
+    mut b: Browser,
+    playing_files: bool,
+    hide_on_close: Rc<std::cell::Cell<bool>>,
+) -> Bridge {
     b.switch(if playing_files {
         Section::Queue
     } else {
         Section::Folders
     });
-    let st = Rc::new(RefCell::new(State::new(b)));
+    let st = Rc::new(RefCell::new(State::new(b, hide_on_close)));
     {
         let s = st.borrow();
         ui.set_side(ModelRc::from(s.side.clone()));
@@ -2776,7 +2830,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
     on!(on_np_rate, |s, _u, n| s.b.rate_playing(n.clamp(0, 5) as u8));
     on!(on_hero_rate, |s, _u, n| s.b.rate_level(n.clamp(0, 5) as u8));
     on!(on_hero_fav, |s, _u| s.b.toggle_favorite_level());
-    on!(on_lyrics_clicked, |s, _u| s.toggle_lyrics());
+    on!(on_lyrics_clicked, |s, u| s.toggle_lyrics(&u));
     on!(on_side_act, |s, _u, i, a| {
         if let Some(SideEntry::Favorite { id, .. }) = s.b.sidebar.get(i as usize).cloned() {
             match a.as_str() {
@@ -2872,8 +2926,7 @@ pub fn install(ui: &AppWindow, mut b: Browser, playing_files: bool) -> Bridge {
         .player
         .send(Command::SetVolume(f.clamp(0.0, 1.0) as f64)));
     on!(on_toggle_mute, |s, u| s.b.player.send(Command::ToggleMute));
-    on!(on_toggle_queue, |s, u| u
-        .set_queue_panel(!u.get_queue_panel()));
+    on!(on_toggle_queue, |s, u| s.toggle_queue_panel(&u));
     on!(on_speed_clicked, |s, u| {
         // Click cycles the common speeds.
         let next = match s.b.podcast_tempo {
@@ -2966,4 +3019,16 @@ fn dial_arc(pos: f64) -> String {
     let (x, y) = at(135.0 + 270.0 * pos);
     let large = if 270.0 * pos > 180.0 { 1 } else { 0 };
     format!("M {x0:.2} {y0:.2} A 38 38 0 {large} 1 {x:.2} {y:.2}")
+}
+
+/// Bring the window back from the tray, or forward from behind others.
+fn show_window(ui: &AppWindow) {
+    let _ = ui.window().show();
+    ui.window().set_minimized(false);
+    ui.invoke_focus_root();
+}
+
+/// Too narrow for both side panels at once (the sidebar is folded, or a drawer).
+fn narrow_window(ui: &AppWindow) -> bool {
+    ui.get_narrow()
 }

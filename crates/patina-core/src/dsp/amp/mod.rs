@@ -347,6 +347,31 @@ pub fn factor_for(asked: u8, rate: u32) -> usize {
     n
 }
 
+fn order_of(p: &AmpParams) -> [Option<Kind>; MAX_UNITS] {
+    let mut o = [None; MAX_UNITS];
+    for (i, u) in p.units().iter().enumerate() {
+        o[i] = Some(u.kind);
+    }
+    o
+}
+
+/// Whether the devices in both orders come in a different sequence.
+/// Runs on the output thread, so no allocating: fixed arrays.
+fn reordered(old: &[Option<Kind>; MAX_UNITS], new: &[Option<Kind>; MAX_UNITS]) -> bool {
+    let both = |a: &[Option<Kind>; MAX_UNITS], b: &[Option<Kind>; MAX_UNITS]| {
+        let mut out = [None; MAX_UNITS];
+        let mut n = 0;
+        for k in a.iter().flatten() {
+            if b.iter().flatten().any(|x| x == k) {
+                out[n] = Some(*k);
+                n += 1;
+            }
+        }
+        out
+    };
+    both(old, new) != both(new, old)
+}
+
 /// The stack as the renderer runs it, for one stream format.
 pub struct AmpRt {
     ch: usize,
@@ -358,6 +383,10 @@ pub struct AmpRt {
     params: AmpParams,
     /// Factor index waiting for the stack to glide out before it switches.
     pending: Option<usize>,
+    /// The order the devices run in. A reorder waits, like a new factor,
+    /// for the stack to glide out, so the swap is never heard as a tick.
+    order: [Option<Kind>; MAX_UNITS],
+    pending_order: bool,
     mix: f64,
     target: f64,
     mix_step: f64,
@@ -388,6 +417,8 @@ impl AmpRt {
             devices: Devices::new(max_fs),
             params: AmpParams::default(),
             pending: None,
+            order: [None; MAX_UNITS],
+            pending_order: false,
             mix: 0.0,
             target: 0.0,
             mix_step: 1.0 / (rate as f64 * MIX_MS / 1000.0).max(1.0),
@@ -426,8 +457,16 @@ impl AmpRt {
             let fresh = !self.devices.is_active(u.kind);
             self.devices.set(u, fs, fresh);
         }
+        // Devices added or removed come and go on their own glides; only
+        // a change in the order of the ones that stay waits for a glide out.
+        let order = order_of(p);
+        if self.mix > 0.0 && reordered(&self.order, &order) {
+            self.pending_order = true;
+        } else if !self.pending_order {
+            self.order = order;
+        }
         self.params = *p;
-        self.target = if p.changes_sound() && self.pending.is_none() {
+        self.target = if p.changes_sound() && self.pending.is_none() && !self.pending_order {
             1.0
         } else {
             0.0
@@ -436,6 +475,8 @@ impl AmpRt {
 
     /// Forget everything: after a seek or a stop.
     pub fn reset(&mut self) {
+        self.pending_order = false;
+        self.order = order_of(&self.params);
         if let Some(i) = self.pending.take() {
             self.cur = i;
             let p = self.params;
@@ -468,11 +509,18 @@ impl AmpRt {
 
     pub fn process(&mut self, buf: &mut [f64]) {
         if self.mix <= 0.0 && self.target <= 0.0 {
-            if let Some(i) = self.pending.take() {
-                // Glided out for a new factor: switch, and back in.
-                self.cur = i;
-                self.os[i].reset();
-                self.devices.reset();
+            if self.pending.is_some() || self.pending_order {
+                // Glided out for a new factor or order: switch, and back in.
+                if let Some(i) = self.pending.take() {
+                    // A new rate inside: everything starts clean.
+                    self.cur = i;
+                    self.os[i].reset();
+                    self.devices.reset();
+                }
+                // A new order alone keeps every device's memory, so they
+                // come back in without a start-up transient.
+                self.pending_order = false;
+                self.order = order_of(&self.params);
                 let p = self.params;
                 self.set(&p);
             } else {
@@ -482,13 +530,7 @@ impl AmpRt {
         let ch = self.ch;
         let dch = ch.min(MAX_CH);
         let n = self.os[self.cur].factor();
-        let order: [Option<Kind>; MAX_UNITS] = {
-            let mut o = [None; MAX_UNITS];
-            for (i, u) in self.params.units().iter().enumerate() {
-                o[i] = Some(u.kind);
-            }
-            o
-        };
+        let order = self.order;
         for frame in buf.chunks_exact_mut(ch) {
             self.dry.copy_from_slice(frame);
             let os = &mut self.os[self.cur];
@@ -516,7 +558,7 @@ impl AmpRt {
             }
         }
         self.devices.settle();
-        if self.mix <= 0.0 && self.target <= 0.0 {
+        if self.mix <= 0.0 && self.target <= 0.0 && self.pending.is_none() && !self.pending_order {
             for o in &mut self.os {
                 o.reset();
             }
@@ -569,6 +611,71 @@ mod tests {
             im += s * a.sin();
         }
         2.0 * (re * re + im * im).sqrt() / l.len() as f64
+    }
+
+    /// Swapping two devices while music plays glides out to the dry
+    /// signal and back in, instead of jumping between two waveforms.
+    #[test]
+    fn reordering_glides() {
+        let rate = 48000;
+        let all = Kind::ALL;
+        let (a, b) = (Unit::new(all[0]), Unit::new(all[2]));
+        let mut amp = AmpRt::new(2, rate);
+        amp.set(&stack(&[a, b]));
+        amp.reset();
+        let mut x = sine(100.0, 0.3, rate, 0.5);
+        let half = x.len() / 2;
+        let (first, second) = x.split_at_mut(half);
+        for c in first.chunks_mut(512) {
+            amp.process(c);
+        }
+        amp.set(&stack(&[b, a]));
+        assert!(amp.pending_order);
+        for c in second.chunks_mut(512) {
+            amp.process(c);
+        }
+        assert!(!amp.pending_order);
+        assert_eq!(amp.order[0], Some(b.kind));
+        // No sample-to-sample step bigger than the tone and the devices'
+        // own harmonics make.
+        let jump = x
+            .chunks_exact(2)
+            .zip(x.chunks_exact(2).skip(1))
+            .skip(rate as usize / 20)
+            .map(|(p, q)| (q[0] - p[0]).abs())
+            .fold(0.0f64, f64::max);
+        let steady = first_jump(&sine(100.0, 0.3, rate, 0.25), &[a, b], rate).max(first_jump(
+            &sine(100.0, 0.3, rate, 0.25),
+            &[b, a],
+            rate,
+        ));
+        assert!(jump < steady * 1.5 + 1e-3, "jump {jump}, steady {steady}");
+    }
+
+    fn first_jump(x: &[f64], units: &[Unit], rate: u32) -> f64 {
+        let y = run(&stack(units), x, rate);
+        y.chunks_exact(2)
+            .zip(y.chunks_exact(2).skip(1))
+            .skip(rate as usize / 20)
+            .map(|(p, q)| (q[0] - p[0]).abs())
+            .fold(0.0f64, f64::max)
+    }
+
+    #[test]
+    fn reorder_only_counts_devices_in_both() {
+        let o = |ks: &[Kind]| {
+            let mut a = [None; MAX_UNITS];
+            for (i, k) in ks.iter().enumerate() {
+                a[i] = Some(*k);
+            }
+            a
+        };
+        let all = Kind::ALL;
+        let (a, b, c) = (all[0], all[1], all[2]);
+        assert!(!reordered(&o(&[a, b]), &o(&[a, b, c])));
+        assert!(!reordered(&o(&[a, b, c]), &o(&[a, c])));
+        assert!(reordered(&o(&[a, b]), &o(&[b, a])));
+        assert!(reordered(&o(&[a, b, c]), &o(&[c, b])));
     }
 
     #[test]

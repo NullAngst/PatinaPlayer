@@ -23,6 +23,9 @@ crossbeam-channel = "0.5"
 log = "0.4"
 env_logger = "0.11"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# The tray icon (StatusNotifierItem). Its own small executor, no tokio.
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
 slint-build = "1.18"

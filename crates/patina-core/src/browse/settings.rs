@@ -81,6 +81,15 @@ pub enum Key {
     /// The true-peak limiter, and its ceiling.
     Limiter,
     LimiterCeiling,
+    // Channel tools.
+    ChannelOn,
+    ChannelMono,
+    ChannelWidth,
+    ChannelCrossfeed,
+    ChannelBalance,
+    // The desktop app's tray icon.
+    Tray,
+    CloseToTray,
     // The EQ view's rows.
     EqOn,
     EqMode,
@@ -265,6 +274,9 @@ pub struct SettingsInfo {
     pub cache_dir: PathBuf,
     pub pinned_dir: PathBuf,
     pub no_library: bool,
+    /// Options a command-line flag set for this run, and the flag, so the
+    /// row can say why what's playing differs from what it shows.
+    pub overrides: Vec<(Key, String)>,
 }
 
 /// The warning shown before bit-perfect is turned on.
@@ -736,6 +748,28 @@ pub fn rows(
         },
     );
 
+    // Desktop
+    push(
+        "Desktop",
+        Setting {
+            disabled: None,
+            key: Key::Tray,
+            label: "Tray icon".into(),
+            help: "An icon in the system tray: click it to show or hide the window, middle-click to play or pause, right-click for a menu. Desktop app only.",
+            control: Control::Toggle(cfg.desktop.tray),
+        },
+    );
+    push(
+        "Desktop",
+        Setting {
+            disabled: (!cfg.desktop.tray).then_some("Needs the tray icon"),
+            key: Key::CloseToTray,
+            label: "Close to tray".into(),
+            help: "Closing the window hides it to the tray and keeps playing. Off, closing quits. Ctrl+Q always quits.",
+            control: Control::Toggle(cfg.desktop.close_to_tray),
+        },
+    );
+
     // Playback
     push(
         "Playback",
@@ -885,6 +919,83 @@ pub fn rows(
                 unit: " dBTP",
             },
             disabled: None,
+        },
+    );
+
+    // Channel tools
+    let chc = &cfg.channel;
+    let ch_off = (!chc.on).then_some("Channel tools are off");
+    push(
+        "Channel tools",
+        Setting {
+            key: Key::ChannelOn,
+            label: "Channel tools".into(),
+            help: "Mono, width, crossfeed and balance, after the EQ. Off bypasses all four at once, for a quick A/B.",
+            control: Control::Toggle(chc.on),
+            disabled: None,
+        },
+    );
+    push(
+        "Channel tools",
+        Setting {
+            key: Key::ChannelMono,
+            label: "Mono".into(),
+            help: "Both speakers play the same thing. For one earbud, or a speaker in another room.",
+            control: Control::Toggle(chc.mono),
+            disabled: ch_off,
+        },
+    );
+    push(
+        "Channel tools",
+        Setting {
+            key: Key::ChannelWidth,
+            label: "Stereo width".into(),
+            help: "0% is mono, 100% untouched, 200% twice as wide. Wider makes the sides louder.",
+            control: Control::Number {
+                value: chc.width as i64,
+                min: 0,
+                max: 200,
+                step: 10,
+                scale: 1,
+                unit: "%",
+            },
+            disabled: ch_off,
+        },
+    );
+    push(
+        "Channel tools",
+        Setting {
+            key: Key::ChannelCrossfeed,
+            label: "Crossfeed".into(),
+            help: "For headphones: a little of each side's bass reaches the other ear, the way speakers sound. Takes the edge off hard-panned old stereo.",
+            control: Control::Choice {
+                options: crate::dsp::channel::Crossfeed::ALL
+                    .iter()
+                    .map(|c| (c.as_str().to_string(), c.label().to_string()))
+                    .collect(),
+                index: crate::dsp::channel::Crossfeed::ALL
+                    .iter()
+                    .position(|c| *c == chc.crossfeed)
+                    .unwrap_or(0),
+            },
+            disabled: ch_off,
+        },
+    );
+    push(
+        "Channel tools",
+        Setting {
+            key: Key::ChannelBalance,
+            label: "Balance".into(),
+            help: "Negative leans left, positive right. The far side is turned down; nothing is turned up.",
+            control: Control::Number {
+                value: chc.balance as i64,
+                min: -100,
+                max: 100,
+                step: 5,
+                scale: 1,
+                unit: "",
+            },
+            disabled: ch_off,
         },
     );
 
@@ -1144,6 +1255,12 @@ pub fn rows(
         push("Files", file("Song cache", &info.cache_dir));
         push("Files", file("Pinned songs", &info.pinned_dir));
     }
+    // A flag on the command line wins over the file for this run.
+    for (key, flag) in &info.overrides {
+        for (_, s) in v.iter_mut().filter(|(_, s)| &s.key == key) {
+            s.label = format!("{}  ({flag} this run)", s.label);
+        }
+    }
     v
 }
 
@@ -1219,6 +1336,31 @@ mod tests {
             scale: 10,
             unit: "x",
         }
+    }
+
+    #[test]
+    fn command_line_flags_are_named_on_their_rows() {
+        let info = SettingsInfo {
+            overrides: vec![(Key::Backend, "--backend null".into())],
+            ..Default::default()
+        };
+        let v = rows(
+            &Config::default(),
+            &info,
+            1.0,
+            false,
+            &[],
+            &[],
+            Live::default(),
+        );
+        let label = |k: Key| {
+            v.iter()
+                .find(|(_, s)| s.key == k)
+                .map(|(_, s)| s.label.clone())
+                .unwrap()
+        };
+        assert!(label(Key::Backend).ends_with("(--backend null this run)"));
+        assert!(!label(Key::BufferMs).contains("this run"));
     }
 
     #[test]

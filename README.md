@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 14 of the build plan: everything from milestones 1 to 13 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, the output controls and the amp stack), plus ratings for songs and albums that sync with your servers, lyrics on request, and a Favorites list of starred folders, albums and artists in the sidebar. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. MPRIS, the tray and the polish come next. What's here is built to the final shape, so later milestones add to it instead of replacing it.
+This is milestone 15 of the build plan: everything from milestones 1 to 14 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, the output controls, the amp stack, ratings, Favorites and lyrics), plus media keys and the desktop's media controls through MPRIS2, a tray icon with close-to-tray, the channel tools (mono, width, crossfeed, balance), and a desktop window that shrinks down to phone size without cutting anything off. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Android app is milestone 16, in `android/`.
 
 ## What works right now
 
@@ -65,7 +65,7 @@ This is milestone 14 of the build plan: everything from milestones 1 to 13 (the 
 - Presets: Flat and a dozen built-in genre curves as starting points, and your own. Save as keeps what you have under a name, as a TOML file in `~/.config/patinaplayer/presets/eq/`, easy to copy or share. A preset you've changed shows as "Rock (changed)".
 - Import takes an AutoEq ParametricEQ.txt or GraphicEQ.txt, or an Equalizer APO config. Parametric filters come in exactly, with AutoEq's preamp. A GraphicEQ curve (hundreds of points) is fitted to the 31-band graphic EQ. The import becomes a preset named after the file ("Sennheiser HD 650 ParametricEQ.txt" is "Sennheiser HD 650"). Whatever APO does that this EQ can't (per-channel filters, includes) is skipped, and a note says so.
 - Per-device EQ: on the Device row, Keep this EQ for it gives the device playing now an EQ of its own, saved as a preset named after it. From then on, whenever the sound goes to that device, its EQ comes back; every other device gets your usual EQ. Changes you make while it plays are saved to its preset. On PipeWire this follows the default output, so switching from headphones to speakers in Plasma's volume applet switches the EQ with it, mid-song. With a device set in Settings, or on ALSA, it goes by that device.
-- Changes are heard within one output block (a few milliseconds) and saved half a second after you stop, to `[eq]` in config.toml.
+- Changes are heard within one output block (a few milliseconds) and saved half a second after you stop, to `[eq]` in config.toml. The filters glide to a new setting over 30 ms instead of jumping, so dragging a band fast doesn't zipper.
 - The bottom bar's EQ chip is lit while the EQ is on and changing something.
 
 **Limiter**
@@ -102,8 +102,22 @@ This is milestone 14 of the build plan: everything from milestones 1 to 13 (the 
 - The devices run at 4x the song's rate by default (2x or 8x in the Amp view, up to 768 kHz), so the harmonics they make don't fold back down as aliasing. A test drives a 7 kHz tone hard and checks the fold-back that shows at 2x is gone at 8x.
 - They're tuned to sound subtle at their defaults: a tone through any one device at its defaults comes out within 3 dB of where it went in, with its harmonics more than 20 dB down. Drive adds harmonics and squeezes peaks; it doesn't turn the music up.
 - These are character effects built from how each kind of hardware behaves in the textbooks (a triode stage, a push-pull pentode stage, a 15 ips tape machine). They don't model any branded unit, and I had no reference gear to match them against.
-- Knobs glide to where you turn them, and switching a device or the whole rack on or off fades over 20 ms, so nothing clicks. On with every device off, the stack passes the sound through untouched, bit for bit.
+- Knobs glide to where you turn them, and switching a device or the whole rack on or off fades over 20 ms, so nothing clicks. Moving a device along the chain fades the rack out, swaps the order and fades it back in, so that doesn't tick either. On with every device off, the stack passes the sound through untouched, bit for bit.
 - It sits before the EQ, so a headphone correction curve in the EQ applies to the final sound, character included. Bit-perfect skips it, and Auto bit-perfect counts it as changing the sound.
+
+**Channel tools**
+- Mono, stereo width, crossfeed and balance, in Settings under Channel tools. They run after the EQ, in that order. Off by default, and one switch turns all four off at once for a quick A/B.
+- Mono sums both sides, for one earbud or a speaker in the next room. Width goes from 0% (mono) through 100% (untouched) to 200%, by turning the side signal down or up.
+- Crossfeed is for headphones: each ear gets a low-passed share of the other side, and loses the same share of its own, the way bs2b does it. A sound in the middle comes out exactly as it went in; only bass panned hard to one side gets pulled toward the middle. Light, Medium and Strong.
+- Balance turns the far side down and never turns anything up, so it can't clip.
+- Every control glides over 15 ms, so moving one while music plays never clicks. Off passes the sound through bit for bit. They're stereo only: a 5.1 song goes through untouched. The limiter looks ahead through a copy of them, so a width past 100% is caught early, like an EQ boost. Bit-perfect skips them, and Auto bit-perfect counts them as changing the sound.
+
+**Media keys, the panel and the tray**
+- Both apps offer MPRIS2 on the session bus (`org.mpris.MediaPlayer2.patinaplayer`), which is what Plasma's media widget, GNOME's media controls, the keyboard's media keys and `playerctl` all talk to. Play, pause, next, back, seeking, the position slider, volume, shuffle and repeat all work from there, and the widget shows the title, artist, album, length and cover.
+- Server songs show their cover too (fetched once, then cached). Radio shows the stream's "Artist - Title" as the song, with the station as the album.
+- The desktop app puts an icon in the system tray (a StatusNotifierItem, what Plasma's tray uses). Click it to show or hide the window, middle-click to play or pause, right-click for play, next, back, show and quit. The icon carries a small play or pause mark, and its tooltip says what's playing.
+- Closing the window hides it to the tray and the music keeps going. Settings, Desktop has a switch for people who want close to mean quit, and one for the tray icon itself. `Ctrl+Q` always quits. With no tray to hide to (a desktop without one), closing quits.
+- The TUI has no window to raise, so it tells the desktop that, and keeps playing when you detach tmux or screen.
 
 **Output**
 - Click the output on the bottom bar (or press `Ctrl+O` in either app) to pick where the sound goes: every PipeWire output there is, by name, or the ALSA devices when PipeWire isn't running. The song carries on from where it was on the new device. Settings has the same list under Output, Device.
@@ -150,7 +164,7 @@ This is milestone 14 of the build plan: everything from milestones 1 to 13 (the 
 - Dialogs for new and edited stations, subscribing, new and renamed playlists, picking a playlist, and confirming deletes.
 - The keyboard works the same as the TUI for almost everything. `?` lists the keys.
 - The podcast speed chip in the bottom bar cycles 1.0x, 1.2x, 1.5x and 2.0x on click.
-- On a narrow window the queue panel folds away and the bottom bar drops the format badge and output chip, so nothing gets cut off.
+- The window shrinks down to 360 by 420 pixels and steps down as it goes, so nothing gets cut off. Under 1180 pixels wide the bottom bar drops the format badge and output chip. Under 1000 the sidebar folds to icons (hover one for its name) and only one side panel opens at a time. Under 820 the bottom bar takes two rows (the song and controls, then the transport across the whole width) and a view's buttons move under its title. Under 600 the sidebar becomes a drawer behind the menu button, and the queue and lyrics panels cover the view. On a short window the album header gets smaller, and when the header, EQ or amp panel and some of the list still don't fit, the whole view scrolls; the list keeps at least a few rows of its own.
 - Inter, Noto Serif and JetBrains Mono are bundled, so it looks the same on any system.
 
 **Themes**
@@ -417,6 +431,17 @@ trim_out = -1.5
 [lyrics]
 online = false           # ask LRCLIB when nothing local or on the server has them
 
+[channel]
+on = false               # mono, width, crossfeed and balance, after the EQ
+mono = false
+width = 100              # percent: 0 is mono, 200 the widest
+crossfeed = "off"        # off, light, medium or strong
+balance = 0              # -100 (left only) to 100 (right only)
+
+[desktop]
+tray = true              # the desktop app's tray icon
+close_to_tray = true     # closing the window hides it there and keeps playing
+
 [podcasts]
 feeds = ["https://example.com/feed.xml"]
 speed = 1.0              # 0.5 to 3, podcasts only
@@ -554,7 +579,8 @@ crates/
     src/cache/          the song cache: downloads, reading a song while it downloads, prefetch, pins, eviction
     src/mix.rs          genre, artist and track mixes, and who's similar
     src/level/          leveling: picking the gain, EBU R128 measuring, the live normalizer, the measuring thread
-    src/dsp/            the real-time stages: biquad filters, the EQ as it runs, the true-peak limiter, the resampler
+    src/dsp/            the real-time stages: biquad filters, the EQ as it runs, the channel tools, the true-peak limiter, the resampler
+    src/mpris.rs        MPRIS2 on the session bus, for media keys and the desktop's media controls
     src/dsp/amp/        the amp stack as it runs: the oversampler and the nine devices
     src/amp.rs          the amp stack as you set it: devices, knobs, presets, files
     src/eq/             the EQ as you set it: graphic and parametric bands, presets, AutoEq and APO import
@@ -616,16 +642,19 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 
 ## Known gaps in this milestone
 
-- Podcasts and stations have no art yet. Podcast feed images and station logos come later, cover art for tracks works now.
+- Podcasts and stations have no art. Cover art for songs works everywhere, MPRIS included.
+- MPRIS was tested here against a private D-Bus with the calls Plasma's widget and `playerctl` make (play, pause, next, the position slider, loop, shuffle, volume, raise, quit) and the change signals they listen for. The tray was tested against a stand-in StatusNotifierWatcher on the same bus: it registers, its tooltip and icon follow the player, click hides and shows the window, and the close button hides to it. Neither has met a real Plasma panel from this box.
+- MPRIS reports a playback rate of 1.0 even when a podcast plays sped up, and doesn't offer to change it, since speed is a podcast-only setting here.
+- With both apps running, the second one to start takes `org.mpris.MediaPlayer2.patinaplayer.instance<pid>`, as the spec asks, so both show in the media widget.
+- A command line flag like `--backend` overrides the file for that run only. Its Settings row shows the file's value and says which flag is in charge, "Output (--backend null this run)".
+- Crossfeed is a simple one-pole crossfeed in the bs2b style, not a measured head model. Width and balance work on the left and right channels only; anything with more than two channels passes the channel tools untouched.
 - Bit-perfect was checked bit for bit here through ALSA's file plugin, at 16/44.1 and 24/96, and the PipeWire hand-off was checked against a stand-in on a private D-Bus. It hasn't touched a real DAC or a real PipeWire from this box. CI also tries a real ALSA kernel driver (snd-aloop) when the runner can load it.
 - In bit-perfect mode, going between tracks of different formats (16/44.1 into 24/96) closes and reopens the card, so there's a short gap. Same-format tracks are gapless as always.
 - The Browse folder picker goes through the desktop portal (xdg-desktop-portal), which Plasma, GNOME and most desktops run. Without it, Browse says so and Type a path still works.
-- Command line flags like `--backend` still override the file for one run, but Settings shows the file's values, not the override.
-- No tray icon and no MPRIS media keys yet. Those are milestone 15.
 - The kawaii fonts are bundled as subsets (Latin, kana and symbols), which saves about 3 MB per weight. Kanji in your own tags still show through your system's Japanese font, so a Japanese title can mix two typefaces. With no Japanese font installed at all, kanji show as boxes in every theme, the same as before.
 - The themes were checked under X11 (Xvfb) here, at full width and narrow, like the rest of the desktop app.
 - The AppImage build was run end to end on Ubuntu 24.04 here, the same system as the GitHub runner, but the workflow itself hasn't run on GitHub yet. The first tagged run is the real test.
-- The desktop app was checked under X11 (Xvfb) here, not on a real Plasma Wayland session. Slint supports Wayland natively, so it should be fine, but that's untested from this box.
+- The desktop app was checked under X11 (Xvfb) here, not on a real Plasma Wayland session. Slint supports Wayland natively, so it should be fine, but that's untested from this box. The size tiers were checked at 1360, 1100, 900, 700, 400 and 360 pixels wide and down to 420 high.
 - Between albums at different rates (with the rate on Match), the output reopens at the new rate and there's a short gap. That's on purpose: each album plays at its own rate. Set a fixed rate if you'd rather never have the gap.
 - A change to crossfade applies from the next song on, since the end of the song playing is already decided. Rate, resampler, format and dither changes reopen the output at once, from where it was.
 - The 24-bit ALSA format is S24_LE, 24 bits in a 32-bit word. Devices that only take packed 3-byte 24-bit get 32-bit or 16-bit from Auto instead.
@@ -634,15 +663,12 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - An artist starred here is starred on the first server that has their songs. DLNA servers have no ratings or stars, so their songs and albums keep theirs here only.
 - Ampache has no lyrics call, so lyrics for Ampache songs come from the cached file's tags or LRCLIB.
 - LRCLIB was tested against a stand-in answering its API, not the real site, which this box can't reach.
-- With lyrics open, the stars, the badges and the output chip all share the bottom bar, and on a window under about 1400 pixels the song title gets short. Making the window shrink properly is the milestone 15 fix.
 - The amp stack costs CPU: on this box (a 2.8 GHz Xeon core) Warm Glow at 4x takes about 4% of one core at 44.1 kHz, and all nine devices at once about 14%. At 8x, double that. A 192 kHz song gets 4x at most, since the devices stop at 768 kHz.
 - The limiter's look ahead sees the amp stack only by its trims, since the stack's state can't be borrowed for a preview. A peak the stack makes itself (an exciter at full, say) is still held under the ceiling, with a shorter ramp.
 - The stack delays the sound by 48 frames (1 ms at 48 kHz) while it's on. Switching it on or off crossfades against the undelayed sound, which is a 20 ms smear, never a click.
-- Moving a device along the chain while music plays switches the order at once, which can tick on a loud passage.
 - Crossfade needs the two songs at the same channel layout. A stereo song into a 5.1 one plays out the stereo song in full, then starts the next.
 - Built from source the normal way, both binaries link your system's FFmpeg, PipeWire and ALSA. The AppImage links its own FFmpeg in.
 - Graphic bands are peak filters, and neighbours overlap, so two adjacent bands at +6 dB make a bump a little over 6 dB between them. The curve shows what you get. Imports fitted to the 31-band EQ come within about a dB of the AutoEq curve in the tests, and a curve past ±12 dB stops at 12.
-- The EQ's filters are recalculated on every change and keep their memory, without a crossfade between old and new settings. A very fast drag of a big boost can make a faint zipper sound while you drag. Bypass and on do crossfade.
 - Per-device EQ was tested here against a real PipeWire 1.0 with two stand-in outputs (null sinks), switching the default between them, and the CI runs the same. It hasn't met real headphones, Bluetooth or HDMI outputs from this box. Bluetooth headsets that change profile (A2DP to headset mode) show up as a different device, so they'd want an EQ each.
 - The limiter's oversampling uses an 8-tap interpolator. Peaks between samples are caught to within a few tenths of a dB at the very top of the audio band; the samples themselves never go over the ceiling.
 - The GUI's Import button uses the desktop's file picker. Without one (no xdg-desktop-portal), it asks for the file's path instead.
@@ -674,7 +700,6 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - Radio scrobbling was tested on its title parsing ("Artist - Title" in, anything else ignored), not end to end against a live station.
 - Ampache gets finished plays through its `record_play` call, which needs Ampache 5 or later; it has no Now Playing. DLNA servers can't be told about plays at all.
 - Server songs that aren't kept only play while the server can be reached.
-- No ratings, lyrics or Favorites yet, and starring isn't synced. Those are milestone 14.
 - Folders for a server follow the paths the server reports. Navidrome makes those up from the tags (Artist/Album/01 - Title.flac) unless its `Subsonic.DefaultReportRealPath` option is on, so a Navidrome folder tree looks like that. Gonic reports the real paths. Ampache's are made relative to its catalog folder.
 - A tag edit on the server that leaves an album's song count, length and dates the same isn't seen by the half-hourly sync. Sync now in Settings reads every album and catches it.
 - Navidrome doesn't do podcasts, so its Podcasts view stays your own feeds. Gonic, Airsonic and Ampache share theirs. Only episodes the server has already downloaded are listed.
@@ -689,4 +714,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono, M PLUS Rounded 1c, Zen Maru Gothic) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/`.
 
-Now PatinaPlayer plays your servers and folders through a cache that downloads ahead and holds what you've pinned, makes genre mixes and endless artist and track mixes out of all of it, and everything is working as it should be.
+Now PatinaPlayer plays your servers and folders through a cache that downloads ahead and holds what you've pinned, answers your media keys and your panel's media controls, sits in the tray while it plays, fits whatever size window you give it, and everything is working as it should be.

@@ -4714,6 +4714,8 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "env_logger",
+ "image",
+ "ksni",
  "log",
  "patina-core",
  "rfd",

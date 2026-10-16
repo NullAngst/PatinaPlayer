@@ -1972,6 +1972,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "l",
             "Love the song playing (Last.fm, and a star on its server if set)",
         ),
+        (
+            "Media keys",
+            "Work through MPRIS, as does the desktop's media widget",
+        ),
         ("Ctrl+Q", "Quit"),
     ];
     let r = popup(area, 84, KEYS.len() as u16 + 2);

@@ -441,3 +441,101 @@ fn pipewire_follows_the_default_sink() {
     set_default("speakers");
     assert_eq!(wait("speakers").name, "Test speakers");
 }
+
+/// Play a file with these settings (leveling off, unity volume) and
+/// capture it.
+fn play_cfg(path: &Path, cfg: PlayerConfig) -> Vec<f64> {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let cap = capture.clone();
+    let factory: OutputFactory =
+        Box::new(move |_, r| Ok(Box::new(NullOutput::start(r, Some(cap.clone())))));
+    let player = Player::spawn_with(
+        PlayerConfig {
+            volume: 1.0,
+            fade_ms: 0,
+            leveling: LevelConfig {
+                mode: LevelMode::Off,
+                ..Default::default()
+            },
+            ..cfg
+        },
+        Hooks {
+            output: Some(factory),
+            ..Default::default()
+        },
+    );
+    player.send(Command::SetQueue {
+        paths: vec![path.to_path_buf()],
+        start: 0,
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match player.events().recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Finished) => break,
+            Ok(Event::Error(e)) => panic!("player error: {e}"),
+            _ => {}
+        }
+        assert!(Instant::now() < deadline, "playback never finished");
+    }
+    player.send(Command::Quit);
+    capture.lock().unwrap().clone()
+}
+
+fn peak_ch(buf: &[f64], c: usize, from_s: f64, to_s: f64) -> f64 {
+    let a = (from_s * RATE as f64) as usize;
+    let b = ((to_s * RATE as f64) as usize).min(buf.len() / 2);
+    buf[a * 2..b * 2]
+        .chunks_exact(2)
+        .fold(0.0f64, |m, f| m.max(f[c].abs()))
+}
+
+#[test]
+fn channel_tools_shape_what_plays_and_save() {
+    use patina_core::dsp::channel::{ChannelParams, Crossfeed};
+    let f = fx();
+    // Full right: the left goes quiet, the right is untouched.
+    let orig = play_cfg(&f.song, PlayerConfig::default());
+    let out = play_cfg(
+        &f.song,
+        PlayerConfig {
+            channel: ChannelParams {
+                on: true,
+                balance: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.len(), orig.len());
+    assert!(peak_ch(&out, 0, 0.2, 0.9) < 1e-6);
+    let r = peak_ch(&out, 1, 0.2, 0.9) / peak_ch(&orig, 1, 0.2, 0.9);
+    assert!((r - 1.0).abs() < 1e-6, "{r}");
+    // Off: sample for sample.
+    let off = play_cfg(
+        &f.song,
+        PlayerConfig {
+            channel: ChannelParams {
+                on: false,
+                mono: true,
+                balance: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    assert_eq!(off, orig);
+
+    // From Settings, saved to config.toml.
+    let mut b = browser(&f, Config::default());
+    b.change_setting(&Key::ChannelOn, Change::Toggle);
+    b.change_setting(&Key::ChannelBalance, Change::Set("-30".into()));
+    b.change_setting(&Key::ChannelCrossfeed, Change::Choose(2));
+    b.change_setting(&Key::ChannelWidth, Change::Step(-1));
+    let text = std::fs::read_to_string(&f.config).unwrap();
+    assert!(text.contains("[channel]"), "{text}");
+    let c = Config::parse(&text, &f.config).unwrap();
+    assert!(c.channel.on);
+    assert_eq!(c.channel.balance, -30);
+    assert_eq!(c.channel.crossfeed, Crossfeed::Medium);
+    assert_eq!(c.channel.width, 90);
+}

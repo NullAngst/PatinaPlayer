@@ -53,6 +53,28 @@ pub struct Session {
     pub playing_files: bool,
 }
 
+/// The command-line flags that set something Settings also shows.
+fn overrides(opts: &Options) -> Vec<(crate::browse::Key, String)> {
+    use crate::browse::Key;
+    let mut v = Vec::new();
+    if let Some(b) = opts.backend {
+        v.push((Key::Backend, format!("--backend {}", b.as_str())));
+    }
+    if let Some(d) = &opts.device {
+        v.push((Key::Device, format!("--device {d}")));
+    }
+    if let Some(ms) = opts.buffer_ms {
+        v.push((Key::BufferMs, format!("--buffer-ms {ms}")));
+    }
+    if let Some(vol) = opts.volume {
+        v.push((Key::StartVolume, format!("--volume {vol}")));
+    }
+    if let Some(ms) = opts.fade_ms {
+        v.push((Key::FadeMs, format!("--fade-ms {ms}")));
+    }
+    v
+}
+
 impl Session {
     pub fn open(opts: Options) -> Result<Self, SessionError> {
         let config_path = opts.config.clone().unwrap_or_else(config::config_path);
@@ -132,6 +154,7 @@ impl Session {
                 leveling: cfg.leveling.clone(),
                 eq: cfg.eq.settings.params(),
                 amp: cfg.amp.settings.params(),
+                channel: cfg.channel.params(),
                 limiter_on: cfg.limiter.on,
                 limiter_ceiling_db: cfg.limiter.ceiling_db,
             },
@@ -246,6 +269,7 @@ impl Session {
                 cache_dir: crate::cache::cache_root(),
                 pinned_dir: crate::cache::offline_root(),
                 no_library: opts.no_library,
+                overrides: overrides(&opts),
             },
         });
         Ok(Self {

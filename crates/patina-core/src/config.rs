@@ -101,6 +101,62 @@ pub struct Config {
     pub amp: crate::amp::AmpConfig,
     pub limiter: LimiterConfig,
     pub lyrics: LyricsConfig,
+    pub channel: ChannelConfig,
+    pub desktop: DesktopConfig,
+}
+
+/// Channel tools: mono, width, crossfeed, balance. Off until turned on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelConfig {
+    pub on: bool,
+    pub mono: bool,
+    /// Stereo width in percent: 0 is mono, 100 untouched, 200 the widest.
+    pub width: u32,
+    pub crossfeed: crate::dsp::channel::Crossfeed,
+    /// -100 (left only) to 100 (right only).
+    pub balance: i32,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            on: false,
+            mono: false,
+            width: 100,
+            crossfeed: crate::dsp::channel::Crossfeed::Off,
+            balance: 0,
+        }
+    }
+}
+
+impl ChannelConfig {
+    pub fn params(&self) -> crate::dsp::channel::ChannelParams {
+        crate::dsp::channel::ChannelParams {
+            on: self.on,
+            mono: self.mono,
+            width: self.width.min(200) as f64 / 100.0,
+            crossfeed: self.crossfeed,
+            balance: self.balance.clamp(-100, 100) as f64 / 100.0,
+        }
+    }
+}
+
+/// The desktop app's tray icon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DesktopConfig {
+    /// Show an icon in the system tray.
+    pub tray: bool,
+    /// Closing the window hides it to the tray and keeps playing.
+    pub close_to_tray: bool,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            tray: true,
+            close_to_tray: true,
+        }
+    }
 }
 
 /// Where lyrics may be looked up.
@@ -371,6 +427,8 @@ impl Default for Config {
             amp: crate::amp::AmpConfig::default(),
             limiter: LimiterConfig::default(),
             lyrics: LyricsConfig::default(),
+            channel: ChannelConfig::default(),
+            desktop: DesktopConfig::default(),
         }
     }
 }
@@ -395,6 +453,25 @@ struct RawConfig {
     amp: Option<toml::Value>,
     limiter: Option<RawLimiter>,
     lyrics: Option<RawLyrics>,
+    channel: Option<RawChannel>,
+    desktop: Option<RawDesktop>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawChannel {
+    on: Option<bool>,
+    mono: Option<bool>,
+    width: Option<u32>,
+    crossfeed: Option<String>,
+    balance: Option<i32>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawDesktop {
+    tray: Option<bool>,
+    close_to_tray: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -691,6 +768,29 @@ impl Config {
                 .map_err(|e: toml::de::Error| parse_err(format!("amp: {}", e.message())))?,
             None => crate::amp::AmpConfig::default(),
         };
+        let rch = raw.channel.unwrap_or_default();
+        let channel = ChannelConfig {
+            on: rch.on.unwrap_or(false),
+            mono: rch.mono.unwrap_or(false),
+            width: rch.width.unwrap_or(100).min(200),
+            crossfeed: match rch.crossfeed.as_deref() {
+                Some(c) => {
+                    crate::dsp::channel::Crossfeed::parse(c).ok_or_else(|| ConfigError::Parse {
+                        path: path.to_path_buf(),
+                        msg: format!(
+                            "channel.crossfeed: unknown \"{c}\" (off, light, medium, strong)"
+                        ),
+                    })?
+                }
+                None => crate::dsp::channel::Crossfeed::Off,
+            },
+            balance: rch.balance.unwrap_or(0).clamp(-100, 100),
+        };
+        let rdesk = raw.desktop.unwrap_or_default();
+        let desktop = DesktopConfig {
+            tray: rdesk.tray.unwrap_or(true),
+            close_to_tray: rdesk.close_to_tray.unwrap_or(true),
+        };
         let rlim = raw.limiter.unwrap_or_default();
         let limiter = LimiterConfig {
             on: rlim.on.unwrap_or(true),
@@ -812,6 +912,8 @@ impl Config {
             lyrics: LyricsConfig {
                 online: raw.lyrics.unwrap_or_default().online.unwrap_or(false),
             },
+            channel,
+            desktop,
         })
     }
 
@@ -886,6 +988,25 @@ dither = true
 # Crossfade between songs in milliseconds, 0 (off) to 12000. Never between
 # songs that follow on from each other on the same album.
 crossfade_ms = 0
+
+[channel]
+# Channel tools, after the EQ. Off until on = true.
+on = false
+# Sum to mono.
+mono = false
+# Stereo width in percent: 0 is mono, 100 untouched, 200 the widest.
+width = 100
+# Headphone crossfeed: off, light, medium or strong.
+crossfeed = "off"
+# Balance: -100 (left only) to 100 (right only).
+balance = 0
+
+[desktop]
+# The desktop app's icon in the system tray.
+tray = true
+# Closing the window hides it to the tray and keeps playing. Quit from the
+# tray menu, or with Ctrl+Q.
+close_to_tray = true
 
 [lyrics]
 # Ask LRCLIB (lrclib.net) for lyrics the song, its folder and its server
@@ -1425,6 +1546,28 @@ mod tests {
         assert_eq!(c.output.rate, 0);
         assert!(Config::parse("[output]\nrate = \"fast\"\n", Path::new("x")).is_err());
         assert!(Config::parse("[output]\nrate = 12\n", Path::new("x")).is_err());
+    }
+
+    #[test]
+    fn channel_and_desktop_parse() {
+        let c = Config::parse(
+            "[channel]\non = true\nwidth = 250\ncrossfeed = \"Strong\"\nbalance = -120\n[desktop]\nclose_to_tray = false\n",
+            Path::new("x"),
+        )
+        .unwrap();
+        assert!(c.channel.on);
+        assert_eq!(c.channel.width, 200, "clamped");
+        assert_eq!(c.channel.crossfeed, crate::dsp::channel::Crossfeed::Strong);
+        assert_eq!(c.channel.balance, -100);
+        let p = c.channel.params();
+        assert_eq!(p.width, 2.0);
+        assert_eq!(p.balance, -1.0);
+        assert!(c.desktop.tray);
+        assert!(!c.desktop.close_to_tray);
+        let d = Config::parse("", Path::new("x")).unwrap();
+        assert!(!d.channel.params().changes_sound());
+        assert!(d.desktop.close_to_tray);
+        assert!(Config::parse("[channel]\ncrossfeed = \"loud\"\n", Path::new("x")).is_err());
     }
 
     #[test]

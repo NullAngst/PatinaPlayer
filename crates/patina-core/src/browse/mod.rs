@@ -1543,6 +1543,22 @@ impl Browser {
                 ) => self.change_lastfm_setting(key, &new)?,
                 (Key::Limiter | Key::LimiterCeiling, _) => self.change_limiter(key, &new)?,
                 (
+                    Key::ChannelOn
+                    | Key::ChannelMono
+                    | Key::ChannelWidth
+                    | Key::ChannelCrossfeed
+                    | Key::ChannelBalance,
+                    _,
+                ) => self.change_channel(key, &new)?,
+                (Key::Tray, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "desktop", "tray", *on))?;
+                    self.config.desktop.tray = *on;
+                }
+                (Key::CloseToTray, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "desktop", "close_to_tray", *on))?;
+                    self.config.desktop.close_to_tray = *on;
+                }
+                (
                     Key::LevelMode
                     | Key::LevelTarget
                     | Key::LevelFallback
