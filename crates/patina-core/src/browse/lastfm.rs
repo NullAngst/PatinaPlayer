@@ -274,6 +274,7 @@ impl Browser {
                     if let Some(lib) = &self.lib {
                         let _ = lib.set_loved(&artist, &track, on);
                     }
+                    self.refresh_section(super::Section::Playlists);
                     let cur = self.player.snapshot().track;
                     if cur.is_some_and(|t| {
                         t.artist
@@ -307,18 +308,45 @@ impl Browser {
             return self.note("This song has no artist or title to love it by");
         };
         let on = !self.loved_now.unwrap_or(false);
-        if let Some(lib) = &self.lib
-            && let Err(e) = lib.set_loved(&artist, &title, on)
-        {
-            return self.error(e.to_string());
+        if self.set_love(&artist, &title, info.remote.clone(), on) {
+            self.note(if on { "Loved" } else { "Not loved any more" });
         }
-        self.loved_now = Some(on);
-        self.love_by_hand = true;
+    }
+
+    /// Heart or unheart a song anywhere it shows: the library (and so
+    /// Hearted songs), Last.fm when linked, the server's star when that's
+    /// on, and the bottom bar's heart when it's the song playing. False if
+    /// the library wouldn't take it.
+    pub(super) fn set_love(
+        &mut self,
+        artist: &str,
+        title: &str,
+        remote: Option<crate::remote::RemoteRef>,
+        on: bool,
+    ) -> bool {
+        if let Some(lib) = &self.lib
+            && let Err(e) = lib.set_loved(artist, title, on)
+        {
+            self.error(e.to_string());
+            return false;
+        }
+        let playing = self.player.snapshot().track.is_some_and(|t| {
+            t.artist
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(artist))
+                && t.title
+                    .as_deref()
+                    .is_some_and(|x| x.eq_ignore_ascii_case(title))
+        });
+        if playing {
+            self.loved_now = Some(on);
+            self.love_by_hand = true;
+        }
         if let Some(svc) = self.scrobble.as_ref().filter(|_| self.linked()) {
-            svc.love(&artist, &title, on);
+            svc.love(artist, title, on);
         }
         if self.config.lastfm.love_stars
-            && let Some(r) = info.remote.clone()
+            && let Some(r) = remote
         {
             std::thread::spawn(move || {
                 let res = crate::remote::registry()
@@ -329,8 +357,30 @@ impl Browser {
                 }
             });
         }
-        self.note(if on { "Loved" } else { "Not loved any more" });
+        self.refresh_section(super::Section::Playlists);
         self.touch();
+        true
+    }
+
+    /// In Hearted songs: removing a song unhearts it. Its order is the
+    /// order you hearted in, so there's nothing to move.
+    pub(super) fn edit_hearted(&mut self, remove: bool) {
+        if !remove {
+            return self.note("Hearted songs is in the order you hearted them");
+        }
+        let Some(super::Item::Track(t)) = self.selected_item() else {
+            return;
+        };
+        let (Some(artist), title) = (t.artist.clone(), t.title.clone()) else {
+            return self.note("This song has no artist to unheart it by");
+        };
+        let sel = self.level().map(|l| l.selected).unwrap_or(0);
+        if self.set_love(&artist, &title, t.remote(), false) {
+            self.note(format!("Unhearted {title}"));
+            if let Some(l) = self.level_mut() {
+                l.selected = l.snap(sel, -1);
+            }
+        }
     }
 
     // ----- Settings -----

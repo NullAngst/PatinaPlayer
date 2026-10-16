@@ -25,7 +25,9 @@ use crate::audio::output::BitPerfect;
 use crate::audio::output::exclusive::{self, HwDevice};
 use crate::config::{self, Config, Station};
 use crate::library::podcasts::EpisodeRow;
-use crate::library::{ArtistMode, LibEvent, Library, LibraryService, PlaylistRow, TrackRow};
+use crate::library::{
+    ArtistMode, HEARTED, LibEvent, Library, LibraryService, PlaylistRow, TrackRow,
+};
 use crate::podcast::{PodEvent, PodcastService};
 use crate::remote::{RemoteService, ServerState, ServerStatus};
 use crate::{Command, Event, Player, TrackInfo};
@@ -636,6 +638,16 @@ impl Browser {
             .and_then(|s| s.last_mut())
     }
 
+    /// The open level, to move its selection. Unlike [`Self::level_mut`]
+    /// this doesn't count as a change: a new selection is not new rows, and
+    /// the GUI rebuilding every row on each click made big lists stall.
+    /// Frontends show the selection from [`Level::selected`] themselves.
+    fn level_sel(&mut self) -> Option<&mut Level> {
+        self.stacks
+            .get_mut(&self.section)
+            .and_then(|s| s.last_mut())
+    }
+
     pub fn depth(&self) -> usize {
         self.stacks.get(&self.section).map(|s| s.len()).unwrap_or(0)
     }
@@ -774,7 +786,7 @@ impl Browser {
 
     /// Select a row by index, if it can be selected.
     pub fn select(&mut self, index: usize) -> bool {
-        if let Some(l) = self.level_mut()
+        if let Some(l) = self.level_sel()
             && index < l.items.len()
             && l.items[index].selectable()
         {
@@ -785,7 +797,7 @@ impl Browser {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        if let Some(l) = self.level_mut() {
+        if let Some(l) = self.level_sel() {
             if l.items.is_empty() {
                 return;
             }
@@ -1030,6 +1042,9 @@ impl Browser {
     /// Add files to an existing playlist. Files already in it are left
     /// out, and the note says so.
     pub fn add_to_playlist(&mut self, id: i64, name: &str, paths: &[PathBuf]) {
+        if id == HEARTED {
+            return self.note("Heart songs while they play to put them in Hearted songs");
+        }
         if let Some(p) = self.playlist_row(id)
             && p.server.is_some()
         {
@@ -1074,6 +1089,9 @@ impl Browser {
         if name.is_empty() {
             return;
         }
+        if id == HEARTED {
+            return self.note("Hearted songs keeps its name");
+        }
         if !self.server_playlist_job(id, |rid| servers::Job::RenamePlaylist {
             id: rid,
             name: name.to_string(),
@@ -1089,6 +1107,9 @@ impl Browser {
     }
 
     pub fn delete_playlist(&mut self, id: i64) {
+        if id == HEARTED {
+            return self.note("Hearted songs is always there; unheart songs to empty it");
+        }
         if !self.server_playlist_job(id, |rid| servers::Job::DeletePlaylist { id: rid }) {
             return;
         }
@@ -1115,6 +1136,9 @@ impl Browser {
     /// playlist.
     pub fn edit_playlist(&mut self, remove: bool, delta: isize) {
         let Some(id) = self.in_playlist() else { return };
+        if id == HEARTED {
+            return self.edit_hearted(remove);
+        }
         if self.playlist_row(id).is_some_and(|p| p.readonly) {
             return self.note(
                 "That playlist is someone else's on the server; it can't be changed from here",

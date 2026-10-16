@@ -103,7 +103,9 @@ pub struct EqSettings {
     /// dB, before the bands.
     pub preamp: f64,
     /// Take the largest boost off the preamp too, so the EQ can't push the
-    /// signal into the limiter.
+    /// signal into the limiter. Off by default: with it on, raising a band
+    /// turns everything else down by as much, so a boost sounds quieter
+    /// overall. The limiter catches what a boost would clip.
     pub auto_preamp: bool,
     /// The preset it came from, for showing; empty for your own tweaks.
     pub preset: String,
@@ -118,7 +120,7 @@ impl Default for EqSettings {
             graphic: vec![0.0; 10],
             parametric: Vec::new(),
             preamp: 0.0,
-            auto_preamp: true,
+            auto_preamp: false,
             preset: "Flat".into(),
         }
     }
@@ -362,6 +364,7 @@ mod tests {
         assert!(s.response_at(31.5).abs() < 0.3);
         assert!((s.max_boost() - s.response_at(1000.0)).abs() < 0.2);
         // Auto preamp takes the boost off.
+        s.auto_preamp = true;
         let p = s.params();
         assert!((p.preamp_db + s.max_boost()).abs() < 1e-9);
         s.auto_preamp = false;

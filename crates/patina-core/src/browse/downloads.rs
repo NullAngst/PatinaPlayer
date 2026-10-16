@@ -216,12 +216,7 @@ impl Browser {
                 tracks: 0,
                 plays: 0,
             })),
-            Source::Playlist { id, .. } => lib
-                .playlists()
-                .ok()?
-                .into_iter()
-                .find(|p| p.id == *id)
-                .map(Item::Playlist),
+            Source::Playlist { id, .. } => lib.playlist(*id).ok().flatten().map(Item::Playlist),
             Source::Folder(path) => Some(Item::Dir {
                 path: path.clone(),
                 name: path

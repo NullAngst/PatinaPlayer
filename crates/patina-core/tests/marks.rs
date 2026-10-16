@@ -480,3 +480,87 @@ fn ampache_hears_ratings_and_stars() {
     assert!(s.rated.contains(&("album:7".into(), 4)));
     assert!(s.stars.contains(&("album:7".into(), true)));
 }
+
+#[test]
+fn hearted_songs_is_always_there_and_follows_the_hearts() {
+    use patina_core::library::HEARTED;
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Playlists);
+    let hearted = |b: &Browser| match find(b, |i| matches!(i, Item::Playlist(p) if p.id == HEARTED))
+    {
+        Item::Playlist(p) => p,
+        _ => unreachable!(),
+    };
+    // There before anything is hearted, and empty.
+    let p = hearted(&b);
+    assert_eq!(p.name, "Hearted songs");
+    assert_eq!(p.items, 0);
+
+    // Loves match the tags without case, the way Last.fm keeps them.
+    b.lib
+        .as_ref()
+        .unwrap()
+        .set_loved("NIRVANA", "bleach song 2", true)
+        .unwrap();
+    b.refresh_section(Section::Playlists);
+    assert_eq!(hearted(&b).items, 1);
+
+    // Open it: the hearted song, playable like any playlist.
+    let i = b
+        .level()
+        .unwrap()
+        .items
+        .iter()
+        .position(|i| matches!(i, Item::Playlist(p) if p.id == HEARTED))
+        .unwrap();
+    assert!(b.select(i));
+    b.activate();
+    assert_eq!(b.in_playlist(), Some(HEARTED));
+    let titles: Vec<String> = b
+        .level()
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Track(t) => Some(t.title.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(titles, ["Bleach Song 2"]);
+
+    // It can't be renamed or deleted, and removing a song unhearts it.
+    b.rename_playlist(HEARTED, "Something else");
+    b.delete_playlist(HEARTED);
+    assert!(b.select(0));
+    b.edit_playlist(true, 0);
+    assert!(
+        !b.lib
+            .as_ref()
+            .unwrap()
+            .loved("Nirvana", "Bleach Song 2")
+            .unwrap()
+    );
+    assert!(
+        b.level()
+            .unwrap()
+            .items
+            .iter()
+            .all(|i| !matches!(i, Item::Track(_)))
+    );
+    b.pop();
+    let p = hearted(&b);
+    assert_eq!((p.name.as_str(), p.items), ("Hearted songs", 0));
+}
+
+#[test]
+fn moving_the_selection_is_not_a_change_to_redraw() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Songs);
+    let g = b.generation();
+    assert!(b.select(1));
+    b.move_selection(1);
+    assert_eq!(b.generation(), g);
+    assert_eq!(b.level().unwrap().selected, 2);
+}

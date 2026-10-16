@@ -776,10 +776,12 @@ fn build_library(
             }
         }
         Source::Section(Section::Playlists) => {
-            let rows = lib.playlists().map_err(err)?;
+            // Hearted songs is always there, first.
+            let mut rows = vec![lib.hearted_row().map_err(err)?];
+            rows.extend(lib.playlists().map_err(err)?);
             let mixes = lib.saved_mixes().map_err(err)?;
             let mut items = Vec::new();
-            if !mixes.is_empty() && !rows.is_empty() {
+            if !mixes.is_empty() {
                 items.push(Item::Header("Playlists"));
             }
             items.extend(rows.into_iter().map(Item::Playlist));

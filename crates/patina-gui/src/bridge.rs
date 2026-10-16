@@ -23,9 +23,11 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, Vec
 
 use crate::art::{ArtCache, LARGE, Req, THUMB};
 use crate::desktop::Action;
-use crate::{AmpKnob, AmpUnit, AppWindow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem};
+use crate::platform::{self, Picked, Prompt, PromptEvent, PromptField};
+use crate::{AmpKnob, AmpUnit, AppWindow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem, Ui};
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
+use patina_core::library::HEARTED;
 
 enum Dlg {
     None,
@@ -115,9 +117,22 @@ pub struct State {
     queue_shown: Vec<Range<usize>>,
     /// A native folder picker running on its own thread, and when it was
     /// opened.
-    folder_pick: Option<(crossbeam_channel::Receiver<Option<PathBuf>>, Instant)>,
+    folder_pick: Option<(crossbeam_channel::Receiver<Picked>, Instant)>,
     /// An EQ file being picked to import.
-    eq_pick: Option<(crossbeam_channel::Receiver<Option<PathBuf>>, Instant)>,
+    eq_pick: Option<(crossbeam_channel::Receiver<Picked>, Instant)>,
+    /// The system's text dialog standing in for the window's (Android),
+    /// by its id, and the next id to hand out.
+    prompt_open: Option<u64>,
+    prompt_seq: u64,
+    /// The last one was answered but its text didn't take (a bad path, a
+    /// station with no URL): the next one says why.
+    prompt_retry: bool,
+    /// The system's search box, while it's up.
+    search_prompt: Option<u64>,
+    /// When a row was last opened or played. A click this soon after is
+    /// the second half of a double-click, from the habit of double-clicking:
+    /// it would otherwise open whatever row the new list put under it.
+    last_activate: Option<Instant>,
     /// The theme on screen, so a change in Settings redraws.
     theme: Option<Theme>,
     /// MPRIS and the tray icon.
@@ -273,6 +288,11 @@ impl State {
             queue_shown: Vec::new(),
             folder_pick: None,
             eq_pick: None,
+            prompt_open: None,
+            prompt_seq: 0,
+            prompt_retry: false,
+            search_prompt: None,
+            last_activate: None,
             theme: None,
             desktop,
             back_out: None,
@@ -297,7 +317,7 @@ impl State {
             .map(|t| t.path.clone())
     }
 
-    fn row(&mut self, item: &Item, i: usize, ctx: RowCtx) -> Row {
+    fn row(&self, item: &Item, i: usize, ctx: RowCtx, playing: Option<&std::path::Path>) -> Row {
         let mut r = Row {
             selectable: item.selectable(),
             num: ss((i + 1).to_string()),
@@ -312,7 +332,6 @@ impl State {
         if let Some(k) = patina_core::browse::marks::fav_key(item) {
             r.fav = i32::from(self.fav_keys.contains(&k));
         }
-        let playing = self.playing_path();
         match item {
             Item::Track(t) => {
                 r.kind = 0;
@@ -332,7 +351,7 @@ impl State {
                 } else {
                     t.duration.map(fmt_duration).unwrap_or_default()
                 });
-                r.playing = playing.as_deref() == Some(t.path.as_path());
+                r.playing = playing == Some(t.path.as_path());
             }
             Item::Missing { uri } => {
                 r.kind = 11;
@@ -389,6 +408,7 @@ impl State {
             }
             Item::Playlist(p) => {
                 r.kind = 5;
+                r.fixed = p.id == HEARTED;
                 r.title = ss(&p.name);
                 r.sub = ss(match (&p.server, p.readonly) {
                     (Some(s), true) => format!("on {s}, read-only"),
@@ -750,6 +770,7 @@ impl State {
         }
         ui.set_empty_text(ss(empty));
         ui.set_album_tracks(self.b.in_playlist().is_none());
+        ui.set_hearted_open(self.b.in_playlist() == Some(HEARTED));
         self.sync_eq_panel(ui);
         self.sync_amp_panel(ui);
         ui.set_queue_mix_unsaved(
@@ -768,9 +789,10 @@ impl State {
         let level_changed = key != self.level_key;
         self.level_key = key;
 
+        let empty = Vec::new();
         let (items, selected, title) = match self.b.level() {
-            Some(l) => (l.items.clone(), l.selected as i32, l.title.clone()),
-            None => (Vec::new(), -1, self.b.section.label().to_string()),
+            Some(l) => (&l.items, l.selected as i32, l.title.clone()),
+            None => (&empty, -1, self.b.section.label().to_string()),
         };
         let ctx = match self.b.level().map(|l| &l.source) {
             Some(Source::Album { .. }) => RowCtx::Album,
@@ -780,12 +802,14 @@ impl State {
         // Numbers count within each headed group, so search results read
         // 1, 2, 3 under Songs instead of carrying on from Albums.
         let mut n = 0;
-        self.fav_keys = self
+        let fav_keys = self
             .b
             .favorites()
             .into_iter()
             .map(|f| (f.kind, f.key))
             .collect();
+        self.fav_keys = fav_keys;
+        let playing = self.playing_path();
         let rows: Vec<Row> = items
             .iter()
             .map(|it| {
@@ -794,11 +818,11 @@ impl State {
                 } else {
                     n += 1;
                 }
-                self.row(it, n.max(1) - 1, ctx)
+                self.row(it, n.max(1) - 1, ctx, playing.as_deref())
             })
             .collect();
         // Songs in a list don't show covers; everything else that has one does.
-        self.row_art = items
+        let row_art: Vec<Option<Req>> = items
             .iter()
             .map(|it| match it {
                 Item::Track(_) => None,
@@ -817,7 +841,7 @@ impl State {
                 "Changes are saved to config.toml as you make them".to_string()
             }
             _ if items.is_empty() => String::new(),
-            _ => count_label(&items),
+            _ => count_label(items),
         }));
         ui.set_covers(
             items
@@ -828,7 +852,7 @@ impl State {
         let shown = self.row_ranges(ui, rows.len());
         for r in &shown {
             for i in r.clone() {
-                if let Some(req) = self.row_art[i].clone()
+                if let Some(req) = row_art[i].clone()
                     && let Some(img) = self.art.get(req, THUMB)
                 {
                     rows[i].art = img;
@@ -837,6 +861,7 @@ impl State {
             }
         }
         self.row_shown = shown;
+        self.row_art = row_art;
         update_rows(&self.rows, rows);
         let sel_ok = items
             .get(selected.max(0) as usize)
@@ -1276,6 +1301,9 @@ impl State {
             }
         }
         self.snap = self.b.player.snapshot();
+        // Answers from the system's text dialogs first, so what they change
+        // shows in this same tick.
+        self.native_prompts(ui);
         self.desktop_tick(ui);
         self.poll_folder_pick();
         self.poll_eq_pick(ui);
@@ -1423,11 +1451,196 @@ impl State {
         }
         self.b.move_selection(delta);
         if let Some(i) = self.selected_index() {
+            ui.set_selected(i as i32);
             ui.invoke_scroll_to(i as i32);
         }
     }
 
-    /// Enter or a double-click. Clearing the cache asks first.
+    /// Select a row the pointer pressed. Only the highlight moves: the rows
+    /// themselves aren't rebuilt, which on a long list took long enough to
+    /// swallow the next click.
+    fn select_row(&mut self, ui: &AppWindow, i: usize) -> bool {
+        if self.b.select(i) {
+            ui.set_selected(i as i32);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A row clicked or tapped: open it or play it.
+    fn activate_row(&mut self, ui: &AppWindow, i: usize) {
+        let now = Instant::now();
+        if self
+            .last_activate
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(400))
+        {
+            return;
+        }
+        if self.select_row(ui, i) {
+            self.last_activate = Some(now);
+            if self.b.selected_setting().is_none() {
+                self.activate_in(ui);
+            }
+        }
+    }
+
+    /// The search box's text changed.
+    fn search_typed(&mut self, ui: &AppWindow, t: &str) {
+        if ui.get_search_text().as_str() != t {
+            ui.set_search_text(ss(t));
+        }
+        if t.trim().is_empty() {
+            if self.b.in_search() {
+                self.b.set_search("");
+            }
+        } else {
+            if !self.b.in_search() {
+                self.b.start_search();
+            }
+            self.b.set_search(t);
+        }
+    }
+
+    /// Search dropped: the box emptied and the results closed.
+    fn search_cancel(&mut self, ui: &AppWindow) {
+        ui.set_search_text(SharedString::new());
+        if self.b.in_search() {
+            self.b.pop();
+        }
+    }
+
+    /// Android: search in the system's own text box, the results updating
+    /// below it as you type.
+    fn open_search_prompt(&mut self, ui: &AppWindow) {
+        let Some(h) = platform::hooks() else { return };
+        if self.search_prompt.is_some() {
+            return;
+        }
+        self.prompt_seq += 1;
+        let id = self.prompt_seq;
+        let p = Prompt {
+            title: "Search".into(),
+            fields: vec![PromptField {
+                label: "Artists, albums, songs".into(),
+                value: ui.get_search_text().to_string(),
+                secret: false,
+            }],
+            ok: "Done".into(),
+            live: true,
+            light: ui.global::<P>().get_light(),
+            ..Default::default()
+        };
+        if h.prompt(id, &p) {
+            self.search_prompt = Some(id);
+        }
+    }
+
+    /// Android: answers from the system's text dialogs, and the window's
+    /// text dialog shown as one of them whenever it opens.
+    fn native_prompts(&mut self, ui: &AppWindow) {
+        if !ui.get_native_text() {
+            return;
+        }
+        let Some(h) = platform::hooks() else { return };
+        for (id, ev) in platform::take_prompt_events() {
+            if Some(id) == self.search_prompt {
+                match ev {
+                    PromptEvent::Edited { text, .. } => self.search_typed(ui, &text),
+                    PromptEvent::Done(Some(v)) => {
+                        self.search_prompt = None;
+                        let t = v.into_iter().next().unwrap_or_default();
+                        self.search_typed(ui, &t);
+                    }
+                    PromptEvent::Done(None) => {
+                        self.search_prompt = None;
+                        self.search_cancel(ui);
+                    }
+                }
+                continue;
+            }
+            if Some(id) != self.prompt_open {
+                continue;
+            }
+            match ev {
+                PromptEvent::Edited { .. } => {}
+                PromptEvent::Done(Some(v)) => {
+                    self.prompt_open = None;
+                    let mut v = v.into_iter();
+                    ui.set_dlg_text1(ss(v.next().unwrap_or_default()));
+                    ui.set_dlg_text2(ss(v.next().unwrap_or_default()));
+                    ui.set_dlg_text3(ss(v.next().unwrap_or_default()));
+                    ui.set_dlg_text4(ss(v.next().unwrap_or_default()));
+                    if ui.get_dialog() == 1 {
+                        self.dlg_accept(ui);
+                        // Still open: what was typed didn't take.
+                        self.prompt_retry = ui.get_dialog() == 1;
+                    }
+                }
+                PromptEvent::Done(None) => {
+                    self.prompt_open = None;
+                    if ui.get_dialog() == 1 {
+                        self.dlg = Dlg::None;
+                        ui.set_dialog(0);
+                        ui.invoke_focus_root();
+                    }
+                }
+            }
+        }
+        if ui.get_dialog() != 1 || self.prompt_open.is_some() {
+            return;
+        }
+        // Whatever an answer just set off is on the toast before the next
+        // dialog reads it.
+        self.notes(ui);
+        let mut fields = vec![PromptField {
+            label: ui.get_dlg_label1().to_string(),
+            value: ui.get_dlg_text1().to_string(),
+            secret: false,
+        }];
+        if ui.get_dlg_two_fields() || ui.get_dlg_four_fields() {
+            fields.push(PromptField {
+                label: ui.get_dlg_label2().to_string(),
+                value: ui.get_dlg_text2().to_string(),
+                secret: false,
+            });
+        }
+        if ui.get_dlg_four_fields() {
+            fields.push(PromptField {
+                label: ui.get_dlg_label3().to_string(),
+                value: ui.get_dlg_text3().to_string(),
+                secret: false,
+            });
+            fields.push(PromptField {
+                label: ui.get_dlg_label4().to_string(),
+                value: ui.get_dlg_text4().to_string(),
+                secret: true,
+            });
+        }
+        let message = if std::mem::take(&mut self.prompt_retry) && ui.get_toast_error() {
+            ui.get_toast().to_string()
+        } else {
+            String::new()
+        };
+        self.prompt_seq += 1;
+        let id = self.prompt_seq;
+        let p = Prompt {
+            title: ui.get_dlg_title().to_string(),
+            message,
+            fields,
+            ok: ui.get_dlg_ok().to_string(),
+            live: false,
+            light: ui.global::<P>().get_light(),
+        };
+        if h.prompt(id, &p) {
+            self.prompt_open = Some(id);
+        } else {
+            // The system couldn't show it: the window's own dialog does.
+            ui.set_native_text(false);
+        }
+    }
+
+    /// Enter or a click. Clearing the cache asks first.
     fn activate_in(&mut self, ui: &AppWindow) {
         if let Some(Item::Action {
             action: ListAction::ClearCache,
@@ -1852,7 +2065,10 @@ impl State {
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.send(pick_folder_dialog());
+            let _ = tx.send(match platform::hooks() {
+                Some(h) => h.pick_folder(),
+                None => pick_folder_dialog(),
+            });
         });
         self.folder_pick = Some((rx, Instant::now()));
     }
@@ -2198,7 +2414,10 @@ impl State {
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.send(pick_eq_dialog());
+            let _ = tx.send(match platform::hooks() {
+                Some(h) => h.pick_eq_file(),
+                None => pick_eq_dialog(),
+            });
         });
         self.eq_pick = Some((rx, Instant::now()));
     }
@@ -2208,12 +2427,13 @@ impl State {
             return;
         };
         let Ok(picked) = rx.try_recv() else { return };
-        let quick = opened.elapsed() < Duration::from_millis(700);
+        // Back that fast from the desktop's picker means none showed up.
+        let quick = opened.elapsed() < Duration::from_millis(700) && platform::hooks().is_none();
         self.eq_pick = None;
         match picked {
-            Some(p) => self.b.eq_import(&p),
-            // Back that fast means no picker showed up: type the path.
-            None if quick => {
+            Picked::Path(p) => self.b.eq_import(&p),
+            Picked::Unavailable(why) => {
+                self.b.note(why);
                 self.dlg = Dlg::EqImportPath;
                 open_text(
                     ui,
@@ -2224,7 +2444,19 @@ impl State {
                     "Import",
                 );
             }
-            None => {}
+            // No picker showed up: type the path.
+            Picked::Cancelled if quick => {
+                self.dlg = Dlg::EqImportPath;
+                open_text(
+                    ui,
+                    "Import an AutoEq or APO file",
+                    "Path to ParametricEQ.txt or GraphicEQ.txt",
+                    "~/",
+                    None,
+                    "Import",
+                );
+            }
+            Picked::Cancelled => {}
         }
     }
 
@@ -2233,17 +2465,18 @@ impl State {
             return;
         };
         let Ok(picked) = rx.try_recv() else { return };
-        let quick = opened.elapsed() < Duration::from_millis(700);
+        let quick = opened.elapsed() < Duration::from_millis(700) && platform::hooks().is_none();
         self.folder_pick = None;
         match picked {
-            Some(p) => {
+            Picked::Path(p) => {
                 self.b.add_folder(&p.to_string_lossy());
             }
+            Picked::Unavailable(why) => self.b.error(why),
             // Back that fast means no dialog ever showed up.
-            None if quick => self
+            Picked::Cancelled if quick => self
                 .b
                 .note("No folder picker is available here. Use \"Type a path\" instead."),
-            None => {}
+            Picked::Cancelled => {}
         }
     }
 
@@ -2781,6 +3014,10 @@ pub fn install(
     } else {
         Section::Folders
     });
+    // A phone: long presses for menus, sliders for the amp's dials.
+    ui.global::<Ui>().set_touch(cfg!(target_os = "android"));
+    // The system's text dialogs, where the platform offers them.
+    ui.set_native_text(platform::hooks().is_some());
     let st = Rc::new(RefCell::new(State::new(b, hide_on_close)));
     {
         let s = st.borrow();
@@ -2820,34 +3057,15 @@ pub fn install(
     on!(on_forward, |s, u| {
         s.b.go_forward();
     });
-    on!(on_search_edited, |s, u, text| {
-        let t = text.to_string();
-        if t.trim().is_empty() {
-            if s.b.in_search() {
-                s.b.set_search("");
-            }
-        } else {
-            if !s.b.in_search() {
-                s.b.start_search();
-            }
-            s.b.set_search(&t);
-        }
-    });
-    on!(on_search_cancel, |s, u| {
-        u.set_search_text(SharedString::new());
-        if s.b.in_search() {
-            s.b.pop();
-        }
-    });
+    on!(on_search_edited, |s, u, text| s
+        .search_typed(&u, text.as_str()));
+    on!(on_search_cancel, |s, u| s.search_cancel(&u));
+    on!(on_search_tapped, |s, u| s.open_search_prompt(&u));
     on!(on_crumb_clicked, |s, u, i| s.b.pop_to(i as usize + 1));
     on!(on_row_select, |s, u, i| {
-        s.b.select(i as usize);
+        s.select_row(&u, i as usize);
     });
-    on!(on_row_activate, |s, u, i| {
-        if s.b.select(i as usize) {
-            s.activate_in(&u);
-        }
-    });
+    on!(on_row_activate, |s, u, i| s.activate_row(&u, i as usize));
     on!(on_eq_point, |s, _u, i, x, g| s
         .eq_point(i as usize, x as f64, g as f64));
     on!(on_eq_chip, |s, _u| s.b.switch(Section::Eq));
@@ -2889,7 +3107,7 @@ pub fn install(
         }
     });
     on!(on_row_act, |s, u, i, a| {
-        s.b.select(i as usize);
+        s.select_row(&u, i as usize);
         s.row_act(&u, a.as_str());
     });
     on!(on_view_action, |s, u, a| s.view_action(&u, a.as_str()));
@@ -2899,6 +3117,13 @@ pub fn install(
         u.set_queue_sel(i);
     });
     on!(on_queue_activate, |s, u, i| {
+        let now = Instant::now();
+        if s.last_activate
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(400))
+        {
+            return;
+        }
+        s.last_activate = Some(now);
         s.b.play_queue_position(i as usize);
         s.follow = true;
     });
@@ -3045,33 +3270,41 @@ fn dial_arc(pos: f64) -> String {
     format!("M {x0:.2} {y0:.2} A 38 38 0 {large} 1 {x:.2} {y:.2}")
 }
 
-/// The desktop's folder picker. None when there isn't one, and the app
-/// asks for a typed path instead.
+/// The desktop's folder picker. Cancelled when there isn't one too (rfd
+/// can't tell them apart); the app then asks for a typed path.
 #[cfg(not(target_os = "android"))]
-fn pick_folder_dialog() -> Option<PathBuf> {
-    rfd::FileDialog::new()
+fn pick_folder_dialog() -> Picked {
+    match rfd::FileDialog::new()
         .set_title("Add a music folder")
         .pick_folder()
+    {
+        Some(p) => Picked::Path(p),
+        None => Picked::Cancelled,
+    }
 }
 
-/// Android: no desktop picker; the music folder is found on its own, and
-/// any other is typed in.
+/// Android picks through the hooks patina-android sets; without them
+/// there's nothing to pick with.
 #[cfg(target_os = "android")]
-fn pick_folder_dialog() -> Option<PathBuf> {
-    None
+fn pick_folder_dialog() -> Picked {
+    Picked::Unavailable("No folder picker is available here. Use \"Type a path\" instead.".into())
 }
 
 #[cfg(not(target_os = "android"))]
-fn pick_eq_dialog() -> Option<PathBuf> {
-    rfd::FileDialog::new()
+fn pick_eq_dialog() -> Picked {
+    match rfd::FileDialog::new()
         .set_title("Import an AutoEq or Equalizer APO file")
         .add_filter("EQ settings", &["txt"])
         .pick_file()
+    {
+        Some(p) => Picked::Path(p),
+        None => Picked::Cancelled,
+    }
 }
 
 #[cfg(target_os = "android")]
-fn pick_eq_dialog() -> Option<PathBuf> {
-    None
+fn pick_eq_dialog() -> Picked {
+    Picked::Unavailable("No file picker is available here.".into())
 }
 
 /// Bring the window back from the tray, or forward from behind others.

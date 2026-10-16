@@ -3,9 +3,10 @@
 //! The window, the views and the player are the desktop app's own, from
 //! `patina-gui` and `patina-core`. What's here is the part only Android
 //! needs: finding folders to keep things in, picking up the music folder
-//! once the permission to read it comes in, AAudio's device list and bit-perfect USB (through the Java
-//! side in `android/java`), and the media session and notification, which
-//! the Java service runs from what this reports.
+//! once the permission to read it comes in, AAudio's device list and
+//! bit-perfect USB (through the Java side in `android/java`), the system's
+//! folder and file pickers and its text dialogs, and the media session and
+//! notification, which the Java service runs from what this reports.
 //!
 //! On anything but Android this crate is empty.
 
@@ -22,6 +23,7 @@ use std::time::Duration;
 use patina_core::session::{Options, Session};
 use patina_core::track::MediaKind;
 use patina_core::{PlayState, Player};
+use patina_gui::platform::{self, Hooks, Picked, Prompt};
 use patina_gui::{AppWindow, bridge};
 use slint::ComponentHandle;
 use slint::android::AndroidApp;
@@ -64,6 +66,9 @@ fn android_main(app: AndroidApp) {
     let player = session.browser.player.clone();
 
     jni_glue::set_player(player.clone());
+    // Folders and files picked through the system's pickers, and text typed
+    // in its own dialogs.
+    platform::set_hooks(Box::new(AndroidHooks));
     patina_core::audio::output::aaudio::set_bit_perfect_hook(Box::new(jni_glue::set_bit_perfect));
 
     let ui = match AppWindow::new() {
@@ -106,6 +111,23 @@ fn android_main(app: AndroidApp) {
     drop(media);
     bridge.shutdown(fade_ms);
     jni_glue::stopped();
+}
+
+/// What the window asks of Android, answered through the Java side.
+struct AndroidHooks;
+
+impl Hooks for AndroidHooks {
+    fn pick_folder(&self) -> Picked {
+        jni_glue::pick_folder()
+    }
+
+    fn pick_eq_file(&self) -> Picked {
+        jni_glue::pick_eq_file()
+    }
+
+    fn prompt(&self, id: u64, p: &Prompt) -> bool {
+        jni_glue::prompt(id, p)
+    }
 }
 
 /// Point the app's folders (config, library, cache) at Android's app

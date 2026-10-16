@@ -736,7 +736,7 @@ pub fn eq_rows(st: &EqState, greyed: bool) -> Vec<(Option<&'static str>, Setting
                 0.0
             }
         ),
-        "Takes the biggest boost off the preamp too, so the EQ can't push the sound into the limiter.",
+        "Takes the biggest boost off the preamp, so the EQ can't push the sound into the limiter. A raised band then makes everything else quieter instead.",
         Control::Toggle(a.auto_preamp),
     );
     let (dev_label, dev_action) = match (&st.device, &st.linked) {

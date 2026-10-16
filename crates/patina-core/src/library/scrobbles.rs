@@ -4,8 +4,22 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use super::{Library, Result, now_secs};
+use super::{Library, PlaylistRow, Result, TrackRow, now_secs};
 use crate::lastfm::Play;
+
+/// The id of Hearted songs, the playlist that's always there. It isn't a
+/// row in the playlists table: it's the loved songs in the library, read
+/// fresh each time, so hearting or unhearting a song is all it takes.
+pub const HEARTED: i64 = -1;
+pub const HEARTED_NAME: &str = "Hearted songs";
+
+/// Each loved song once (the first copy of it, if it's on more than one
+/// album), newest heart first. Loves are kept by artist and title, without
+/// case, the way Last.fm keeps them; the left side of each comparison is
+/// the loves column so its NOCASE collation (and its index) is used.
+const HEARTED_JOIN: &str = "JOIN (SELECT MIN(t.id) AS hid, MAX(l.loved_at) AS hat \
+     FROM tracks t JOIN loves l ON l.artist = t.artist AND l.track = t.title \
+     GROUP BY l.artist, l.track) h ON h.hid = tracks.id";
 
 /// A queued scrobble and its row id.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +95,38 @@ impl Library {
     }
 
     // ----- Loves -----
+
+    /// The songs in Hearted songs, newest heart first.
+    pub fn hearted_tracks(&self) -> Result<Vec<TrackRow>> {
+        self.tracks_where(
+            &format!("{HEARTED_JOIN} ORDER BY h.hat DESC, tracks.id"),
+            [],
+        )
+    }
+
+    /// Hearted songs as the Playlists list shows it.
+    pub fn hearted_row(&self) -> Result<PlaylistRow> {
+        let items: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM tracks t JOIN loves l \
+             ON l.artist = t.artist AND l.track = t.title GROUP BY l.artist, l.track)",
+            [],
+            |r| r.get(0),
+        )?;
+        let updated_at: i64 =
+            self.conn
+                .query_row("SELECT COALESCE(MAX(loved_at), 0) FROM loves", [], |r| {
+                    r.get(0)
+                })?;
+        Ok(PlaylistRow {
+            id: HEARTED,
+            name: HEARTED_NAME.to_string(),
+            items,
+            updated_at,
+            server: None,
+            remote_id: None,
+            readonly: true,
+        })
+    }
 
     pub fn loved(&self, artist: &str, track: &str) -> Result<bool> {
         Ok(self

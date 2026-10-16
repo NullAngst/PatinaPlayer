@@ -50,7 +50,8 @@ This is milestone 16 of the build plan: everything from milestones 1 to 15 (the 
 - Now Playing goes out as a song starts. A song is scrobbled once you've listened to half of it or four minutes, whichever is first, and only if it's longer than 30 seconds: Last.fm's own rules. Seeking ahead doesn't count as listening.
 - Every scrobble goes into the library database first and leaves once Last.fm takes it. Offline, or with Last.fm down, they wait, and go out later in batches of 50, each with the time it was played. Settings shows how many are waiting.
 - If Last.fm stops accepting the session (you revoked the app on the site, say), it says so and the scrobbles wait for you to link again.
-- Love the song playing with `l` or the heart in the bottom bar. It's kept in the library and sent to Last.fm, and when a song starts, Last.fm is asked whether you'd already loved it. Love also stars it on the server, if you turn that on.
+- Love (heart) the song playing with `l` or the heart in the bottom bar, which fills in whenever a hearted song plays. It's kept in the library and sent to Last.fm, and when a song starts, Last.fm is asked whether you'd already loved it. Love also stars it on the server, if you turn that on.
+- Hearted songs is a playlist that's always there, first in Playlists: every hearted song in the library, newest heart first. Play it, queue it or keep it offline like any playlist. Removing a song from it unhearts the song; it can't be renamed or deleted.
 - Who scrobbles a server's songs is set per server (Settings, Servers, `name: scrobbles`): this app (the default), the server, or both. Navidrome and others pass plays on to Last.fm themselves when the player reports them, so if yours does, pick the server, or every play counts twice. Picking both asks first, with that warning. When Last.fm isn't linked here, the server is always told, since nothing can double up, so the server's play counts keep going up.
 - Podcasts never scrobble. Radio can, from the station's song titles ("Artist - Title"), once a title has been on a minute; that's off by default, since station metadata is often junk.
 - A Last.fm API key and secret can be built in: the AppImage workflow takes them from the repository's `LASTFM_KEY` and `LASTFM_SECRET` secrets. Your own (free from last.fm/api/account/create) in Settings win over them. A source build without either needs your own to scrobble.
@@ -60,7 +61,7 @@ This is milestone 16 of the build plan: everything from milestones 1 to 15 (the 
 - Graphic mode: 10 bands an octave apart (31 Hz to 16 kHz), or 15 (two-thirds octaves) or 31 (third octaves), ±12 dB each. Switching between them keeps the curve. In the desktop app, drag a band up or down on the curve; in the TUI, `h` and `l` move the selected band half a dB, or Enter and type a value.
 - Parametric mode: up to 20 bands, each a peak, low shelf, high shelf, low pass, high pass or notch, with its own frequency, gain and Q. Drag a band's dot anywhere on the curve in the desktop app. In the TUI, type a band the way AutoEq writes them (`PK 105 Hz 6.7 dB Q 0.7`, or just `LS 100 4`), `h`/`l` move its gain, `H`/`L` its frequency, `d` removes it.
 - The curve is drawn from the same filter coefficients that play, so where neighbouring bands overlap and add up, you see that too.
-- Preamp, plus an auto preamp (on by default) that takes the biggest boost off, so the EQ can't push the sound into the limiter. The row says how much it's taking off right now.
+- Preamp, plus an auto preamp (off by default) that takes the biggest boost off, so the EQ can't push the sound into the limiter. The row says how much it's taking off right now. With it on, raising a band turns everything else down by as much, so a boost sounds quieter overall; off, a boost is a boost and the limiter catches the peaks. An EQ saved before this change keeps auto preamp on until you switch it off.
 - On and bypassed is one switch (`o` in the TUI, the On chip on the curve) for quick A/B. It glides over 20 ms, so it doesn't click.
 - Presets: Flat and a dozen built-in genre curves as starting points, and your own. Save as keeps what you have under a name, as a TOML file in `~/.config/patinaplayer/presets/eq/`, easy to copy or share. A preset you've changed shows as "Rock (changed)".
 - Import takes an AutoEq ParametricEQ.txt or GraphicEQ.txt, or an Equalizer APO config. Parametric filters come in exactly, with AutoEq's preamp. A GraphicEQ curve (hundreds of points) is fitted to the 31-band graphic EQ. The import becomes a preset named after the file ("Sennheiser HD 650 ParametricEQ.txt" is "Sennheiser HD 650"). Whatever APO does that this EQ can't (per-channel filters, includes) is skipped, and a note says so.
@@ -160,6 +161,7 @@ This is milestone 16 of the build plan: everything from milestones 1 to 15 (the 
 **Desktop app**
 - A Slint window in the dark verdigris look from the mockup (or one of the kawaii themes, below): sidebar of sections and sources, a header with back, forward and search, the open view, an optional queue panel, and the bottom bar with art, transport, seek, format badge, output and volume.
 - Albums, and an artist's or a genre's albums, show as a cover grid. An album opens with a header showing its cover, year, track count and length, and buttons to play, shuffle, queue or add it to a playlist.
+- One click opens a folder, artist, album, genre or playlist, and plays a song, station or episode. A second click right behind it (a double-click out of habit) is ignored, so it doesn't open whatever the new list put under the pointer.
 - Right-click any row for everything you can do with it: play, play next, add to queue, add to a playlist, and per kind edit, test, move or delete stations, unsubscribe, download, mark played, rename or delete playlists.
 - Dialogs for new and edited stations, subscribing, new and renamed playlists, picking a playlist, and confirming deletes.
 - The keyboard works the same as the TUI for almost everything. `?` lists the keys.
@@ -192,7 +194,7 @@ This is milestone 16 of the build plan: everything from milestones 1 to 15 (the 
 
 **Settings**
 - Every option in config.toml can be changed from the Settings view in either app, and is written straight back to the file with your comments kept.
-- Library folders: add one with the desktop's own folder picker (Browse) or by typing a path, and the scan starts right away. Remove one and its tracks leave the index. The files stay where they are.
+- Library folders: add one with the system's own folder picker (Browse; KDE's or GNOME's dialog on the desktop, the Files picker on Android) or by typing a path, and the scan starts right away. Remove one and its tracks leave the index. The files stay where they are.
 - Output, device and buffer changes reopen the output on the spot, and a playing song carries on from where it was. So does switching bit-perfect on or off.
 - In the TUI: Enter flips, cycles or edits; `h` and `l` step a value down or up; `N` adds a folder; `d` removes one.
 
@@ -309,7 +311,11 @@ Installing it:
 
 What it does on a phone:
 
-- Your phone's Music folder (`/storage/emulated/0/Music`) goes in the library on first start. More folders go in under Settings, Library, by typing the path, since there's no folder picker yet.
+- Your phone's Music folder (`/storage/emulated/0/Music`) goes in the library on first start. More folders go in under Settings, Library: Browse opens Android's folder picker, or type the path.
+- Tap opens and plays, a long press opens the menu a right-click opens on the desktop (rows, album tiles, the queue, Favorites).
+- Text is typed in Android's own dialogs (servers, stations, playlists, paths, search), which move clear of the keyboard. Search sits at the top of the screen and the results update under it as you type; Clear drops the search.
+- The amp's dials are sliders on a phone, one row each, since a dial dragged up and down fights the page's scrolling.
+- AutoEq import opens Android's file picker and reads the file from wherever it is.
 - Servers, radio, podcasts, the cache, mixes, Last.fm, the EQ, the amp stack and leveling all work as on the desktop. Everything the app keeps (config, the index, the cache, cover art) lives in its own private storage.
 - Music keeps playing with the screen off. The notification and the lock screen show what's playing with its cover and have back, play/pause and next. Bluetooth headphone buttons and a car's Bluetooth controls go through the same media session. Android Auto isn't supported: it needs the app to offer its library for browsing, which it doesn't yet.
 - Unplugging headphones pauses. A call or a navigation prompt pauses and comes back after; another player starting stops this one.
@@ -672,8 +678,8 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 - The Android app was type-checked and linted here against Android's own API (the Rust side for aarch64-linux-android with its standard library built from source, the Java side against `android.jar`), and the APK assembly, signing and verification were run end to end with stand-ins for the NDK compiler and d8. It hasn't been linked with the real NDK, run on a phone or an emulator, or built by the workflow yet. This box can't reach Google's servers for the SDK. The first tagged run, and the first install, are the real tests.
 - The APK is arm64 only. That's every phone from the last several years; there's no x86_64 build for emulators on a PC.
 - Without the music permission, the Music folder scans as empty, and it's scanned again the moment the permission is granted. If the folder watcher couldn't start then, new files turn up on the next start or with Rescan rather than straight away.
-- There's no folder picker on Android yet. Folders beyond Music go in by typing their path, like `/storage/emulated/0/Download/Albums`. A memory card's path has its own id in it, `/storage/1A2B-3C4D/Music`, which a file manager shows.
-- AutoEq import on Android needs the file's path typed in too, for the same reason.
+- The library scans folders by path, so Android's folder picker is turned back into one. That works for the phone's storage, a memory card (`/storage/1A2B-3C4D/Music`) and Downloads. A folder from a cloud app's provider has no path, and the picker says so; add that music through a server instead.
+- The Java side of the folder picker, the file picker and the text dialogs was compiled here against stand-ins for Android's classes, since this box can't reach Google's servers for `android.jar`. The Rust side of the same JNI calls was type-checked against the `jni` crate. Neither has run on a phone yet.
 - Bit-perfect on Android was written against the Android 14 API documents, not tried on a DAC. What a phone offers depends on its maker: some don't offer bit-perfect mode at all, and then the app says so and plays through the mixer.
 - FFmpeg on Android uses Mbed TLS for HTTPS streams instead of GnuTLS. Like the desktop build, it doesn't check stream certificates. Server, Last.fm and lyrics calls go through the app's own HTTP client, which checks them against Android's system certificates. Certificates you installed yourself on the phone aren't trusted by it, so a server behind a private CA needs plain http on the home network (allowed) or a real certificate.
 - The release workflow is now one workflow, still in `appimage.yml`, named Release: it builds the AppImage and the APK side by side, then makes one release with both. If one build fails, the other still ships.

@@ -2,6 +2,7 @@ package dev.patina.player;
 
 import android.Manifest;
 import android.app.NativeActivity;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -12,8 +13,9 @@ import java.util.List;
 /**
  * The app's one screen. NativeActivity runs the Rust library's
  * android_main, which draws everything with Slint; this subclass adds what
- * the Rust side can't do on its own: asking for permissions, and wiring up
- * the Java helpers before the player starts.
+ * the Rust side can't do on its own: asking for permissions, wiring up the
+ * Java helpers before the player starts, and taking the system pickers'
+ * answers.
  */
 public class MainActivity extends NativeActivity {
     private static final int ASK = 1;
@@ -65,6 +67,14 @@ public class MainActivity extends NativeActivity {
             ? Manifest.permission.READ_MEDIA_AUDIO
             : Manifest.permission.READ_EXTERNAL_STORAGE;
         Native.permissionsDone(checkSelfPermission(audio) == PackageManager.PERMISSION_GRANTED);
+    }
+
+    /** What the system's folder and file pickers came back with. */
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        if (!Picker.onResult(this, request, result, data)) {
+            super.onActivityResult(request, result, data);
+        }
     }
 
     @Override

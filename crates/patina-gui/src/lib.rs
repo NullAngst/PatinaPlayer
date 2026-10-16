@@ -10,3 +10,4 @@ slint::include_modules!();
 mod art;
 pub mod bridge;
 pub mod desktop;
+pub mod platform;

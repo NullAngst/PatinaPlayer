@@ -28,6 +28,10 @@ final class Native {
     static final int STOP = 6;
     static final int SEEK = 7;
 
+    /** What's being picked. Rust has the same numbers. */
+    static final int PICK_FOLDER = 1;
+    static final int PICK_EQ_FILE = 2;
+
     /** Playback state, as Rust reports it. */
     static final int STOPPED = 0;
     static final int PLAYING = 1;
@@ -73,6 +77,18 @@ final class Native {
     /** The output devices there are now. */
     static native void devicesChanged(int[] ids, String[] names, boolean[] usb);
 
+    /**
+     * A pick's answer: the path, or null with why not (error), or null and
+     * null when it was closed without picking.
+     */
+    static native void pickDone(int what, String path, String error);
+
+    /** A text dialog's answer: each field's text, or null for cancel. */
+    static native void promptDone(long id, String[] values);
+
+    /** Search: a field's text as it's being typed. */
+    static native void promptEdited(long id, int field, String text);
+
     // ----- From Rust -----
 
     /** What's playing, for the media session and the notification. */
@@ -103,6 +119,23 @@ final class Native {
     /** The app is closing: take the notification down. */
     static void stopped() {
         main.post(() -> PlaybackService.stop(app));
+    }
+
+    /** Open the system's folder picker; the answer comes to pickDone. */
+    static void pickFolder() {
+        main.post(() -> Picker.start(activity.get(), PICK_FOLDER));
+    }
+
+    /** Open the system's file picker for an EQ file to import. */
+    static void pickFile() {
+        main.post(() -> Picker.start(activity.get(), PICK_EQ_FILE));
+    }
+
+    /** Show a text dialog; the answer comes to promptDone. */
+    static void prompt(long id, String title, String message, String[] labels, String[] values,
+                       boolean[] secret, String ok, boolean live, boolean light) {
+        main.post(() -> Prompts.show(activity.get(), id, title, message, labels, values,
+            secret, ok, live, light));
     }
 
     // ----- Devices -----

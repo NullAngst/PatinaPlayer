@@ -446,12 +446,7 @@ impl Browser {
     // ----- Server playlists -----
 
     pub(super) fn playlist_row(&self, id: i64) -> Option<PlaylistRow> {
-        self.lib
-            .as_ref()?
-            .playlists()
-            .ok()?
-            .into_iter()
-            .find(|p| p.id == id)
+        self.lib.as_ref()?.playlist(id).ok().flatten()
     }
 
     /// Song ids on `server` for these paths, and how many weren't from it.

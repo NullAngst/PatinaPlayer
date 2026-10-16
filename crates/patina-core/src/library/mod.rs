@@ -23,6 +23,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::track::{TrackInfo, natural_cmp};
 
+pub use scrobbles::{HEARTED, HEARTED_NAME};
 pub use service::{LibEvent, LibraryService, ScanStatus};
 
 #[derive(Debug, thiserror::Error)]
@@ -977,6 +978,14 @@ impl Library {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// One playlist by id, Hearted songs included.
+    pub fn playlist(&self, id: i64) -> Result<Option<PlaylistRow>> {
+        if id == scrobbles::HEARTED {
+            return self.hearted_row().map(Some);
+        }
+        Ok(self.playlists()?.into_iter().find(|p| p.id == id))
+    }
+
     pub fn create_playlist(&self, name: &str) -> Result<i64> {
         let now = now_secs();
         self.conn.execute(
@@ -1004,6 +1013,13 @@ impl Library {
     /// back as None, so the view can show them as missing instead of
     /// silently dropping them.
     pub fn playlist_items(&self, id: i64) -> Result<Vec<(Vec<u8>, Option<TrackRow>)>> {
+        if id == scrobbles::HEARTED {
+            return Ok(self
+                .hearted_tracks()?
+                .into_iter()
+                .map(|t| (t.uri(), Some(t)))
+                .collect());
+        }
         let mut st = self
             .conn
             .prepare_cached("SELECT uri FROM playlist_items WHERE playlist_id = ?1 ORDER BY pos")?;

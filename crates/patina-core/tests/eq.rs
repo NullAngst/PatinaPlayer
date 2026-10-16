@@ -237,7 +237,12 @@ fn the_eq_view_edits_saves_and_reloads() {
     }
     assert_eq!(row(&mut b, Key::EqGraphic(5)), "1.5 dB");
     assert_eq!(row(&mut b, Key::EqPreset), "Flat (changed)");
+    // Auto preamp is off to start with, so a boost is louder; on, it takes
+    // the boost back off everything.
+    assert!(label(&mut b, Key::EqAutoPreamp).contains("+0.0 dB now"));
+    b.change_setting(&Key::EqAutoPreamp, Change::Toggle);
     assert!(label(&mut b, Key::EqAutoPreamp).contains("-1.5 dB now"));
+    b.change_setting(&Key::EqAutoPreamp, Change::Toggle);
     // Typed in.
     b.change_setting(&Key::EqGraphic(0), Change::Set("-3".into()));
     assert_eq!(row(&mut b, Key::EqGraphic(0)), "-3.0 dB");

@@ -110,6 +110,21 @@ export global P {
     out property <float> round: kawaii ? 2.3 : 1;
 }
 
+// How the app is being used. Set from Rust at start.
+export global Ui {
+    // A touch screen (Android): long press stands in for right-click, and
+    // controls that drag up and down give way to ones that drag sideways,
+    // which don't fight the view's scrolling.
+    in-out property <bool> touch: false;
+}
+
+// How long a press is held before it counts as a long press.
+global LongPress {
+    out property <duration> after: 450ms;
+    // How far a finger may drift and still be pressing, not scrolling.
+    out property <length> slop: 12px;
+}
+
 // ----- Data from Rust -----
 
 export struct SideItem {
@@ -160,6 +175,8 @@ export struct Row {
     stars: string,
     // Folders, albums and artists: 1 in Favorites, 0 not. -1 elsewhere.
     fav: int,
+    // A playlist that can't be renamed or deleted (Hearted songs).
+    fixed: bool,
 }
 
 export struct QueueRow {
@@ -423,6 +440,11 @@ component Bar inherits Rectangle {
     in property <color> fill: P.verdigris;
     in property <length> knob: 14px;
     in property <string> label;
+    // Show the knob all the time, not just on hover (touch screens have
+    // no hover).
+    in property <bool> show-knob: false;
+    // The mouse wheel moves it (live bars only).
+    in property <bool> wheel: true;
     callback changed(float);
     property <float> drag: 0;
     property <bool> dragging: ta.pressed && enabled;
@@ -451,7 +473,7 @@ component Bar inherits Rectangle {
         size: root.knob + 6px;
         fill: (ta.has-hover || root.dragging) ? P.accent-text : P.verdigris;
     }
-    if enabled && !P.kawaii && (ta.has-hover || dragging): Rectangle {
+    if enabled && !P.kawaii && (ta.has-hover || dragging || show-knob): Rectangle {
         x: parent.width * clamp(root.shown, 0, 1) - root.knob / 2;
         y: (parent.height - root.knob) / 2;
         width: root.knob;
@@ -477,10 +499,50 @@ component Bar inherits Rectangle {
             if root.live { root.changed(root.drag); }
         }
         scroll-event(e) => {
-            if !enabled || !root.live { return reject; }
+            if !enabled || !root.live || !root.wheel { return reject; }
             root.changed(clamp(root.value + (e.delta-y > 0 ? 0.05 : -0.05), 0, 1));
             accept
         }
+    }
+}
+
+// A one-line text input that scrolls sideways with the cursor, the way
+// std-widgets' LineEdit does: a plain TextInput just runs off its edge,
+// so the end of a long URL could be neither seen nor reached.
+component ScrollingInput inherits Rectangle {
+    in-out property <string> text <=> ti.text;
+    in property <length> font-size <=> ti.font-size;
+    in property <InputType> input-type <=> ti.input-type;
+    in property <bool> enabled <=> ti.enabled;
+    out property <bool> has-focus: ti.has-focus;
+    callback accepted;
+    callback edited;
+    callback key-pressed(KeyEvent) -> EventResult;
+    public function select-all() { ti.select-all(); }
+    public function set-selection-offsets(anchor: int, cursor: int) {
+        ti.set-selection-offsets(anchor, cursor);
+    }
+    clip: true;
+    forward-focus: ti;
+    ti := TextInput {
+        property <length> scroll-x;
+        x: min(0px, max(root.width - self.width - self.text-cursor-width, self.scroll-x));
+        width: max(root.width - self.text-cursor-width, self.preferred-width);
+        height: root.height;
+        color: P.text;
+        selection-background-color: P.verdigris-dim;
+        vertical-alignment: center;
+        single-line: true;
+        cursor-position-changed(pos) => {
+            if pos.x + self.scroll-x < 0px {
+                self.scroll-x = -pos.x;
+            } else if pos.x + self.scroll-x > root.width - self.text-cursor-width {
+                self.scroll-x = root.width - pos.x - self.text-cursor-width;
+            }
+        }
+        accepted => { root.accepted(); }
+        edited => { root.edited(); }
+        key-pressed(e) => { root.key-pressed(e) }
     }
 }
 
@@ -512,18 +574,16 @@ component Field inherits Rectangle {
             border-width: 1px;
             border-color: ti.has-focus ? P.verdigris-dim : P.border;
             background: P.bg;
-            ti := TextInput {
-                x: 10px;
-                width: parent.width - 20px;
-                text <=> root.text;
-                color: P.text;
-                selection-background-color: P.verdigris-dim;
-                vertical-alignment: center;
-                font-size: 13px;
-                single-line: true;
-                input-type: root.secret ? InputType.password : InputType.text;
-                accepted => { root.accepted(); }
-                edited => { root.edited(self.text); }
+            // The text scrolls sideways inside this to keep the cursor in
+            // view, so a long URL can be typed and read to its end.
+            ti := ScrollingInput {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text <=> root.text;
+                    font-size: 13px;
+                    input-type: root.secret ? InputType.password : InputType.text;
+                    accepted => { root.accepted(); }
+                    edited => { root.edited(self.text); }
             }
             if ti.text == "": Text {
                 x: 10px;
@@ -571,9 +631,16 @@ component ListRow inherits Rectangle {
     in property <bool> selected;
     in property <bool> focused;
     in property <bool> album-tracks;
+    // The open list is Hearted songs: removing a song unhearts it.
+    in property <bool> hearted;
     callback select;
     callback activate;
     callback act(string);
+    // Held long enough to open the menu; the release then doesn't open
+    // or play the row too.
+    property <bool> long-fired;
+    property <length> press-x;
+    property <length> press-y;
     // A narrow list drops the third column and tightens the rest.
     property <bool> slim: self.width < 560px;
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
@@ -612,13 +679,13 @@ component ListRow inherits Rectangle {
             Text {
                 width: parent.width;
                 height: parent.height;
-                text: item.playing ? (P.kawaii ? "♪" : "▶") : (item.kind == 4 && item.on ? "✓" : (item.kind == 16 ? "∞" : item.num));
+                text: item.playing ? (P.kawaii ? "♪" : "▶") : (item.kind == 4 && item.on ? "✓" : (item.kind == 16 ? "∞" : (item.kind == 5 && item.fixed ? "♥" : item.num)));
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 font-family: P.mono;
                 font-size: 12px;
                 font-weight: P.kawaii ? 700 : 400;
-                color: item.playing || (item.kind == 4 && item.on) ? P.accent-text : (P.kawaii ? P.muted : P.wave);
+                color: item.playing || (item.kind == 4 && item.on) || (item.kind == 5 && item.fixed) ? P.accent-text : (P.kawaii ? P.muted : P.wave);
             }
         }
         if item.kind == 1 || item.kind == 3: Rectangle {
@@ -727,7 +794,7 @@ component ListRow inherits Rectangle {
 
             // Playlist items.
             if (item.kind == 0 || item.kind == 11) && root.album-tracks == false: MenuItem {
-                title: "Remove from this playlist";
+                title: root.hearted ? "Unheart" : "Remove from this playlist";
                 enabled: item.dim == false;
                 activated => { root.act("pl-remove"); }
             }
@@ -769,9 +836,21 @@ component ListRow inherits Rectangle {
             }
             if item.kind == 14: MenuItem { title: "Cancel"; activated => { root.act("job-cancel"); } }
             // Playlists.
-            if item.kind == 5: MenuSeparator {}
-            if item.kind == 5: MenuItem { title: "Rename…"; activated => { root.act("pl-rename"); } }
-            if item.kind == 5: MenuItem { title: "Delete…"; activated => { root.act("pl-delete"); } }
+            if item.kind == 5 && !item.fixed: MenuSeparator {}
+            if item.kind == 5 && !item.fixed: MenuItem { title: "Rename…"; activated => { root.act("pl-rename"); } }
+            if item.kind == 5 && !item.fixed: MenuItem { title: "Delete…"; activated => { root.act("pl-delete"); } }
+        }
+        // A long press on a touch screen opens the same menu.
+        hold := Timer {
+            interval: LongPress.after;
+            running: false;
+            triggered => {
+                self.running = false;
+                if ta.pressed && item.selectable {
+                    root.long-fired = true;
+                    cm.show({ x: ta.mouse-x, y: ta.mouse-y });
+                }
+            }
         }
         ta := TouchArea {
             mouse-cursor: item.selectable ? pointer : default;
@@ -779,14 +858,30 @@ component ListRow inherits Rectangle {
             // a right press opens the menu from here.
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down && item.selectable {
+                    root.long-fired = false;
                     root.select();
                     if e.button == PointerEventButton.right {
                         cm.show({ x: self.mouse-x, y: self.mouse-y });
+                    } else if e.button == PointerEventButton.left && Ui.touch {
+                        root.press-x = self.mouse-x;
+                        root.press-y = self.mouse-y;
+                        hold.running = false;
+                        hold.running = true;
                     }
                 }
+                if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                    hold.running = false;
+                }
             }
-            double-clicked => {
-                if item.selectable && item.kind != 12 { root.activate(); }
+            moved => {
+                if abs(self.mouse-x - root.press-x) > LongPress.slop || abs(self.mouse-y - root.press-y) > LongPress.slop {
+                    hold.running = false;
+                }
+            }
+            // One click or tap opens a folder, artist or album, or plays a
+            // song or station. Settings rows act through their own controls.
+            clicked => {
+                if !root.long-fired && item.selectable && item.kind != 12 { root.activate(); }
             }
         }
     }
@@ -964,6 +1059,9 @@ component AlbumTile inherits Rectangle {
     callback select;
     callback activate;
     callback act(string);
+    property <bool> long-fired;
+    property <length> press-x;
+    property <length> press-y;
     border-radius: 8px * P.round;
     background: selected ? P.raised : (ta.has-hover ? P.hover : transparent);
     VerticalLayout {
@@ -1041,17 +1139,131 @@ component AlbumTile inherits Rectangle {
                 activated => { root.act("pin"); }
             }
         }
+        hold := Timer {
+            interval: LongPress.after;
+            running: false;
+            triggered => {
+                self.running = false;
+                if ta.pressed {
+                    root.long-fired = true;
+                    tcm.show({ x: ta.mouse-x, y: ta.mouse-y });
+                }
+            }
+        }
         ta := TouchArea {
             mouse-cursor: pointer;
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down {
+                    root.long-fired = false;
                     root.select();
                     if e.button == PointerEventButton.right {
                         tcm.show({ x: self.mouse-x, y: self.mouse-y });
+                    } else if e.button == PointerEventButton.left && Ui.touch {
+                        root.press-x = self.mouse-x;
+                        root.press-y = self.mouse-y;
+                        hold.running = false;
+                        hold.running = true;
                     }
                 }
+                if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                    hold.running = false;
+                }
             }
-            double-clicked => { root.activate(); }
+            moved => {
+                if abs(self.mouse-x - root.press-x) > LongPress.slop || abs(self.mouse-y - root.press-y) > LongPress.slop {
+                    hold.running = false;
+                }
+            }
+            clicked => {
+                if !root.long-fired { root.activate(); }
+            }
+        }
+    }
+}
+
+// One entry in the Queue view. A click or tap plays it; right-click, or
+// a long press on a touch screen, opens its menu.
+component QueueLine inherits Rectangle {
+    in property <QueueRow> q;
+    in property <int> n;
+    in property <bool> selected;
+    callback select;
+    callback activate;
+    callback act(string);
+    property <bool> long-fired;
+    property <length> press-x;
+    property <length> press-y;
+    height: 52px;
+    border-radius: 6px * P.round;
+    border-width: q.playing && P.kawaii ? 2px : 0px;
+    border-color: P.verdigris;
+    background: q.playing ? P.playing-bg : (selected ? P.raised : (qta.has-hover ? P.hover : transparent));
+    HorizontalLayout {
+        padding: 6px;
+        padding-right: 12px;
+        spacing: 12px;
+        Text {
+            width: 32px;
+            text: q.playing ? (P.kawaii ? "♪" : "▶") : root.n;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            font-family: P.mono;
+            font-size: 12px;
+            color: q.playing ? P.accent-text : (P.kawaii ? P.muted : P.wave);
+        }
+        Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; }
+        VerticalLayout {
+            alignment: center;
+            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : (q.off ? P.wave : P.text)); }
+            Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
+        }
+    }
+    qcm := ContextMenuArea {
+        Menu {
+            MenuItem { title: "Play"; activated => { root.act("play"); } }
+            MenuItem { title: "Move up"; activated => { root.act("up"); } }
+            MenuItem { title: "Move down"; activated => { root.act("down"); } }
+            MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
+            MenuSeparator {}
+            MenuItem { title: "Remove"; activated => { root.act("remove"); } }
+        }
+        hold := Timer {
+            interval: LongPress.after;
+            running: false;
+            triggered => {
+                self.running = false;
+                if qta.pressed {
+                    root.long-fired = true;
+                    qcm.show({ x: qta.mouse-x, y: qta.mouse-y });
+                }
+            }
+        }
+        qta := TouchArea {
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.long-fired = false;
+                    root.select();
+                    if e.button == PointerEventButton.right {
+                        qcm.show({ x: self.mouse-x, y: self.mouse-y });
+                    } else if e.button == PointerEventButton.left && Ui.touch {
+                        root.press-x = self.mouse-x;
+                        root.press-y = self.mouse-y;
+                        hold.running = false;
+                        hold.running = true;
+                    }
+                }
+                if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                    hold.running = false;
+                }
+            }
+            moved => {
+                if abs(self.mouse-x - root.press-x) > LongPress.slop || abs(self.mouse-y - root.press-y) > LongPress.slop {
+                    hold.running = false;
+                }
+            }
+            clicked => {
+                if !root.long-fired { root.activate(); }
+            }
         }
     }
 }
@@ -1154,12 +1366,70 @@ component Knob inherits Rectangle {
     }
 }
 
+// One control of a rack unit as a row: its name, a slider that drags
+// sideways, and its value. A choice is a button that steps. This is the
+// rack on a touch screen or a narrow window, where a dial dragged up and
+// down fights the page's own scrolling and is too small for a finger.
+component AmpRow inherits Rectangle {
+    in property <AmpKnob> k;
+    in property <bool> lit;
+    callback turned(float);
+    callback stepped();
+    height: 44px;
+    HorizontalLayout {
+        spacing: 10px;
+        Text {
+            width: 96px;
+            text: root.k.label;
+            vertical-alignment: center;
+            font-size: 12.5px;
+            color: P.text;
+            overflow: elide;
+        }
+        if !root.k.choice: Bar {
+            horizontal-stretch: 1;
+            height: 44px;
+            label: root.k.label;
+            value: root.k.pos;
+            live: true;
+            wheel: false;
+            show-knob: true;
+            knob: 20px;
+            fill: root.lit ? P.copper : P.muted;
+            changed(v) => { root.turned(v); }
+        }
+        if !root.k.choice: Text {
+            width: 70px;
+            text: root.k.text;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            font-family: P.mono;
+            font-size: 11.5px;
+            color: P.muted;
+            overflow: elide;
+        }
+        if root.k.choice: Rectangle {
+            horizontal-stretch: 1;
+            Chip {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                h: 36px;
+                text: root.k.text + "   ›";
+                active: root.lit;
+                clicked => { root.stepped(); }
+            }
+        }
+    }
+}
+
 // The amp stack as a rack: one unit per device, in signal order, each
 // with its on light and dials. The rows under it hold everything else.
 component AmpPanel inherits Rectangle {
     in property <[AmpUnit]> units;
     in property <bool> on;
     in property <string> info;
+    // Units stacked as cards of sliders instead of a row of dials.
+    in property <bool> compact;
     callback knob(int, int, float);
     callback step(int, int);
     callback unit-toggle(int);
@@ -1184,7 +1454,7 @@ component AmpPanel inherits Rectangle {
             Chip { h: 28px; text: root.on ? "On" : "Bypassed"; active: root.on; clicked => { root.act("amp-toggle"); } }
             Chip { h: 28px; text: "Save as…"; clicked => { root.act("amp-save"); } }
         }
-        Flickable {
+        if !root.compact: Flickable {
             height: 132px;
             content-width: max(self.width, rack.preferred-width);
             rack := HorizontalLayout {
@@ -1236,6 +1506,69 @@ component AmpPanel inherits Rectangle {
                                 stepped => { root.step(i, j); }
                             }
                         }
+                    }
+                }
+            }
+        }
+        if root.compact && root.units.length == 0: Text {
+            text: "The rack is empty. Pick a preset or add a device below.";
+            color: P.muted;
+            wrap: word-wrap;
+        }
+        if root.compact: VerticalLayout {
+            spacing: 10px;
+            for u[i] in root.units: Rectangle {
+                border-radius: 6px * P.round;
+                border-width: 1px;
+                border-color: u.on && root.on ? P.copper-dim : P.border;
+                background: P.raised.darker(0.15);
+                VerticalLayout {
+                    padding: 10px;
+                    padding-top: 4px;
+                    spacing: 0px;
+                    // The unit's name and its switch; the whole line toggles it.
+                    Rectangle {
+                        height: 44px;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                width: 12px;
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 12px;
+                                    height: 12px;
+                                    border-radius: 6px;
+                                    background: u.on && root.on ? P.copper : P.wave;
+                                    drop-shadow-blur: u.on && root.on ? 6px : 0px;
+                                    drop-shadow-color: P.copper;
+                                }
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: u.name;
+                                vertical-alignment: center;
+                                font-family: P.serif;
+                                font-weight: 700;
+                                font-size: 14px;
+                                color: u.on && root.on ? P.text : P.muted;
+                                overflow: elide;
+                            }
+                            Rectangle {
+                                width: 36px;
+                                Switch {
+                                    y: (parent.height - self.height) / 2;
+                                    on: u.on;
+                                    toggled => { root.unit-toggle(i); }
+                                }
+                            }
+                        }
+                        TouchArea { clicked => { root.unit-toggle(i); } }
+                    }
+                    for k[j] in u.knobs: AmpRow {
+                        k: k;
+                        lit: u.on && root.on;
+                        turned(p) => { root.knob(i, j, p); }
+                        stepped => { root.step(i, j); }
                     }
                 }
             }
@@ -1298,6 +1631,10 @@ component EqPanel inherits Rectangle {
                 height: parent.height;
                 viewbox-width: 1000;
                 viewbox-height: 200;
+                // Stretched to the graph, not kept at 5:1 and centred:
+                // otherwise the curve drifts off the handles whenever the
+                // window isn't exactly that shape.
+                fit: fill;
                 commands: root.curve;
                 stroke: root.on ? (P.kawaii ? P.mint : P.verdigris) : P.wave;
                 stroke-width: 2px;
@@ -1408,6 +1745,10 @@ export component AppWindow inherits Window {
     callback forward;
     callback search-edited(string);
     callback search-cancel;
+    // Text is typed in the system's own dialogs (Android): the text dialog
+    // below isn't drawn, and a tap on the search box opens the system's.
+    in property <bool> native-text: false;
+    callback search-tapped;
 
     // The open view
     in property <[string]> crumbs;
@@ -1422,6 +1763,8 @@ export component AppWindow inherits Window {
     in property <bool> covers;
     in property <int> selected: -1;
     in property <bool> album-tracks;
+    // The open list is Hearted songs.
+    in property <bool> hearted-open;
     in property <Hero> hero;
     in property <[string]> actions;
     in property <[string]> action-labels;
@@ -1711,14 +2054,14 @@ export component AppWindow inherits Window {
                                     }
                                     Rectangle {
                                         horizontal-stretch: 1;
-                                        search-input := TextInput {
+                                        clip: true;
+                                        search-input := ScrollingInput {
                                             width: parent.width;
                                             height: parent.height;
                                             text <=> root.search-text;
-                                            single-line: true;
-                                            vertical-alignment: center;
-                                            color: P.text;
-                                            selection-background-color: P.verdigris-dim;
+                                            // Android types into its own search box (see
+                                            // search-tapped), so this one only shows the text.
+                                            enabled: !root.native-text;
                                             edited => { root.search-edited(self.text); }
                                             key-pressed(e) => {
                                                 if e.text == Key.Escape {
@@ -1739,6 +2082,9 @@ export component AppWindow inherits Window {
                                             text: root.tight ? "Search" : "Search artists, albums, songs";
                                             color: P.wave;
                                             vertical-alignment: center;
+                                        }
+                                        if root.native-text: TouchArea {
+                                            clicked => { root.search-tapped(); }
                                         }
                                     }
                                     if !root.tiny: Rectangle {
@@ -1976,6 +2322,7 @@ export component AppWindow inherits Window {
                             }
                             if root.eq-panel: Rectangle { height: 12px; }
                             if root.amp-panel: AmpPanel {
+                                compact: Ui.touch || root.tight;
                                 units: root.amp-units;
                                 on: root.amp-on;
                                 info: root.amp-info;
@@ -2014,6 +2361,7 @@ export component AppWindow inherits Window {
                                         selected: i == root.selected;
                                         focused: keys.has-focus;
                                         album-tracks: root.album-tracks;
+                                        hearted: root.hearted-open;
                                         select => { root.row-select(i); keys.focus(); }
                                         activate => { root.row-activate(i); }
                                         act(a) => { root.row-select(i); root.row-act(i, a); }
@@ -2157,48 +2505,13 @@ export component AppWindow inherits Window {
                             }
                             qlist := ListView {
                                 vertical-stretch: 1;
-                                for q[i] in root.queue: Rectangle {
-                                    height: 52px;
-                                    border-radius: 6px * P.round;
-                                    border-width: q.playing && P.kawaii ? 2px : 0px;
-                                    border-color: P.verdigris;
-                                    background: q.playing ? P.playing-bg : (i == root.queue-sel ? P.raised : (qta.has-hover ? P.hover : transparent));
-                                    HorizontalLayout {
-                                        padding: 6px;
-                                        padding-right: 12px;
-                                        spacing: 12px;
-                                        Text {
-                                            width: 32px;
-                                            text: q.playing ? (P.kawaii ? "♪" : "▶") : (i + 1);
-                                            horizontal-alignment: right;
-                                            vertical-alignment: center;
-                                            font-family: P.mono;
-                                            font-size: 12px;
-                                            color: q.playing ? P.accent-text : (P.kawaii ? P.muted : P.wave);
-                                        }
-                                        Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : (q.off ? P.wave : P.text)); }
-                                            Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
-                                        }
-                                    }
-                                    ContextMenuArea {
-                                        Menu {
-                                            MenuItem { title: "Play"; activated => { root.queue-act(i, "play"); } }
-                                            MenuItem { title: "Move up"; activated => { root.queue-act(i, "up"); } }
-                                            MenuItem { title: "Move down"; activated => { root.queue-act(i, "down"); } }
-                                            MenuItem { title: "Add to playlist…"; activated => { root.queue-act(i, "playlist"); } }
-                                            MenuSeparator {}
-                                            MenuItem { title: "Remove"; activated => { root.queue-act(i, "remove"); } }
-                                        }
-                                        qta := TouchArea {
-                                            pointer-event(e) => {
-                                                if e.kind == PointerEventKind.down { root.queue-select(i); keys.focus(); }
-                                            }
-                                            double-clicked => { root.queue-activate(i); }
-                                        }
-                                    }
+                                for q[i] in root.queue: QueueLine {
+                                    q: q;
+                                    n: i + 1;
+                                    selected: i == root.queue-sel;
+                                    select => { root.queue-select(i); keys.focus(); }
+                                    activate => { root.queue-activate(i); }
+                                    act(a) => { root.queue-act(i, a); }
                                 }
                             }
                             if root.queue.length == 0: Text {
@@ -2236,7 +2549,7 @@ export component AppWindow inherits Window {
                 Rectangle { height: 1px; y: 0; background: P.border; }
 
                     // Now playing.
-                    HorizontalLayout {
+                    np := HorizontalLayout {
                         x: bar.bp;
                         y: 0;
                         width: root.tight ? bar.width - 2 * bar.bp - bar.gap - bar.rw : bar.tx - bar.gap - bar.bp;
@@ -2269,13 +2582,16 @@ export component AppWindow inherits Window {
                         if root.love-state > 0: IconButton {
                             y: (parent.height - self.height) / 2;
                             icon: Icons.heart;
-                            tip: root.love-state == 2 ? "Loved (l)" : "Love (l)";
+                            tip: root.love-state == 2 ? "Hearted (l)" : "Heart (l)";
+                            // Filled in when the song playing is hearted.
+                            filled: root.love-state == 2;
                             active: root.love-state == 2;
                             clicked => { root.love-clicked(); keys.focus(); }
                         }
                         // Stars for the song playing; click one to rate,
                         // the same one again to clear.
-                        if root.np-rating >= 0 && !root.compact: HorizontalLayout {
+                        // Only where the title still has room beside them.
+                        if root.np-rating >= 0 && !root.compact && np.width >= 400px: HorizontalLayout {
                             spacing: 0px;
                             for n in [1, 2, 3, 4, 5]: Text {
                                 width: 15px;
@@ -2732,6 +3048,7 @@ export component AppWindow inherits Window {
                                     color: pill ? P.on-accent : (item.dot == 2 ? P.copper : P.muted);
                                 }
                             }
+                            property <bool> long-fired;
                             scm := ContextMenuArea {
                                 enabled: item.kind == 4;
                                 Menu {
@@ -2739,12 +3056,33 @@ export component AppWindow inherits Window {
                                     MenuItem { title: "Move down"; activated => { root.side-act(i, "down"); } }
                                     MenuItem { title: "Remove from Favorites"; activated => { root.side-act(i, "remove"); } }
                                 }
+                                // Favorites: a long press opens their menu too.
+                                shold := Timer {
+                                    interval: LongPress.after;
+                                    running: false;
+                                    triggered => {
+                                        self.running = false;
+                                        if sta.pressed {
+                                            long-fired = true;
+                                            scm.show({ x: sta.mouse-x, y: sta.mouse-y });
+                                        }
+                                    }
+                                }
                                 sta := TouchArea {
                                     enabled: entry;
                                     mouse-cursor: entry ? pointer : default;
                                     pointer-event(e) => {
-                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.right && item.kind == 4 {
-                                            scm.show({ x: self.mouse-x, y: self.mouse-y });
+                                        if e.kind == PointerEventKind.down {
+                                            long-fired = false;
+                                            if e.button == PointerEventButton.right && item.kind == 4 {
+                                                scm.show({ x: self.mouse-x, y: self.mouse-y });
+                                            } else if e.button == PointerEventButton.left && item.kind == 4 && Ui.touch {
+                                                shold.running = false;
+                                                shold.running = true;
+                                            }
+                                        }
+                                        if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                                            shold.running = false;
                                         }
                                     }
                                     changed has-hover => {
@@ -2756,6 +3094,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     clicked => {
+                                        if long-fired { return; }
                                         root.side-tip = "";
                                         root.drawer-open = false;
                                         root.side-clicked(i);
@@ -2791,6 +3130,8 @@ export component AppWindow inherits Window {
             width: root.tiny ? keys.width : root.lyrics-w;
             height: keys.height - root.bar-h;
             background: P.surface;
+            // Nothing inside draws past the panel, however long the song.
+            clip: true;
             // Takes the clicks, so none reach the view under it.
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
@@ -2810,9 +3151,12 @@ export component AppWindow inherits Window {
                 Rectangle { height: 6px; }
                 // Synced: the lines from a little before the one
                 // playing, which the app picks, so it stays in view.
-                if root.lyrics-synced: Rectangle {
+                // A Flickable rather than a plain box: a box takes its child
+                // layout's height as its own minimum, which pushed the
+                // panel's layout past the panel and the lines over the app.
+                if root.lyrics-synced: Flickable {
                     vertical-stretch: 1;
-                    clip: true;
+                    interactive: false;
                     VerticalLayout {
                         alignment: start;
                         spacing: 6px;
@@ -2888,7 +3232,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             pta := TouchArea {
-                                double-clicked => { root.queue-activate(i); }
+                                clicked => { root.queue-activate(i); }
                             }
                         }
                     }
@@ -2939,12 +3283,19 @@ export component AppWindow inherits Window {
         }
 
         // ----- Dialogs -----
-        if root.dialog != 0: Rectangle {
+        // Centred in the part of the screen the on-screen keyboard leaves
+        // free, and no taller than that, so the field being typed in stays
+        // in view.
+        if root.dialog != 0 && !(root.dialog == 1 && root.native-text): Rectangle {
+            property <length> kb-top: root.virtual-keyboard-size.height > 0
+                ? clamp(root.virtual-keyboard-position.y - keys.y, 120px, keys.height)
+                : keys.height;
             background: P.scrim;
             TouchArea { clicked => { root.dlg-cancel(); } }
             Rectangle {
                 width: min(root.dialog == 4 ? 620px : 460px, keys.width - 24px);
-                height: min(dlg.preferred-height, keys.height - 24px);
+                height: min(dlg.preferred-height, parent.kb-top - 24px);
+                y: (parent.kb-top - self.height) / 2;
                 clip: true;
                 border-radius: 10px * P.round;
                 border-width: 1px;
