@@ -2,8 +2,6 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 16 of the build plan: everything from milestones 1 to 15 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, the output controls, the amp stack, ratings, Favorites, lyrics, media keys, the tray, the channel tools and the phone-size window), plus the Android app. Milestone 15 brought media keys and the desktop's media controls through MPRIS2, a tray icon with close-to-tray, the channel tools (mono, width, crossfeed, balance), and a desktop window that shrinks down to phone size without cutting anything off. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Android app is the desktop app's window and core on a phone, with AAudio for output and bit-perfect USB on Android 14 and later.
-
 ## What works right now
 
 **Music servers**
