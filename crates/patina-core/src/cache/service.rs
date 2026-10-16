@@ -382,6 +382,7 @@ impl Drop for CacheService {
 pub(super) fn open(
     shared: &Arc<Shared>,
     key: SongKey,
+    duration: Option<Duration>,
     abort: Option<Arc<AtomicBool>>,
 ) -> Option<Result<Opening, String>> {
     let on_disk = shared
@@ -432,7 +433,7 @@ pub(super) fn open(
             original,
         }) => match PartReader::open(&dest, &part, progress, url, abort) {
             Ok(reader) => Some(Ok(Opening::Growing {
-                reader: Box::new(reader),
+                reader: Box::new(reader.with_duration(duration)),
                 name: name(&dest),
                 original,
             })),

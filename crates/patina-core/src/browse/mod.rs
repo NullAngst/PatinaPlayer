@@ -340,6 +340,20 @@ impl Browser {
             for s in Section::STATS {
                 self.refresh_section(s);
             }
+            // The open list shows play counts too (an album's songs, the
+            // Albums and Songs lists): it shows the new one now rather
+            // than the next time the app opens.
+            if matches!(
+                self.section,
+                Section::Folders
+                    | Section::Artists
+                    | Section::Albums
+                    | Section::Songs
+                    | Section::Genres
+                    | Section::Playlists
+            ) {
+                self.refresh_current();
+            }
         }
         let mut changed = false;
         if let Some(svc) = &self.service {

@@ -733,6 +733,21 @@ component ListRow inherits Rectangle {
     // row with no menu shows it in a bubble.
     property <bool> title-cut;
     property <string> title-full: item.kind == 11 ? "missing: " + item.title : item.title;
+    // Whether the menu below has anything in it. A settings row, a header
+    // or a button in the list has nothing, and a long press or right-click
+    // on one used to open an empty box. Keep in step with the Menu.
+    // Settings rows never count a cut title: a reused row can still hold
+    // one from the song it showed before.
+    property <bool> has-menu: (root.title-cut && item.kind != 12)
+        || item.kind <= 8
+        || (item.kind == 11 && !root.album-tracks)
+        || item.kind == 13
+        || item.kind == 14
+        || item.kind == 16
+        || item.can-mix
+        || item.rating >= 0
+        || item.fav >= 0
+        || item.can-pin;
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
     background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent));
     border-radius: 6px * P.round;
@@ -842,11 +857,11 @@ component ListRow inherits Rectangle {
     }
 
     cm := ContextMenuArea {
-        enabled: item.selectable;
+        enabled: item.selectable && root.has-menu;
         Menu {
             // The whole title, when the row cuts it short.
-            if root.title-cut: MenuItem { title: root.title-full; enabled: false; }
-            if root.title-cut: MenuSeparator {}
+            if root.title-cut && item.kind != 12: MenuItem { title: root.title-full; enabled: false; }
+            if root.title-cut && item.kind != 12: MenuSeparator {}
             // Things that play.
             if item.kind <= 8 || item.kind == 13 || item.kind == 16: MenuItem {
                 title: item.kind == 8 ? "Play (resume)" : "Play";
@@ -942,7 +957,7 @@ component ListRow inherits Rectangle {
             running: false;
             triggered => {
                 self.running = false;
-                if ta.pressed && item.selectable {
+                if ta.pressed && item.selectable && root.has-menu {
                     root.long-fired = true;
                     cm.show({ x: ta.mouse-x, y: ta.mouse-y });
                 } else if ta.pressed && root.title-cut && item.kind != 12 {
@@ -972,8 +987,8 @@ component ListRow inherits Rectangle {
                     root.long-fired = false;
                     root.select();
                     if e.button == PointerEventButton.right {
-                        cm.show({ x: self.mouse-x, y: self.mouse-y });
-                    } else if e.button == PointerEventButton.left && Ui.touch {
+                        if root.has-menu { cm.show({ x: self.mouse-x, y: self.mouse-y }); }
+                    } else if e.button == PointerEventButton.left && Ui.touch && root.has-menu {
                         root.press-x = self.mouse-x;
                         root.press-y = self.mouse-y;
                         hold.running = false;
@@ -1881,6 +1896,9 @@ export component AppWindow inherits Window {
     property <length> lyrics-w: tiny ? 0px : clamp(win-w * 0.3, 240px, 340px);
     property <length> queue-w: tiny ? 0px : clamp(win-w * 0.26, 220px, 300px);
     property <length> pad: tight ? 16px : 32px;
+    // A panel over the list on a phone or narrow window: the whole view
+    // scrolls as one page, list and all.
+    property <bool> page-scroll: (amp-panel || eq-panel) && (Ui.touch || tight);
     // Roughly the list's width, for the column header's choices.
     property <length> list-w: win-w - side-w - (lyrics-open ? lyrics-w : 0px) - (queue-panel ? queue-w : 0px) - 2 * pad;
     // The sidebar's hover label while it's folded to icons.
@@ -1915,6 +1933,8 @@ export component AppWindow inherits Window {
     // 0 list, 1 album grid, 2 queue
     in property <int> layout;
     in property <[Row]> rows;
+    // Every row's height added up (ListRow's heights, from Rust).
+    in property <length> rows-height;
     in property <[string]> columns;
     // Rows in this level carry a cover thumbnail (albums, folders).
     in property <bool> covers;
@@ -2520,7 +2540,13 @@ export component AppWindow inherits Window {
                                 vertical-stretch: 1;
                                 // When the view is short, this much list stays,
                                 // and the view around it scrolls instead.
-                                min-height: 180px;
+                                // Under a tall panel on a phone (the Amp rack)
+                                // the list takes its whole height instead, so
+                                // the page scrolls as one. Otherwise the page
+                                // takes every drag the moment it can move at
+                                // all, and the rows in a short list under it
+                                // can't be reached.
+                                min-height: root.page-scroll ? max(180px, root.rows-height + 8px) : 180px;
                                 list := ListView {
                                     for r[i] in root.layout == 0 ? root.rows : []: ListRow {
                                         item: r;

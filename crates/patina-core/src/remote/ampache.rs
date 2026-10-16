@@ -543,6 +543,12 @@ impl Client for Ampache {
             ("action", "stream".to_string()),
             ("type", "song".into()),
             ("id", song_id.into()),
+            // Ampache counts a play for every stream request, ranges and
+            // all, and the cache asks for a song ahead of time (prefetch)
+            // and again to resume or seek. Plays are reported on their own
+            // with record_play, once a song has really been listened to,
+            // so the stream itself mustn't count.
+            ("stats", "0".into()),
         ];
         match format {
             StreamFormat::Raw => q.push(("format", "raw".into())),

@@ -58,6 +58,11 @@ pub struct Queue {
     /// Bumped on every change, so frontends know when to redraw.
     pub version: u64,
     rng: u64,
+    /// The queue was cleared while this entry played. It's all that's
+    /// left, nothing follows it (Repeat All doesn't bring it round again),
+    /// and it goes too once it has played out. Anything queued after the
+    /// clear lifts this.
+    ending: Option<EntryId>,
 }
 
 impl Queue {
@@ -134,7 +139,31 @@ impl Queue {
         self.index.clear();
         self.order.clear();
         self.current = None;
+        self.ending = None;
         self.touch();
+    }
+
+    /// Take everything out but `keep`, which stays current and is the last
+    /// to play. Clearing the queue while a song plays: what was coming up
+    /// goes, the song doesn't.
+    pub fn clear_except(&mut self, keep: EntryId) {
+        let Some(&i) = self.index.get(&keep) else {
+            self.clear();
+            return;
+        };
+        let e = self.entries.swap_remove(i);
+        self.entries.clear();
+        self.entries.push(e);
+        self.order = vec![keep];
+        self.current = Some(keep);
+        self.ending = Some(keep);
+        self.reindex();
+        self.touch();
+    }
+
+    /// The entry left playing after a clear, if it's still the only one.
+    pub fn ending(&self) -> Option<EntryId> {
+        self.ending
     }
 
     fn push_entry(&mut self, info: TrackInfo, probed: bool) -> EntryId {
@@ -165,6 +194,7 @@ impl Queue {
     /// Append files that haven't been probed. Returns (id, path) pairs for
     /// the tag prober.
     pub fn append(&mut self, paths: Vec<PathBuf>) -> Vec<(EntryId, PathBuf)> {
+        self.ending = None;
         let mut added = Vec::with_capacity(paths.len());
         for p in paths {
             let id = self.push_entry(TrackInfo::unprobed(&p), false);
@@ -177,6 +207,7 @@ impl Queue {
 
     /// Append tracks whose tags are already known (from the library).
     pub fn append_tracks(&mut self, tracks: Vec<TrackInfo>) -> Vec<EntryId> {
+        self.ending = None;
         let ids: Vec<EntryId> = tracks
             .into_iter()
             .map(|t| {
@@ -200,6 +231,7 @@ impl Queue {
 
     /// Insert tracks right after the current one, in order. "Play next".
     pub fn insert_next(&mut self, tracks: Vec<TrackInfo>) -> Vec<EntryId> {
+        self.ending = None;
         let cur_base = self.current.and_then(|c| self.index.get(&c).copied());
         let cur_play = self.current.and_then(|c| self.position(c));
         let mut ids = Vec::with_capacity(tracks.len());
@@ -263,6 +295,9 @@ impl Queue {
     pub fn upcoming(&self, id: EntryId) -> Option<EntryId> {
         if self.repeat == Repeat::One && self.contains(id) {
             return Some(id);
+        }
+        if self.ending == Some(id) {
+            return None;
         }
         self.step(id, 1)
     }
@@ -344,6 +379,9 @@ impl Queue {
         if self.current == Some(id) {
             self.current = None;
         }
+        if self.ending == Some(id) {
+            self.ending = None;
+        }
         self.reindex();
         self.touch();
         true
@@ -413,6 +451,28 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
         (q, ids)
+    }
+
+    #[test]
+    fn clearing_keeps_the_current_one() {
+        let (mut q, ids) = q(4);
+        q.set_current(Some(ids[2]));
+        q.repeat = Repeat::All;
+        q.clear_except(ids[2]);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.play_order(), &[ids[2]]);
+        assert_eq!(q.current(), Some(ids[2]));
+        // Repeat All doesn't bring the last one round again.
+        assert_eq!(q.upcoming(ids[2]), None);
+        assert_eq!(q.ending(), Some(ids[2]));
+        // Something queued after: it plays on into that.
+        let more = q.append_tracks(vec![TrackInfo::unprobed(std::path::Path::new("x.flac"))]);
+        assert_eq!(q.ending(), None);
+        assert_eq!(q.upcoming(ids[2]), Some(more[0]));
+        // One that isn't there: everything goes.
+        q.clear_except(999);
+        assert!(q.is_empty());
+        assert_eq!(q.current(), None);
     }
 
     #[test]

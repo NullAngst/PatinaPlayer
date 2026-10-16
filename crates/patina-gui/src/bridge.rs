@@ -862,6 +862,17 @@ impl State {
         }
         self.row_shown = shown;
         self.row_art = row_art;
+        // The rows' whole height, for views where the page scrolls as one
+        // (the Amp and EQ panels on a phone). Matches ListRow's heights.
+        let rows_h: f32 = rows
+            .iter()
+            .map(|r| match r.kind {
+                9 => 34.0,
+                12 => 54.0,
+                _ => 40.0,
+            })
+            .sum();
+        ui.set_rows_height(rows_h);
         update_rows(&self.rows, rows);
         let sel_ok = items
             .get(selected.max(0) as usize)

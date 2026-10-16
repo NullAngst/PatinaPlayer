@@ -202,9 +202,19 @@ static HANDLE: RwLock<Option<Handle>> = RwLock::new(None);
 /// from the server" (there's no cache running, or it's turned off and the
 /// song isn't pinned).
 pub fn open(r: &RemoteRef, abort: Option<Arc<AtomicBool>>) -> Option<Result<Opening, String>> {
+    open_for(r, None, abort)
+}
+
+/// [`open`], knowing the song's length, so a song read as it downloads
+/// can wait for seconds of it when playback catches up.
+pub fn open_for(
+    r: &RemoteRef,
+    duration: Option<std::time::Duration>,
+    abort: Option<Arc<AtomicBool>>,
+) -> Option<Result<Opening, String>> {
     let key = SongKey::of(r)?;
     let shared = HANDLE.read().unwrap().as_ref()?.shared.clone();
-    service::open(&shared, key, abort)
+    service::open(&shared, key, duration, abort)
 }
 
 /// Songs on disk right now, for telling what can play while a server is

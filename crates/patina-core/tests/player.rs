@@ -101,3 +101,78 @@ fn removing_the_playing_track_moves_on() {
     assert_eq!(p.queue().len(), 1);
     p.send(Command::Quit);
 }
+
+#[test]
+fn clearing_the_queue_lets_the_song_finish_then_shows_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tone(dir.path(), "a.flac", 1.5);
+    let b = tone(dir.path(), "b.flac", 1.5);
+    let c = tone(dir.path(), "c.flac", 1.5);
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let p = player(played.clone());
+    p.send(Command::SetQueue {
+        paths: vec![a.clone(), b, c],
+        start: 0,
+    });
+    wait(&p, 5, |e| matches!(e, Event::TrackChanged(Some(_))));
+    std::thread::sleep(Duration::from_millis(300));
+    p.send(Command::ClearQueue);
+    std::thread::sleep(Duration::from_millis(200));
+    // What was coming up is gone; the song playing isn't, and still plays.
+    assert_eq!(p.queue().len(), 1);
+    let s = p.snapshot();
+    assert_eq!(s.state, patina_core::PlayState::Playing);
+    assert_eq!(s.track.as_ref().map(|t| t.path.clone()), Some(a.clone()));
+    wait(&p, 10, |e| matches!(e, Event::Finished));
+    std::thread::sleep(Duration::from_millis(100));
+    // It played out, nothing followed, and nothing shows.
+    assert_eq!(*played.lock().unwrap(), vec![a]);
+    assert!(p.queue().is_empty());
+    let s = p.snapshot();
+    assert!(s.track.is_none(), "still showing {:?}", s.track);
+    assert!(s.current.is_none());
+    p.send(Command::Quit);
+}
+
+#[test]
+fn clearing_a_stopped_queue_shows_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tone(dir.path(), "a.flac", 1.0);
+    let p = player(Arc::new(Mutex::new(Vec::new())));
+    p.send(Command::SetQueue {
+        paths: vec![a],
+        start: 0,
+    });
+    wait(&p, 5, |e| matches!(e, Event::TrackChanged(Some(_))));
+    p.send(Command::Stop);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(p.snapshot().track.is_some(), "a stopped song still shows");
+    p.send(Command::ClearQueue);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(p.queue().is_empty());
+    assert!(p.snapshot().track.is_none());
+    p.send(Command::Quit);
+}
+
+#[test]
+fn clearing_near_the_end_drops_a_song_already_lined_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tone(dir.path(), "a.flac", 1.5);
+    let b = tone(dir.path(), "b.flac", 1.5);
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let p = player(played.clone());
+    p.send(Command::SetQueue {
+        paths: vec![a.clone(), b],
+        start: 0,
+    });
+    wait(&p, 5, |e| matches!(e, Event::TrackChanged(Some(_))));
+    // By now the decoder is well into the next song.
+    std::thread::sleep(Duration::from_millis(1250));
+    p.send(Command::ClearQueue);
+    wait(&p, 10, |e| matches!(e, Event::Finished));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(*played.lock().unwrap(), vec![a]);
+    assert!(p.queue().is_empty());
+    assert!(p.snapshot().track.is_none());
+    p.send(Command::Quit);
+}

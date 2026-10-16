@@ -47,6 +47,10 @@ pub struct Progress {
     done: AtomicU64,
     /// 0 while the size isn't known.
     total: AtomicU64,
+    /// The size the server gave for a converted stream: only its guess
+    /// (so not `total`, which readers seek by), but near enough to tell
+    /// how many bytes a second of the song takes. 0 when there's none.
+    estimate: AtomicU64,
     state: AtomicU8,
     error: Mutex<Option<String>>,
 }
@@ -66,6 +70,15 @@ impl Progress {
             0 => None,
             t => Some(t),
         }
+    }
+
+    /// The real size if it's known, else the server's guess at it.
+    pub fn size_hint(&self) -> Option<u64> {
+        self.total()
+            .or(match self.estimate.load(Ordering::Acquire) {
+                0 => None,
+                t => Some(t),
+            })
     }
 
     pub fn state(&self) -> State {
@@ -225,8 +238,12 @@ fn fetch_once(
     // A converted stream's length is the server's guess (Ampache works it
     // out from the bitrate and the song's length), so readers aren't told
     // it: a seek to the end of a guess lands in the wrong place.
-    if let Some(t) = total.filter(|_| resume) {
-        progress.total.store(t, Ordering::Release);
+    if let Some(t) = total {
+        if resume {
+            progress.total.store(t, Ordering::Release);
+        } else {
+            progress.estimate.store(t, Ordering::Release);
+        }
     }
     let mut buf = vec![0u8; 64 * 1024];
     loop {

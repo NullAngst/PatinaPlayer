@@ -505,7 +505,7 @@ impl Feeder {
             // plays from its download as that runs), else straight from
             // the server. The URL carries a login, so it's made now.
             let opts = self.open_options(&info);
-            match crate::cache::open(r, opts.abort.clone()) {
+            match crate::cache::open_for(r, info.duration, opts.abort.clone()) {
                 Some(Ok(crate::cache::Opening::File { path, original: o })) => {
                     original &= o;
                     Source::open_with(&path.to_string_lossy(), opts).map_err(|e| e.to_string())

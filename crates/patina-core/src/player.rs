@@ -381,6 +381,9 @@ struct Core {
     last_device: Option<crate::eq::OutputDevice>,
     /// The limiter's deepest reduction lately, and when it was seen.
     limit_hold: (f64, Instant),
+    /// Show nothing in the snapshot (no track, no length) until something
+    /// plays again. Set when the queue is cleared.
+    blank: bool,
 }
 
 impl Core {
@@ -456,6 +459,7 @@ impl Core {
             exclusive_refused: None,
             last_device: None,
             limit_hold: (0.0, Instant::now()),
+            blank: false,
         }
     }
 
@@ -589,6 +593,7 @@ impl Core {
     }
 
     fn start_entry(&mut self, entry: EntryId, pos: Duration) {
+        self.blank = false;
         self.fade_out_and_wait();
         self.flush_progress(false);
         self.clear_segments();
@@ -737,9 +742,30 @@ impl Core {
                 self.emit(Event::QueueChanged);
             }
             Command::ClearQueue => {
-                self.stop();
-                self.queue.lock().unwrap().clear();
-                self.current = None;
+                // Clearing takes away what's coming up. The song playing
+                // (or paused) plays to its end, then nothing shows.
+                match self.current.filter(|_| self.state != PlayState::Stopped) {
+                    Some(cur) => {
+                        self.queue.lock().unwrap().clear_except(cur);
+                        // The decoder may already be into the next song
+                        // (gapless, or a crossfade lined up). Back to this
+                        // one, from where it is, so that one never plays.
+                        if self.segments.iter().any(|s| s.entry != cur) {
+                            let pos = self.position();
+                            let playing = self.state == PlayState::Playing;
+                            self.fade_out_and_wait();
+                            self.clear_segments();
+                            self.resume_on_segment = playing;
+                            self.send_feed(FeedCmd::Start { entry: cur, pos });
+                        }
+                    }
+                    None => {
+                        self.stop();
+                        self.queue.lock().unwrap().clear();
+                        self.current = None;
+                        self.blank = true;
+                    }
+                }
                 self.emit(Event::QueueChanged);
             }
             Command::Append(paths) => {
@@ -1167,6 +1193,23 @@ impl Core {
             self.shared.end_of_queue.store(false, Ordering::Release);
             self.segments.clear();
             self.set_state(PlayState::Stopped);
+            // The last song of a cleared queue: it goes, and nothing shows.
+            let ended = {
+                let mut q = self.queue.lock().unwrap();
+                match q.ending() {
+                    Some(id) if self.current == Some(id) => {
+                        q.remove(id);
+                        q.set_current(None);
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if ended {
+                self.current = None;
+                self.blank = true;
+                self.emit(Event::QueueChanged);
+            }
             self.emit(Event::Finished);
         }
 
@@ -1220,7 +1263,10 @@ impl Core {
         let mut snap = self.snapshot.lock().unwrap();
         snap.state = self.state;
         snap.current = self.current;
-        if track.is_some() || self.state != PlayState::Stopped {
+        if self.blank && track.is_none() {
+            snap.duration = None;
+            snap.track = None;
+        } else if track.is_some() || self.state != PlayState::Stopped {
             snap.duration = track.as_ref().and_then(|t| t.duration);
             snap.track = track;
         }
