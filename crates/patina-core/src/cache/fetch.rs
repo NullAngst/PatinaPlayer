@@ -110,7 +110,7 @@ pub enum Outcome {
 }
 
 pub fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    crate::net::client_builder()
         .user_agent(concat!("PatinaPlayer/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         // Per read in the blocking client, so this catches a stalled

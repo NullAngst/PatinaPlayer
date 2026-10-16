@@ -24,7 +24,7 @@ pub enum PodcastError {
 }
 
 fn client(timeout: Option<Duration>) -> Result<reqwest::blocking::Client, PodcastError> {
-    let mut b = reqwest::blocking::Client::builder()
+    let mut b = crate::net::client_builder()
         .user_agent(concat!("PatinaPlayer/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10));
     b = match timeout {

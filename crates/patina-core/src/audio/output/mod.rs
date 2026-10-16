@@ -1,8 +1,13 @@
 //! Output backends. Each one owns a thread that calls the renderer and
 //! pushes the result to a device. Dropping the handle stops the thread.
 
+#[cfg(target_os = "android")]
+pub mod aaudio;
+#[cfg(feature = "alsa")]
 pub mod alsa;
 pub mod exclusive;
+#[cfg(feature = "alsa")]
+mod exclusive_alsa;
 pub mod null;
 #[cfg(feature = "pipewire")]
 pub mod pipewire;
@@ -224,6 +229,10 @@ pub enum OutputError {
     Alsa(String),
     #[error("PipeWire support was not compiled in")]
     NoPipeWire,
+    #[error("ALSA support was not compiled in")]
+    NoAlsa,
+    #[error("{0}")]
+    AAudio(String),
     /// The device can't play this rate. It offered `got`.
     #[error("{device} can't play {want} Hz (it offered {got} Hz)")]
     Rate { device: String, want: u32, got: u32 },
@@ -279,16 +288,24 @@ pub fn list_outputs(backend: Backend) -> Vec<OutDevice> {
             Err(_) => {}
         }
     }
+    #[cfg(target_os = "android")]
+    if backend == Backend::Auto {
+        return aaudio::list_outputs();
+    }
     match backend {
         Backend::Null => Vec::new(),
         #[cfg(feature = "pipewire")]
         Backend::PipeWire => Vec::new(),
+        #[cfg(feature = "alsa")]
         _ => alsa_outputs(),
+        #[cfg(not(feature = "alsa"))]
+        _ => Vec::new(),
     }
 }
 
 /// ALSA's playback PCMs, as `aplay -L` lists them, minus the ones that
 /// are for surround layouts or digital passthrough.
+#[cfg(feature = "alsa")]
 fn alsa_outputs() -> Vec<OutDevice> {
     let Ok(hints) = ::alsa::device_name::HintIter::new_str(None, "pcm") else {
         return Vec::new();
@@ -322,11 +339,18 @@ fn alsa_outputs() -> Vec<OutDevice> {
 pub fn open(cfg: &OutputConfig, renderer: Renderer) -> Result<Box<dyn Output>, OutputError> {
     match cfg.backend {
         Backend::Null => Ok(Box::new(null::NullOutput::start(renderer, None))),
+        // Android has one way out: AAudio.
+        #[cfg(target_os = "android")]
+        Backend::Auto => Ok(Box::new(aaudio::AAudioOutput::start(cfg, renderer)?)),
+        #[cfg(feature = "alsa")]
         Backend::Alsa => Ok(Box::new(alsa::AlsaOutput::start(cfg, renderer)?)),
+        #[cfg(not(feature = "alsa"))]
+        Backend::Alsa => Err(OutputError::NoAlsa),
         #[cfg(feature = "pipewire")]
         Backend::PipeWire => Ok(Box::new(pipewire::PwOutput::start(cfg, renderer)?)),
         #[cfg(not(feature = "pipewire"))]
         Backend::PipeWire => Err(OutputError::NoPipeWire),
+        #[cfg(not(target_os = "android"))]
         Backend::Auto => {
             #[cfg(feature = "pipewire")]
             {
@@ -334,16 +358,26 @@ pub fn open(cfg: &OutputConfig, renderer: Renderer) -> Result<Box<dyn Output>, O
                 // the ring survives the fallback.
                 match pipewire::PwOutput::try_start(cfg, renderer) {
                     Ok(o) => Ok(Box::new(o)),
+                    #[cfg(feature = "alsa")]
                     Err((e, renderer)) => {
                         log::info!("{e}, falling back to ALSA");
                         let mut alsa_cfg = cfg.clone();
                         alsa_cfg.device = None;
                         Ok(Box::new(alsa::AlsaOutput::start(&alsa_cfg, renderer)?))
                     }
+                    #[cfg(not(feature = "alsa"))]
+                    Err((e, _)) => Err(e),
                 }
             }
-            #[cfg(not(feature = "pipewire"))]
-            Ok(Box::new(alsa::AlsaOutput::start(cfg, renderer)?))
+            #[cfg(all(not(feature = "pipewire"), feature = "alsa"))]
+            {
+                Ok(Box::new(alsa::AlsaOutput::start(cfg, renderer)?))
+            }
+            #[cfg(all(not(feature = "pipewire"), not(feature = "alsa")))]
+            {
+                let _ = renderer;
+                Err(OutputError::NoAlsa)
+            }
         }
     }
 }
@@ -352,6 +386,7 @@ pub fn open(cfg: &OutputConfig, renderer: Renderer) -> Result<Box<dyn Output>, O
 /// any source. Dither for integer outputs belongs to the backend that
 /// knows the target depth.
 #[inline]
+#[cfg_attr(not(any(feature = "alsa", target_os = "android")), allow(dead_code))]
 pub(crate) fn to_f32(s: f64) -> f32 {
     s as f32
 }
@@ -404,6 +439,7 @@ impl Dither {
 /// The inverse of the decoder's scale, so 16 and 24-bit PCM round-trip
 /// exactly when nothing touched the samples.
 #[inline]
+#[cfg_attr(not(any(feature = "alsa", target_os = "android")), allow(dead_code))]
 pub(crate) fn to_int(s: f64, bits: u32) -> i64 {
     let scale = (1i64 << (bits - 1)) as f64;
     let v = (s * scale).round();

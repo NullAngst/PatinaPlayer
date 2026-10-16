@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer};
 use super::{RemoteError, Result};
 
 pub fn client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+    crate::net::client_builder()
         .user_agent(concat!("PatinaPlayer/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         // Big libraries make for slow first pages on small servers.

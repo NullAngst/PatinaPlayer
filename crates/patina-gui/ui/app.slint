@@ -1613,11 +1613,31 @@ export component AppWindow inherits Window {
         colorize: P.dots;
     }
 
+    // Phones draw under the status and navigation bars: keep everything
+    // inside the part of the screen that's safe to touch.
     keys := FocusScope {
+        x: root.safe-area-insets.left;
+        y: root.safe-area-insets.top;
+        width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
+        height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
         key-pressed(e) => {
+            // Android's Back closes what's open first: a dialog, the
+            // drawer, a side panel. Then it goes back a level, in Rust.
             if root.dialog != 0 {
-                if e.text == Key.Escape { root.dlg-cancel(); return accept; }
+                if e.text == Key.Escape || e.text == Key.Back { root.dlg-cancel(); return accept; }
                 return reject;
+            }
+            if e.text == Key.Back && root.drawer-open {
+                root.drawer-open = false;
+                return accept;
+            }
+            if e.text == Key.Back && root.tiny && root.queue-panel {
+                root.toggle-queue();
+                return accept;
+            }
+            if e.text == Key.Back && root.tiny && root.lyrics-open {
+                root.lyrics-clicked();
+                return accept;
             }
             if root.key(e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt) {
                 return accept;
@@ -2518,7 +2538,7 @@ export component AppWindow inherits Window {
         // behind it that closes it.
         if root.tiny && root.drawer-open: Rectangle {
             y: 0;
-            height: root.height - root.bar-h;
+            height: keys.height - root.bar-h;
             background: P.scrim;
             TouchArea { clicked => { root.drawer-open = false; keys.focus(); } }
         }
@@ -2530,7 +2550,7 @@ export component AppWindow inherits Window {
             x: 0;
             y: 0;
             width: root.tiny ? 228px : root.side-w;
-            height: root.height - root.bar-h;
+            height: keys.height - root.bar-h;
             visible: !root.tiny || root.drawer-open;
             background: P.surface;
             drop-shadow-blur: root.tiny ? 18px : 0px;
@@ -2766,10 +2786,10 @@ export component AppWindow inherits Window {
 
         // ----- Lyrics panel -----
         if root.lyrics-open: Rectangle {
-            x: root.tiny ? 0px : root.width - root.lyrics-w - (root.queue-panel ? root.queue-w : 0px);
+            x: root.tiny ? 0px : keys.width - root.lyrics-w - (root.queue-panel ? root.queue-w : 0px);
             y: 0;
-            width: root.tiny ? root.width : root.lyrics-w;
-            height: root.height - root.bar-h;
+            width: root.tiny ? keys.width : root.lyrics-w;
+            height: keys.height - root.bar-h;
             background: P.surface;
             // Takes the clicks, so none reach the view under it.
             TouchArea {}
@@ -2823,10 +2843,10 @@ export component AppWindow inherits Window {
 
         // ----- Queue panel -----
         if root.queue-panel: Rectangle {
-            x: root.tiny ? 0px : root.width - root.queue-w;
+            x: root.tiny ? 0px : keys.width - root.queue-w;
             y: 0;
-            width: root.tiny ? root.width : root.queue-w;
-            height: root.height - root.bar-h;
+            width: root.tiny ? keys.width : root.queue-w;
+            height: keys.height - root.bar-h;
             background: P.surface;
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
@@ -2900,7 +2920,7 @@ export component AppWindow inherits Window {
         if root.toast != "": Rectangle {
             x: parent.width - self.width - 24px;
             y: parent.height - root.bar-h - self.height - 16px;
-            width: min(tt.preferred-width + 36px, 520px, root.width - 48px);
+            width: min(tt.preferred-width + 36px, 520px, keys.width - 48px);
             height: tt.preferred-height + 20px;
             border-radius: 8px * P.round;
             border-width: 1px;
@@ -2923,8 +2943,8 @@ export component AppWindow inherits Window {
             background: P.scrim;
             TouchArea { clicked => { root.dlg-cancel(); } }
             Rectangle {
-                width: min(root.dialog == 4 ? 620px : 460px, root.width - 24px);
-                height: min(dlg.preferred-height, root.height - 24px);
+                width: min(root.dialog == 4 ? 620px : 460px, keys.width - 24px);
+                height: min(dlg.preferred-height, keys.height - 24px);
                 clip: true;
                 border-radius: 10px * P.round;
                 border-width: 1px;
@@ -2982,7 +3002,7 @@ export component AppWindow inherits Window {
 
                     // Playlists to pick from. Scrolls once there are many.
                     if root.dialog == 2: ListView {
-                        height: min(root.dlg-items.length * 38px, 380px, root.height - 180px);
+                        height: min(root.dlg-items.length * 38px, 380px, keys.height - 180px);
                         for it[i] in root.dlg-items: Rectangle {
                             height: 38px;
                             Rectangle {
@@ -3014,7 +3034,7 @@ export component AppWindow inherits Window {
 
                     // The help is long; on a short window it scrolls.
                     if root.dialog == 4: Flickable {
-                        height: min(ht.preferred-height, root.height - 160px);
+                        height: min(ht.preferred-height, keys.height - 160px);
                         content-height: ht.preferred-height;
                         ht := Text {
                             width: parent.width;

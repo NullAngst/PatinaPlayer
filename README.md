@@ -2,7 +2,7 @@
 
 PatinaPlayer is a Linux music player for Subsonic, Ampache and DLNA servers and local folders, for people who want a minimal interface on top of a serious playback chain.
 
-This is milestone 15 of the build plan: everything from milestones 1 to 14 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, the output controls, the amp stack, ratings, Favorites and lyrics), plus media keys and the desktop's media controls through MPRIS2, a tray icon with close-to-tray, the channel tools (mono, width, crossfeed, balance), and a desktop window that shrinks down to phone size without cutting anything off. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Android app is milestone 16, in `android/`.
+This is milestone 16 of the build plan: everything from milestones 1 to 15 (the audio engine, the library, radio, podcasts, both apps, cover art, listening stats, the AppImage, bit-perfect output, an editable Settings view, playlists from any view, the themes, Subsonic, Ampache and DLNA servers, the song cache with prefetch, offline pins and offline mode, mixes, volume leveling, the EQ and true-peak limiter, Last.fm, the output controls, the amp stack, ratings, Favorites, lyrics, media keys, the tray, the channel tools and the phone-size window), plus the Android app. Milestone 15 brought media keys and the desktop's media controls through MPRIS2, a tray icon with close-to-tray, the channel tools (mono, width, crossfeed, balance), and a desktop window that shrinks down to phone size without cutting anything off. There are two programs on one core. `patinaplayer` is the desktop app and `patinaplayer-tui` runs in a terminal. Both show the same views, play through the same engine, and read and write the same library, playlists and config. The Android app is the desktop app's window and core on a phone, with AAudio for output and bit-perfect USB on Android 14 and later.
 
 ## What works right now
 
@@ -268,11 +268,11 @@ This is milestone 15 of the build plan: everything from milestones 1 to 14 (the 
 
 ## The AppImage
 
-GitHub builds it. Push a tag and you get a release with the AppImage on it:
+GitHub builds it. Push a tag and you get a release with the AppImage on it (and the APK, see The Android app):
 
 1. Push the repo to GitHub, with `.github/workflows/appimage.yml` in it.
 2. Tag a version and push the tag: `git tag v0.2.0 && git push origin v0.2.0`
-3. Wait for the AppImage workflow under the Actions tab. It takes about 15 minutes the first time and less after, since FFmpeg and the Rust build are cached.
+3. Wait for the Release workflow under the Actions tab. It takes about 15 minutes the first time and less after, since FFmpeg and the Rust build are cached.
 4. The release shows up under Releases with `PatinaPlayer-0.2.0-x86_64.AppImage` and its `.zsync` file.
 
 For a test build without a release, run the workflow by hand from the Actions tab (Run workflow). The AppImage lands as a downloadable artifact on that run.
@@ -294,6 +294,31 @@ What's in it, and what isn't:
 To build one locally instead: `bash packaging/build-appimage.sh`. You need everything from Prerequisites plus `nasm`, `libgnutls28-dev` and `zlib1g-dev` (or whichever names your distro uses). The result is in `target/appimage/`.
 
 A note on how albums are grouped. Tracks with an album artist tag group by album artist plus album name, wherever the files sit. Tracks without one group by album name plus folder, which keeps two unrelated "Greatest Hits" apart and keeps a compilation together even when every track has a different artist. Disc folders (`CD1`, `Disc 2`) are folded into their parent, so multi-disc albums come out as one.
+
+## The Android app
+
+Same window, same views, same core as the desktop app, built for arm64 phones running Android 9 or later. GitHub builds it next to the AppImage: push a tag and the release gets `PatinaPlayer-<version>-arm64.apk` as well.
+
+THE APK HAS TO BE SIGNED WITH THE SAME KEY EVERY RELEASE, or Android refuses to install it over the old one and you lose the app's data to reinstall it. Making that key and giving it to GitHub is a one-time job, walked through in the signing guide that came with this milestone. Until the key is in the repository's secrets, tag builds stop at the APK step on purpose, and the AppImage still ships.
+
+Installing it:
+
+1. Download the APK from the release on your phone.
+2. Open it. Android asks to let your browser (or file manager) install apps; allow it for that one app.
+3. Open PatinaPlayer and allow music and notifications when asked.
+
+What it does on a phone:
+
+- Your phone's Music folder (`/storage/emulated/0/Music`) goes in the library on first start. More folders go in under Settings, Library, by typing the path, since there's no folder picker yet.
+- Servers, radio, podcasts, the cache, mixes, Last.fm, the EQ, the amp stack and leveling all work as on the desktop. Everything the app keeps (config, the index, the cache, cover art) lives in its own private storage.
+- Music keeps playing with the screen off. The notification and the lock screen show what's playing with its cover and have back, play/pause and next. Bluetooth headphone buttons and a car's Bluetooth controls go through the same media session. Android Auto isn't supported: it needs the app to offer its library for browsing, which it doesn't yet.
+- Unplugging headphones pauses. A call or a navigation prompt pauses and comes back after; another player starting stops this one.
+- Back goes back through the views. With nowhere left to go, it puts the app in the background and the music keeps going.
+- Output goes through AAudio. Settings, Output lists the phone's speaker, wired headphones, USB DACs, Bluetooth and HDMI as Android sees them, and follows them as they're plugged in and out.
+- Bit-perfect, on Android 14 and later with a USB DAC: Android's mixer is put into bit-perfect mode at the song's rate and depth and the song goes to the DAC untouched. Other sounds on the phone don't reach the DAC while it plays, which is the same tradeoff as on the desktop. On older Android, or a DAC that Android doesn't offer bit-perfect for, it says why and plays through the mixer.
+- Passwords go in `secrets.toml` in the app's private storage, since there's no desktop keyring on a phone. Other apps can't read it; anyone with root on the phone can.
+
+Building it yourself: `bash packaging/build-apk.sh`. It needs the Android SDK with build-tools and a platform of 34 or newer (`ANDROID_HOME`), the NDK (`ANDROID_NDK_ROOT`), JDK 17 or newer, cmake, and `rustup target add aarch64-linux-android`. It builds FFmpeg and Mbed TLS for Android first (`packaging/build-ffmpeg-android.sh`), then the Rust library, the Java side and the APK, all without Gradle. The result is in `target/apk/`. Without a release key in the environment it signs with a debug key it keeps in `target/android-debug.keystore`, which is fine for trying it on your own phone.
 
 ## Prerequisites
 
@@ -595,13 +620,15 @@ crates/
     examples/mock_server.rs  a stand-in Navidrome on localhost, to try the apps without a server
     tests/              gapless, seek, library, watcher, player, filter, network, server, keyring and browser tests
   patina-tui/           the terminal frontend (ratatui, ratatui-image)
-  patina-gui/           the desktop app (Slint)
+  patina-gui/           the desktop app (Slint), and the window the Android app shows
     ui/app.slint        the whole window
     ui/fonts/           bundled fonts and their license
     src/bridge.rs       turns the shared browser into Slint models and back
+  patina-android/       the Android app's native library: startup, the JNI glue, the media session's feed
+android/                manifest, icons and the Java side (permissions, media session, device list, bit-perfect USB)
 assets/                 app icon and desktop file
-packaging/              AppImage: FFmpeg build, AppDir, entry point
-.github/workflows/      CI on every push, real servers in containers, AppImage on every tag
+packaging/              AppImage and APK builds, FFmpeg for each
+.github/workflows/      CI on every push, real servers in containers, AppImage and APK on every tag
 ```
 
 The core owns all the state. The views and what each action does live in `patina-core/src/browse`, so the TUI and the desktop app are only drawing and input. A fix to how a view behaves lands in both at once.
@@ -642,6 +669,14 @@ The network tests run a small HTTP server inside the test itself: an ICY stream 
 
 ## Known gaps in this milestone
 
+- The Android app was type-checked and linted here against Android's own API (the Rust side for aarch64-linux-android with its standard library built from source, the Java side against `android.jar`), and the APK assembly, signing and verification were run end to end with stand-ins for the NDK compiler and d8. It hasn't been linked with the real NDK, run on a phone or an emulator, or built by the workflow yet. This box can't reach Google's servers for the SDK. The first tagged run, and the first install, are the real tests.
+- The APK is arm64 only. That's every phone from the last several years; there's no x86_64 build for emulators on a PC.
+- Without the music permission, the Music folder scans as empty, and it's scanned again the moment the permission is granted. If the folder watcher couldn't start then, new files turn up on the next start or with Rescan rather than straight away.
+- There's no folder picker on Android yet. Folders beyond Music go in by typing their path, like `/storage/emulated/0/Download/Albums`. A memory card's path has its own id in it, `/storage/1A2B-3C4D/Music`, which a file manager shows.
+- AutoEq import on Android needs the file's path typed in too, for the same reason.
+- Bit-perfect on Android was written against the Android 14 API documents, not tried on a DAC. What a phone offers depends on its maker: some don't offer bit-perfect mode at all, and then the app says so and plays through the mixer.
+- FFmpeg on Android uses Mbed TLS for HTTPS streams instead of GnuTLS. Like the desktop build, it doesn't check stream certificates. Server, Last.fm and lyrics calls go through the app's own HTTP client, which checks them against Android's system certificates. Certificates you installed yourself on the phone aren't trusted by it, so a server behind a private CA needs plain http on the home network (allowed) or a real certificate.
+- The release workflow is now one workflow, still in `appimage.yml`, named Release: it builds the AppImage and the APK side by side, then makes one release with both. If one build fails, the other still ships.
 - Podcasts and stations have no art. Cover art for songs works everywhere, MPRIS included.
 - MPRIS was tested here against a private D-Bus with the calls Plasma's widget and `playerctl` make (play, pause, next, the position slider, loop, shuffle, volume, raise, quit) and the change signals they listen for. The tray was tested against a stand-in StatusNotifierWatcher on the same bus: it registers, its tooltip and icon follow the player, click hides and shows the window, and the close button hides to it. Neither has met a real Plasma panel from this box.
 - MPRIS reports a playback rate of 1.0 even when a podcast plays sped up, and doesn't offer to change it, since speed is a podcast-only setting here.
@@ -714,4 +749,4 @@ GPL-3.0-or-later. See `LICENSE`.
 
 The bundled fonts (Inter, Noto Serif, JetBrains Mono, M PLUS Rounded 1c, Zen Maru Gothic) are under the SIL Open Font License, in `crates/patina-gui/ui/fonts/`.
 
-Now PatinaPlayer plays your servers and folders through a cache that downloads ahead and holds what you've pinned, answers your media keys and your panel's media controls, sits in the tray while it plays, fits whatever size window you give it, and everything is working as it should be.
+Now PatinaPlayer plays your servers and folders through a cache that downloads ahead and holds what you've pinned, on your desktop and on your phone, answers your media keys, your panel's media controls and your lock screen, and everything is working as it should be.

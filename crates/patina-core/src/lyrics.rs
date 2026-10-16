@@ -219,7 +219,7 @@ fn from_lrclib(info: &TrackInfo) -> Result<Option<Lyrics>, String> {
     let (Some(artist), Some(title)) = (info.artist.as_deref(), info.title.as_deref()) else {
         return Ok(None);
     };
-    let http = reqwest::blocking::Client::builder()
+    let http = crate::net::client_builder()
         .user_agent(concat!(
             "PatinaPlayer/",
             env!("CARGO_PKG_VERSION"),

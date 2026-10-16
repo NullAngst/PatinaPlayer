@@ -53,7 +53,7 @@ const MAX_PLAYLIST: usize = 64 * 1024;
 const MAX_DEPTH: usize = 3;
 
 fn client() -> Result<reqwest::blocking::Client, RadioError> {
-    reqwest::blocking::Client::builder()
+    crate::net::client_builder()
         .user_agent(concat!("PatinaPlayer/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(15))

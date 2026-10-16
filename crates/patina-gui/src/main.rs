@@ -2,10 +2,6 @@
 //! (library, queue, playback, radio, podcasts) is the same core the TUI
 //! runs on, through the shared Browser.
 
-mod art;
-mod bridge;
-mod desktop;
-
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -13,7 +9,8 @@ use clap::Parser;
 use patina_core::Backend;
 use patina_core::session::{self, Options, Session};
 
-slint::include_modules!();
+use patina_gui::{AppWindow, bridge};
+use slint::ComponentHandle;
 
 #[derive(Parser, Debug)]
 #[command(name = "patinaplayer", version, about = "PatinaPlayer, desktop app")]

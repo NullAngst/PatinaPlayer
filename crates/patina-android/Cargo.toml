@@ -1,0 +1,28 @@
+[package]
+name = "patina-android"
+description = "PatinaPlayer for Android: the same core and window, AAudio output, and the glue to the Java side"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The app's native library. Built only for Android (packaging/build-apk.sh
+# and the android workflow); on anything else it compiles to nothing.
+[lib]
+name = "patina_android"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[features]
+# Link the FFmpeg built by packaging/build-ffmpeg-android.sh.
+static-ffmpeg = ["patina-core/static-ffmpeg"]
+
+[dependencies]
+patina-core = { path = "../patina-core", default-features = false }
+patina-gui = { path = "../patina-gui", default-features = false }
+log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { version = "1.18", features = ["backend-android-activity-06"] }
+jni = "0.21"
+android_logger = "0.15"

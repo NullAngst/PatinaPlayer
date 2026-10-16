@@ -85,7 +85,7 @@ impl PartReader {
         if self.ahead.as_ref().is_none_or(|a| a.at != self.pos) {
             self.ahead = None;
             let http = self.http.get_or_insert_with(|| {
-                reqwest::blocking::Client::builder()
+                crate::net::client_builder()
                     .user_agent(concat!("PatinaPlayer/", env!("CARGO_PKG_VERSION")))
                     .connect_timeout(Duration::from_secs(10))
                     .timeout(Duration::from_secs(15))

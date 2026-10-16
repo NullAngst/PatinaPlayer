@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PatinaPlayer for Android. The screen is a NativeActivity running the
+  Rust library (crates/patina-android); the Java around it does what only
+  Java can: permissions, the media session and its notification, the list
+  of audio devices, and bit-perfect USB on Android 14 and later.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.patina.player">
+
+    <!-- Music on the phone: Android 13 and later ask for audio only. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- Servers, radio, podcasts, Last.fm, lyrics. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- DLNA servers answer a multicast search. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- Playing on with the screen off, with the media notification. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Bit-perfect USB: setting the DAC's mixer. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <!-- Plain http for music servers on the home network. -->
+    <application
+        android:label="PatinaPlayer"
+        android:icon="@mipmap/ic_launcher"
+        android:hasCode="true"
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true">
+
+        <!-- Rotation and the like resize the window instead of restarting
+             the activity, which would restart the player with it. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|density|uiMode|fontScale"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data android:name="android.app.lib_name" android:value="patina_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".PlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+    </application>
+</manifest>

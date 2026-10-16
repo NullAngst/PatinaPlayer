@@ -1000,10 +1000,17 @@ pub fn rows(
     );
 
     // Output
+    #[cfg(not(target_os = "android"))]
     let backends = [
         (Backend::Auto, "auto", "PipeWire, else ALSA"),
         (Backend::PipeWire, "pipewire", "PipeWire"),
         (Backend::Alsa, "alsa", "ALSA"),
+        (Backend::Null, "null", "None (silent)"),
+    ];
+    // Android has one way out.
+    #[cfg(target_os = "android")]
+    let backends = [
+        (Backend::Auto, "auto", "Android (AAudio)"),
         (Backend::Null, "null", "None (silent)"),
     ];
     push(
@@ -1159,7 +1166,11 @@ pub fn rows(
             disabled: None,
             key: Key::BitPerfect,
             label: "Bit-perfect".into(),
-            help: "Local files go straight to the DAC, untouched. Takes the card for itself while playing.",
+            help: if cfg!(target_os = "android") {
+                "Local files go straight to a USB DAC, untouched. Needs Android 14 or later, and a DAC Android offers bit-perfect for."
+            } else {
+                "Local files go straight to the DAC, untouched. Takes the card for itself while playing."
+            },
             control: Control::Choice {
                 options: modes
                     .iter()
@@ -1172,7 +1183,12 @@ pub fn rows(
             },
         },
     );
-    let mut opts: Vec<(String, String)> = vec![(String::new(), "First sound card".into())];
+    let first = if cfg!(target_os = "android") {
+        "First USB DAC"
+    } else {
+        "First sound card"
+    };
+    let mut opts: Vec<(String, String)> = vec![(String::new(), first.into())];
     opts.extend(devices.iter().map(|d| (d.id.clone(), d.name.clone())));
     if let Some(cur) = &cfg.output.bit_perfect_device
         && !devices.iter().any(|d| &d.id == cur)

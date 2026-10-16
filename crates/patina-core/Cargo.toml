@@ -7,8 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["pipewire"]
+default = ["pipewire", "alsa"]
 pipewire = ["dep:pipewire"]
+# ALSA: the shared output's fallback, and bit-perfect on Linux. The Android
+# build leaves it out and plays through AAudio instead.
+alsa = ["dep:alsa"]
 # Link FFmpeg statically, from whatever pkg-config finds first. The AppImage
 # build points it at the audio-only FFmpeg from packaging/build-ffmpeg.sh.
 static-ffmpeg = ["ffmpeg-next/static"]
@@ -17,7 +20,7 @@ static-ffmpeg = ["ffmpeg-next/static"]
 # Only decoding, demuxing and filters: no devices, no scaling.
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "filter"] }
 pipewire = { version = "0.10", optional = true }
-alsa = "0.12"
+alsa = { version = "0.12", optional = true }
 # Device reservation over D-Bus, for the bit-perfect output.
 zbus = "5"
 rtrb = "0.4"
@@ -50,3 +53,7 @@ rubato = "5"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Android: AAudio for output.
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", features = ["audio", "api-level-28"] }

@@ -1,31 +1,45 @@
 [package]
 name = "patina-gui"
-description = "PatinaPlayer desktop frontend"
+description = "PatinaPlayer's window: the desktop app, and the screen of the Android app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+# The window, the bridge to the core, the tray and MPRIS, as a library the
+# Android app builds on too.
+[lib]
+name = "patina_gui"
+path = "src/lib.rs"
 
 [[bin]]
 name = "patinaplayer"
 path = "src/main.rs"
 
 [features]
+default = ["linux-audio"]
+# PipeWire and ALSA output. The Android app turns this off.
+linux-audio = ["patina-core/pipewire", "patina-core/alsa"]
 # See patina-core. Used by the AppImage build.
 static-ffmpeg = ["patina-core/static-ffmpeg"]
 
 [dependencies]
-patina-core = { path = "../patina-core" }
-slint = "1.18"
+patina-core = { path = "../patina-core", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 log = "0.4"
 env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+slint = "1.18"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # The tray icon (StatusNotifierItem). Its own small executor, no tokio.
 ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { version = "1.18", features = ["backend-android-activity-06"] }
 
 [build-dependencies]
 slint-build = "1.18"

@@ -122,6 +122,9 @@ pub struct State {
     theme: Option<Theme>,
     /// MPRIS and the tray icon.
     desktop: crate::desktop::Desktop,
+    /// What Back does with nowhere left to go back to (Android: send the
+    /// app to the background, still playing). None leaves it unhandled.
+    back_out: Option<Box<dyn Fn()>>,
     /// Closing the window hides it (there's a tray icon to come back
     /// from, and the setting says so). Read by the close handler.
     hide_on_close: Rc<std::cell::Cell<bool>>,
@@ -272,6 +275,7 @@ impl State {
             eq_pick: None,
             theme: None,
             desktop,
+            back_out: None,
             hide_on_close,
         }
     }
@@ -1848,10 +1852,7 @@ impl State {
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new()
-                .set_title("Add a music folder")
-                .pick_folder();
-            let _ = tx.send(picked);
+            let _ = tx.send(pick_folder_dialog());
         });
         self.folder_pick = Some((rx, Instant::now()));
     }
@@ -2197,11 +2198,7 @@ impl State {
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new()
-                .set_title("Import an AutoEq or Equalizer APO file")
-                .add_filter("EQ settings", &["txt"])
-                .pick_file();
-            let _ = tx.send(picked);
+            let _ = tx.send(pick_eq_dialog());
         });
         self.eq_pick = Some((rx, Instant::now()));
     }
@@ -2573,6 +2570,16 @@ impl State {
             }
         } else if is(Key::Backspace) {
             self.b.pop();
+        } else if is(Key::Back) {
+            // Android's Back: a level up while there is one, then out of
+            // the app without stopping the music, where the app says how.
+            if ui.get_can_back() {
+                self.b.pop();
+            } else if let Some(out) = &self.back_out {
+                out();
+            } else {
+                return false;
+            }
         } else if is(Key::LeftArrow) {
             p.send(Command::SeekBy(if shift { -30.0 } else { -5.0 }));
         } else if is(Key::RightArrow) {
@@ -2737,6 +2744,23 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    /// What Back does once there's no level left to go back to.
+    pub fn on_back_out(&self, f: impl Fn() + 'static) {
+        self._state.borrow_mut().back_out = Some(Box::new(f));
+    }
+
+    /// The player, for the platform glue around the window (Android's media
+    /// session).
+    pub fn player(&self) -> patina_core::Player {
+        self._state.borrow().b.player.clone()
+    }
+
+    /// Look through the library folders and feeds again, as the Rescan
+    /// action does (Android, once the app may read music).
+    pub fn rescan(&self) {
+        self._state.borrow_mut().b.rescan();
+    }
+
     /// Save the queue to its server if it's a server's, then stop the
     /// player with a fade.
     pub fn shutdown(&self, fade_ms: u32) {
@@ -3019,6 +3043,35 @@ fn dial_arc(pos: f64) -> String {
     let (x, y) = at(135.0 + 270.0 * pos);
     let large = if 270.0 * pos > 180.0 { 1 } else { 0 };
     format!("M {x0:.2} {y0:.2} A 38 38 0 {large} 1 {x:.2} {y:.2}")
+}
+
+/// The desktop's folder picker. None when there isn't one, and the app
+/// asks for a typed path instead.
+#[cfg(not(target_os = "android"))]
+fn pick_folder_dialog() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Add a music folder")
+        .pick_folder()
+}
+
+/// Android: no desktop picker; the music folder is found on its own, and
+/// any other is typed in.
+#[cfg(target_os = "android")]
+fn pick_folder_dialog() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(target_os = "android"))]
+fn pick_eq_dialog() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Import an AutoEq or Equalizer APO file")
+        .add_filter("EQ settings", &["txt"])
+        .pick_file()
+}
+
+#[cfg(target_os = "android")]
+fn pick_eq_dialog() -> Option<PathBuf> {
+    None
 }
 
 /// Bring the window back from the tray, or forward from behind others.

@@ -153,7 +153,7 @@ impl LastFm {
             key: key.to_string(),
             secret: String::new(),
             session: String::new(),
-            http: reqwest::blocking::Client::builder()
+            http: crate::net::client_builder()
                 .user_agent(concat!("PatinaPlayer/", env!("CARGO_PKG_VERSION")))
                 .timeout(Duration::from_secs(15))
                 .build()

@@ -15,6 +15,7 @@ pub mod library;
 pub mod lyrics;
 pub mod mix;
 pub mod mpris;
+pub mod net;
 pub mod player;
 pub mod podcast;
 pub mod queue;
