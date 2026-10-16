@@ -125,6 +125,77 @@ global LongPress {
     out property <length> slop: 12px;
 }
 
+// The whole of a text that's cut short with "…". Right-click it, or hold
+// it down (finger or mouse), and it shows in a bubble by the pointer. A
+// click anywhere, or Escape, closes it. Drawn by the window, over
+// everything else.
+global Peek {
+    in-out property <bool> open;
+    in-out property <string> text;
+    // Where the press was, in window coordinates.
+    in-out property <length> at-x;
+    in-out property <length> at-y;
+    public function show(t: string, x: length, y: length) {
+        self.text = t;
+        self.at-x = x;
+        self.at-y = y;
+        self.open = true;
+    }
+}
+
+// Goes inside (or over) a text that may be cut short. Right-click, or a
+// long press, shows the whole text when it is cut. A plain click still
+// does whatever `tapped` does; the release that ends a long press doesn't.
+component PeekArea inherits TouchArea {
+    in property <string> full;
+    in property <bool> cut;
+    callback tapped;
+    // Any press, before anything else: rows use it to select.
+    callback down;
+    property <bool> fired;
+    property <length> press-x;
+    property <length> press-y;
+    function peek(mx: length, my: length) {
+        Peek.show(root.full, root.absolute-position.x + mx, root.absolute-position.y + my);
+    }
+    hold := Timer {
+        interval: LongPress.after;
+        running: false;
+        triggered => {
+            self.running = false;
+            if root.pressed && root.cut {
+                root.fired = true;
+                root.peek(root.press-x, root.press-y);
+            }
+        }
+    }
+    pointer-event(e) => {
+        if e.kind == PointerEventKind.down {
+            root.fired = false;
+            root.down();
+            if e.button == PointerEventButton.right {
+                if root.cut { root.peek(self.mouse-x, self.mouse-y); }
+            } else if e.button == PointerEventButton.left {
+                root.press-x = self.mouse-x;
+                root.press-y = self.mouse-y;
+                hold.running = false;
+                hold.running = root.cut;
+            }
+        }
+        if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+            hold.running = false;
+        }
+    }
+    moved => {
+        if abs(self.mouse-x - root.press-x) > LongPress.slop || abs(self.mouse-y - root.press-y) > LongPress.slop {
+            hold.running = false;
+        }
+    }
+    clicked => {
+        if !root.fired { root.tapped(); }
+    }
+}
+
 // ----- Data from Rust -----
 
 export struct SideItem {
@@ -348,6 +419,9 @@ component Chip inherits Rectangle {
     callback clicked;
     // Narrow windows: the icon alone, for chips that have one.
     in property <bool> icon-only: false;
+    // What a right-click or long press shows when the label is cut short
+    // (or hidden, on an icon-only chip). The label without its "▾".
+    in property <string> peek: text;
     height: h;
     border-radius: 6px * P.round;
     border-width: 1px;
@@ -382,9 +456,21 @@ component Chip inherits Rectangle {
             color: primary ? P.on-accent : (danger ? P.copper : (active ? P.accent-text : P.text));
         }
     }
-    ta := TouchArea {
+    // The label at its full width, unseen, to tell whether it fits.
+    measure := Text {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        text: root.text;
+        font-size: 12.5px;
+        font-weight: primary || P.kawaii ? 700 : 400;
+    }
+    ta := PeekArea {
         mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+        full: root.peek;
+        cut: (root.icon-only && root.icon != "")
+            || measure.preferred-width > root.width - 24px - (root.icon != "" ? 22px : 0px) + 0.5px;
+        tapped => { root.clicked(); }
     }
 }
 
@@ -643,6 +729,10 @@ component ListRow inherits Rectangle {
     property <length> press-y;
     // A narrow list drops the third column and tightens the rest.
     property <bool> slim: self.width < 560px;
+    // The title doesn't fit: its menu opens with the whole of it, and a
+    // row with no menu shows it in a bubble.
+    property <bool> title-cut;
+    property <string> title-full: item.kind == 11 ? "missing: " + item.title : item.title;
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
     background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent));
     border-radius: 6px * P.round;
@@ -704,10 +794,13 @@ component ListRow inherits Rectangle {
             horizontal-stretch: item.kind == 10 ? 1.2 : 4;
             preferred-width: 0px;
             min-width: 60px;
-            text: item.kind == 11 ? "missing: " + item.title : item.title;
+            text: root.title-full;
             overflow: elide;
             vertical-alignment: center;
             font-size: 13px;
+            init => { root.title-cut = self.preferred-width > self.width + 0.5px; }
+            changed width => { root.title-cut = self.preferred-width > self.width + 0.5px; }
+            changed text => { root.title-cut = self.preferred-width > self.width + 0.5px; }
             font-weight: item.playing || item.kind == 15 ? (P.kawaii ? 800 : 600) : 400;
             color: item.warn ? P.copper : (item.playing || item.kind == 15 ? P.accent-text : (item.off ? P.wave : (item.dim ? P.muted : P.text)));
         }
@@ -751,6 +844,9 @@ component ListRow inherits Rectangle {
     cm := ContextMenuArea {
         enabled: item.selectable;
         Menu {
+            // The whole title, when the row cuts it short.
+            if root.title-cut: MenuItem { title: root.title-full; enabled: false; }
+            if root.title-cut: MenuSeparator {}
             // Things that play.
             if item.kind <= 8 || item.kind == 13 || item.kind == 16: MenuItem {
                 title: item.kind == 8 ? "Play (resume)" : "Play";
@@ -849,6 +945,9 @@ component ListRow inherits Rectangle {
                 if ta.pressed && item.selectable {
                     root.long-fired = true;
                     cm.show({ x: ta.mouse-x, y: ta.mouse-y });
+                } else if ta.pressed && root.title-cut && item.kind != 12 {
+                    root.long-fired = true;
+                    Peek.show(root.title-full, ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
                 }
             }
         }
@@ -857,6 +956,18 @@ component ListRow inherits Rectangle {
             // The TouchArea sees the press before the menu area does, so
             // a right press opens the menu from here.
             pointer-event(e) => {
+                // A row with no menu: its cut title in a bubble instead.
+                if e.kind == PointerEventKind.down && !item.selectable && item.kind != 12 && root.title-cut {
+                    root.long-fired = false;
+                    if e.button == PointerEventButton.right {
+                        Peek.show(root.title-full, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                    } else if e.button == PointerEventButton.left {
+                        root.press-x = self.mouse-x;
+                        root.press-y = self.mouse-y;
+                        hold.running = false;
+                        hold.running = true;
+                    }
+                }
                 if e.kind == PointerEventKind.down && item.selectable {
                     root.long-fired = false;
                     root.select();
@@ -908,12 +1019,22 @@ component ListRow inherits Rectangle {
                     color: item.ctl == 5 ? P.text : P.text;
                     font-family: item.ctl == 5 ? P.mono : P.sans;
                     overflow: elide;
+                    PeekArea {
+                        full: parent.text;
+                        cut: parent.preferred-width > parent.width + 0.5px;
+                        down => { if item.selectable { root.select(); } }
+                    }
                 }
                 if item.meta != "": Text {
                     text: item.meta;
                     font-size: 11.5px;
                     color: P.muted;
                     overflow: elide;
+                    PeekArea {
+                        full: parent.text;
+                        cut: parent.preferred-width > parent.width + 0.5px;
+                        down => { if item.selectable { root.select(); } }
+                    }
                 }
             }
             HorizontalLayout {
@@ -933,6 +1054,7 @@ component ListRow inherits Rectangle {
                     h: 28px;
                     max-width: 340px;
                     text: item.sub + "  ▾";
+                    peek: item.sub;
                     clicked => { root.act("choose"); }
                 }
                 if item.ctl == 3: Chip {
@@ -972,6 +1094,11 @@ component ListRow inherits Rectangle {
                     font-size: 12px;
                     color: item.on ? P.text : P.muted;
                     overflow: elide;
+                    PeekArea {
+                        full: parent.text;
+                        cut: parent.preferred-width > parent.width + 0.5px;
+                        down => { if item.selectable { root.select(); } }
+                    }
                 }
                 if item.ctl == 4: Chip {
                     y: (parent.height - self.height) / 2;
@@ -1047,6 +1174,11 @@ component ListRow inherits Rectangle {
                     font-size: 11.5px;
                     color: P.muted;
                     overflow: elide;
+                    PeekArea {
+                        full: parent.text;
+                        cut: parent.preferred-width > parent.width + 0.5px;
+                        down => { if item.selectable { root.select(); } }
+                    }
                 }
             }
         }
@@ -1096,7 +1228,7 @@ component AlbumTile inherits Rectangle {
                 }
             }
         }
-        Text {
+        tile-title := Text {
             text: item.title;
             overflow: elide;
             font-size: 13px;
@@ -1104,7 +1236,7 @@ component AlbumTile inherits Rectangle {
             color: item.playing ? P.accent-text : (item.off ? P.wave : P.text);
         }
         // A rated album shows its stars after the artist.
-        Text {
+        tile-sub := Text {
             text: item.stars != "" ? item.sub + "  " + item.stars : item.sub;
             overflow: elide;
             font-size: 12px;
@@ -1113,6 +1245,10 @@ component AlbumTile inherits Rectangle {
     }
     tcm := ContextMenuArea {
         Menu {
+            // The whole name, when the tile cuts it short.
+            if tile-title.preferred-width > tile-title.width + 0.5px: MenuItem { title: item.title; enabled: false; }
+            if tile-sub.preferred-width > tile-sub.width + 0.5px: MenuItem { title: item.sub; enabled: false; }
+            if tile-title.preferred-width > tile-title.width + 0.5px || tile-sub.preferred-width > tile-sub.width + 0.5px: MenuSeparator {}
             MenuItem { title: "Play"; activated => { root.act("play"); } }
             MenuItem { title: "Play next"; activated => { root.act("next"); } }
             MenuItem { title: "Add to queue"; activated => { root.act("queue"); } }
@@ -1214,12 +1350,16 @@ component QueueLine inherits Rectangle {
         Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; }
         VerticalLayout {
             alignment: center;
-            Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : (q.off ? P.wave : P.text)); }
-            Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
+            line-title := Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : (q.off ? P.wave : P.text)); }
+            line-sub := Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
         }
     }
     qcm := ContextMenuArea {
         Menu {
+            // The whole title and artist, when the line cuts them short.
+            if line-title.preferred-width > line-title.width + 0.5px: MenuItem { title: q.title; enabled: false; }
+            if line-sub.preferred-width > line-sub.width + 0.5px: MenuItem { title: q.sub; enabled: false; }
+            if line-title.preferred-width > line-title.width + 0.5px || line-sub.preferred-width > line-sub.width + 0.5px: MenuSeparator {}
             MenuItem { title: "Play"; activated => { root.act("play"); } }
             MenuItem { title: "Move up"; activated => { root.act("up"); } }
             MenuItem { title: "Move down"; activated => { root.act("down"); } }
@@ -1354,6 +1494,7 @@ component Knob inherits Rectangle {
             color: P.text;
             horizontal-alignment: center;
             overflow: elide;
+            PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
         }
         if !root.k.choice: Text {
             text: root.k.text;
@@ -1362,6 +1503,7 @@ component Knob inherits Rectangle {
             color: P.muted;
             horizontal-alignment: center;
             overflow: elide;
+            PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
         }
     }
 }
@@ -1385,6 +1527,7 @@ component AmpRow inherits Rectangle {
             font-size: 12.5px;
             color: P.text;
             overflow: elide;
+            PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
         }
         if !root.k.choice: Bar {
             horizontal-stretch: 1;
@@ -1407,6 +1550,7 @@ component AmpRow inherits Rectangle {
             font-size: 11.5px;
             color: P.muted;
             overflow: elide;
+            PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
         }
         if root.k.choice: Rectangle {
             horizontal-stretch: 1;
@@ -1415,6 +1559,7 @@ component AmpRow inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 h: 36px;
                 text: root.k.text + "   ›";
+                peek: root.k.text;
                 active: root.lit;
                 clicked => { root.stepped(); }
             }
@@ -1450,6 +1595,7 @@ component AmpPanel inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
                 horizontal-stretch: 1;
+                PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
             }
             Chip { h: 28px; text: root.on ? "On" : "Bypassed"; active: root.on; clicked => { root.act("amp-toggle"); } }
             Chip { h: 28px; text: "Save as…"; clicked => { root.act("amp-save"); } }
@@ -1494,7 +1640,12 @@ component AmpPanel inherits Rectangle {
                                 font-size: 12.5px;
                                 color: u.on && root.on ? P.text : P.muted;
                                 overflow: elide;
-                                TouchArea { mouse-cursor: pointer; clicked => { root.unit-toggle(i); } }
+                                PeekArea {
+                                    mouse-cursor: pointer;
+                                    full: parent.text;
+                                    cut: parent.preferred-width > parent.width + 0.5px;
+                                    tapped => { root.unit-toggle(i); }
+                                }
                             }
                         }
                         HorizontalLayout {
@@ -1543,7 +1694,7 @@ component AmpPanel inherits Rectangle {
                                     drop-shadow-color: P.copper;
                                 }
                             }
-                            Text {
+                            unit-name := Text {
                                 horizontal-stretch: 1;
                                 text: u.name;
                                 vertical-alignment: center;
@@ -1562,7 +1713,11 @@ component AmpPanel inherits Rectangle {
                                 }
                             }
                         }
-                        TouchArea { clicked => { root.unit-toggle(i); } }
+                        PeekArea {
+                            full: u.name;
+                            cut: unit-name.preferred-width > unit-name.width + 0.5px;
+                            tapped => { root.unit-toggle(i); }
+                        }
                     }
                     for k[j] in u.knobs: AmpRow {
                         k: k;
@@ -1603,6 +1758,7 @@ component EqPanel inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
                 horizontal-stretch: 1;
+                PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
             }
             Chip { h: 28px; text: root.on ? "On" : "Bypassed"; active: root.on; clicked => { root.act("eq-toggle"); } }
             Chip { h: 28px; text: "Flat"; clicked => { root.act("eq-flat"); } }
@@ -1965,6 +2121,11 @@ export component AppWindow inherits Window {
         width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
         height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
         key-pressed(e) => {
+            // A text shown whole closes first.
+            if Peek.open && (e.text == Key.Escape || e.text == Key.Back) {
+                Peek.open = false;
+                return accept;
+            }
             // Android's Back closes what's open first: a dialog, the
             // drawer, a side panel. Then it goes back a level, in Rust.
             if root.dialog != 0 {
@@ -2202,9 +2363,10 @@ export component AppWindow inherits Window {
                                             font-size: root.tight ? 24px : (root.short ? 32px : (P.kawaii ? 36px : 40px));
                                             overflow: elide;
                                             color: P.text;
+                                            PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
                                         }
-                                        Text { text: root.hero.sub; font-size: 15px; color: P.text; overflow: elide; }
-                                        Text { text: root.hero.meta; font-size: 12.5px; color: P.muted; overflow: elide; }
+                                        Text { text: root.hero.sub; font-size: 15px; color: P.text; overflow: elide; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
+                                        Text { text: root.hero.meta; font-size: 12.5px; color: P.muted; overflow: elide; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                                         // An album's stars, and the favorite toggle.
                                         if root.hero.rating >= 0 || root.hero.fav >= 0: HorizontalLayout {
                                             spacing: 2px;
@@ -2265,9 +2427,11 @@ export component AppWindow inherits Window {
                                                 overflow: elide;
                                                 font-size: 12px;
                                                 color: i == root.crumbs.length - 1 ? P.text : (cta.has-hover ? P.text : P.muted);
-                                                cta := TouchArea {
+                                                cta := PeekArea {
                                                     mouse-cursor: i < root.crumbs.length - 1 ? pointer : default;
-                                                    clicked => { root.crumb-clicked(i); keys.focus(); }
+                                                    full: c;
+                                                    cut: parent.preferred-width > parent.width + 0.5px;
+                                                    tapped => { root.crumb-clicked(i); keys.focus(); }
                                                 }
                                             }
                                         }
@@ -2279,8 +2443,9 @@ export component AppWindow inherits Window {
                                         font-size: 28px;
                                         color: P.text;
                                         overflow: elide;
+                                        PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
                                     }
-                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; }
+                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                                 if !root.tight: HorizontalLayout {
@@ -2404,9 +2569,11 @@ export component AppWindow inherits Window {
                                                 overflow: elide;
                                                 font-size: 12px;
                                                 color: i == root.crumbs.length - 1 ? P.text : (gta.has-hover ? P.text : P.muted);
-                                                gta := TouchArea {
+                                                gta := PeekArea {
                                                     mouse-cursor: i < root.crumbs.length - 1 ? pointer : default;
-                                                    clicked => { root.crumb-clicked(i); keys.focus(); }
+                                                    full: c;
+                                                    cut: parent.preferred-width > parent.width + 0.5px;
+                                                    tapped => { root.crumb-clicked(i); keys.focus(); }
                                                 }
                                             }
                                         }
@@ -2418,8 +2585,9 @@ export component AppWindow inherits Window {
                                         font-size: 28px;
                                         color: P.text;
                                         overflow: elide;
+                                        PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
                                     }
-                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; }
+                                    Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                                 if !root.tight: HorizontalLayout {
@@ -2480,7 +2648,7 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 VerticalLayout {
                                     Text { text: "Queue"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 28px; color: P.text; }
-                                    Text { text: root.queue-summary; font-size: 12.5px; color: P.muted; overflow: elide; }
+                                    Text { text: root.queue-summary; font-size: 12.5px; color: P.muted; overflow: elide; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                                 if !root.tight: HorizontalLayout {
@@ -2601,13 +2769,15 @@ export component AppWindow inherits Window {
                                 overflow: elide;
                                 font-weight: 600;
                                 color: root.has-track ? P.text : P.muted;
+                                PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
                             }
-                            Text { text: root.np-sub; overflow: elide; font-size: 12px; color: P.muted; }
+                            Text { text: root.np-sub; overflow: elide; font-size: 12px; color: P.muted; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                             if root.status-line != "": Text {
                                 text: root.status-line;
                                 overflow: elide;
                                 font-size: 11.5px;
                                 color: root.status-warn ? P.copper : P.verdigris;
+                                PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
                             }
                         }
                         if root.love-state > 0: IconButton {
@@ -3049,6 +3219,9 @@ export component AppWindow inherits Window {
                                     font-size: 13px;
                                     font-weight: P.kawaii ? 500 : 400;
                                     color: pill ? P.on-accent : (item.active ? P.accent-text : (sta.has-hover || P.kawaii ? P.text : P.muted));
+                                    init => { label-cut = self.preferred-width > self.width + 0.5px; }
+                                    changed width => { label-cut = self.preferred-width > self.width + 0.5px; }
+                                    changed text => { label-cut = self.preferred-width > self.width + 0.5px; }
                                 }
                                 // The Japanese name follows on the same line, small,
                                 // so the sidebar keeps its height.
@@ -3069,6 +3242,9 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         font-size: 9.5px;
                                         color: pill ? P.on-accent : P.muted;
+                                        init => { label-cut = self.preferred-width > self.width + 0.5px; }
+                                        changed width => { label-cut = self.preferred-width > self.width + 0.5px; }
+                                        changed text => { label-cut = self.preferred-width > self.width + 0.5px; }
                                     }
                                 }
                                 if !sidebar.folded: Text {
@@ -3080,9 +3256,15 @@ export component AppWindow inherits Window {
                                 }
                             }
                             property <bool> long-fired;
+                            // The name doesn't fit beside its icon and count.
+                            property <bool> label-cut;
+                            property <string> label-full: item.sub != "" ? item.label + "  " + item.sub : item.label;
+                            property <bool> side-peeks: item.kind != 4 && label-cut && !sidebar.folded;
                             scm := ContextMenuArea {
                                 enabled: item.kind == 4;
                                 Menu {
+                                    if label-cut: MenuItem { title: label-full; enabled: false; }
+                                    if label-cut: MenuSeparator {}
                                     MenuItem { title: "Move up"; activated => { root.side-act(i, "up"); } }
                                     MenuItem { title: "Move down"; activated => { root.side-act(i, "down"); } }
                                     MenuItem { title: "Remove from Favorites"; activated => { root.side-act(i, "remove"); } }
@@ -3095,7 +3277,11 @@ export component AppWindow inherits Window {
                                         self.running = false;
                                         if sta.pressed {
                                             long-fired = true;
-                                            scm.show({ x: sta.mouse-x, y: sta.mouse-y });
+                                            if item.kind == 4 {
+                                                scm.show({ x: sta.mouse-x, y: sta.mouse-y });
+                                            } else {
+                                                Peek.show(label-full, sta.absolute-position.x + sta.mouse-x, sta.absolute-position.y + sta.mouse-y);
+                                            }
                                         }
                                     }
                                 }
@@ -3105,9 +3291,13 @@ export component AppWindow inherits Window {
                                     pointer-event(e) => {
                                         if e.kind == PointerEventKind.down {
                                             long-fired = false;
+                                            // Anything else whose name is cut short: the
+                                            // whole name in a bubble.
                                             if e.button == PointerEventButton.right && item.kind == 4 {
                                                 scm.show({ x: self.mouse-x, y: self.mouse-y });
-                                            } else if e.button == PointerEventButton.left && item.kind == 4 && Ui.touch {
+                                            } else if e.button == PointerEventButton.right && side-peeks {
+                                                Peek.show(label-full, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                            } else if e.button == PointerEventButton.left && ((item.kind == 4 && Ui.touch) || side-peeks) {
                                                 shold.running = false;
                                                 shold.running = true;
                                             }
@@ -3177,7 +3367,7 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                     IconButton { icon: Icons.close; tip: "Close (Ctrl+L)"; clicked => { root.lyrics-clicked(); keys.focus(); } }
                 }
-                Text { text: root.lyrics-title; overflow: elide; font-weight: 600; color: P.text; }
+                Text { text: root.lyrics-title; overflow: elide; font-weight: 600; color: P.text; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                 Text { text: root.lyrics-note; wrap: word-wrap; font-size: 11.5px; color: root.lyrics-warn ? P.copper : P.muted; }
                 Rectangle { height: 6px; }
                 // Synced: the lines from a little before the one
@@ -3258,12 +3448,14 @@ export component AppWindow inherits Window {
                                 Cover { width: 36px; height: 36px; radius: 4px; art: q.art; has-art: q.has-art; }
                                 VerticalLayout {
                                     alignment: center;
-                                    Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.playing ? P.accent-text : P.text; }
-                                    Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
+                                    qp-title := Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.playing ? P.accent-text : P.text; }
+                                    qp-sub := Text { text: q.sub; overflow: elide; font-size: 12px; color: P.muted; }
                                 }
                             }
-                            pta := TouchArea {
-                                clicked => { root.queue-activate(i); }
+                            pta := PeekArea {
+                                full: q.sub != "" ? q.title + "\n" + q.sub : q.title;
+                                cut: qp-title.preferred-width > qp-title.width + 0.5px || qp-sub.preferred-width > qp-sub.width + 0.5px;
+                                tapped => { root.queue-activate(i); }
                             }
                         }
                     }
@@ -3392,7 +3584,7 @@ export component AppWindow inherits Window {
                                 height: 36px;
                                 border-radius: 6px * P.round;
                                 background: dta.has-hover ? P.raised : transparent;
-                                Text {
+                                pick := Text {
                                     x: 12px;
                                     width: parent.width - 24px;
                                     text: it;
@@ -3400,9 +3592,11 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                     color: i == 0 && root.dlg-new-first ? P.accent-text : P.text;
                                 }
-                                dta := TouchArea {
+                                dta := PeekArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.dlg-pick(i); }
+                                    full: it;
+                                    cut: pick.preferred-width > pick.width + 0.5px;
+                                    tapped => { root.dlg-pick(i); }
                                 }
                             }
                         }
@@ -3446,6 +3640,62 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+
+        // ----- A cut-short text, shown whole -----
+        // Above everything, dialogs included. Any press outside the bubble
+        // closes it and goes no further; a press on it closes it too.
+        if Peek.open: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            TouchArea {
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down { Peek.open = false; }
+                }
+                scroll-event(e) => {
+                    Peek.open = false;
+                    accept
+                }
+            }
+            // The text at one line's width, to size the bubble by.
+            peek-measure := Text {
+                width: 0px;
+                height: 0px;
+                visible: false;
+                text: Peek.text;
+                font-size: 13px;
+            }
+            peek-bubble := Rectangle {
+                property <length> pad: 12px;
+                // Where the press was, in this overlay's coordinates.
+                property <length> px: Peek.at-x - root.safe-area-insets.left;
+                property <length> py: Peek.at-y - root.safe-area-insets.top;
+                width: min(peek-measure.preferred-width + 2 * self.pad + 2px, 440px, parent.width - 16px);
+                height: peek-text.preferred-height + 2 * self.pad - 4px;
+                // Just under and right of the pointer; flipped above it, or
+                // pulled in from the edge, where there's no room.
+                x: max(8px, min(self.px + 4px, parent.width - self.width - 8px));
+                y: self.py + 18px + self.height <= parent.height - 8px
+                    ? self.py + 18px
+                    : max(8px, self.py - self.height - 10px);
+                border-radius: 8px * P.round;
+                border-width: 1px;
+                border-color: P.verdigris-dim;
+                background: P.raised;
+                drop-shadow-blur: 12px;
+                drop-shadow-color: P.shadow;
+                peek-text := Text {
+                    x: peek-bubble.pad;
+                    y: peek-bubble.pad - 2px;
+                    width: peek-bubble.width - 2 * peek-bubble.pad;
+                    text: Peek.text;
+                    wrap: word-wrap;
+                    font-size: 13px;
+                    color: P.text;
+                }
+                accessible-role: text;
+                accessible-label: Peek.text;
             }
         }
     }

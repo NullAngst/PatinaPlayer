@@ -6,11 +6,19 @@
 //! leaves its `.part` behind, and the next try asks the server for the
 //! rest with an HTTP range.
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
+
+/// A run of spaces at least this long at the very end of a download is
+/// filler, not the song. Ampache sends the size its catalog has for a file
+/// and, when the file is shorter than that (retagged since the last scan),
+/// makes up the difference with spaces. Ampache 7 does the same for an MP3
+/// it converts, up to a size it estimated. No audio format ends in 256
+/// spaces: the most an ID3v1 tag could hold is 125.
+const FILLER_MIN: u64 = 256;
 
 /// Where a download in progress lives: `song.flac` becomes `song.flac.part`.
 pub fn part_path(dest: &Path) -> PathBuf {
@@ -206,6 +214,7 @@ fn fetch_once(
     let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .write(true)
         .append(resumed)
         .truncate(!resumed)
@@ -213,7 +222,10 @@ fn fetch_once(
     let mut done = if resumed { have } else { 0 };
     progress.done.store(done, Ordering::Release);
     let total = resp.content_length().map(|l| l + done);
-    if let Some(t) = total {
+    // A converted stream's length is the server's guess (Ampache works it
+    // out from the bitrate and the song's length), so readers aren't told
+    // it: a seek to the end of a guess lands in the wrong place.
+    if let Some(t) = total.filter(|_| resume) {
         progress.total.store(t, Ordering::Release);
     }
     let mut buf = vec![0u8; 64 * 1024];
@@ -234,6 +246,14 @@ fn fetch_once(
         progress.done.store(done, Ordering::Release);
     }
     file.flush()?;
+    // Readers stop at the new end; one already past it sees the end of
+    // the song there.
+    let filler = trailing_filler(&mut file, done)?;
+    if filler > 0 {
+        log::info!("dropping {filler} bytes of filler the server added at the end");
+        file.set_len(done - filler)?;
+        progress.done.store(done - filler, Ordering::Release);
+    }
     drop(file);
     if let Some(t) = total
         && done < t
@@ -245,9 +265,35 @@ fn fetch_once(
     if done == 0 {
         return Err(FetchError::Http("the server sent an empty file".into()));
     }
+    let done = done - filler;
     progress.total.store(done, Ordering::Release);
     std::fs::rename(part, dest)?;
     Ok(Outcome::Done)
+}
+
+/// How many bytes of space filler end a file `len` bytes long: 0, or at
+/// least [`FILLER_MIN`].
+fn trailing_filler(file: &mut std::fs::File, len: u64) -> std::io::Result<u64> {
+    let mut run = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut end = len;
+    while end > 0 {
+        let start = end.saturating_sub(buf.len() as u64);
+        let n = (end - start) as usize;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buf[..n])?;
+        let spaces = buf[..n].iter().rev().take_while(|&&b| b == b' ').count();
+        run += spaces as u64;
+        if spaces < n {
+            break;
+        }
+        end = start;
+    }
+    Ok(if run >= FILLER_MIN && run < len {
+        run
+    } else {
+        0
+    })
 }
 
 /// "Song not found" out of a Subsonic error body, or the body itself.
@@ -274,6 +320,27 @@ mod tests {
             part_path(Path::new("/x/01 Blew.flac")),
             PathBuf::from("/x/01 Blew.flac.part")
         );
+    }
+
+    #[test]
+    fn filler_at_the_end_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f");
+        let check = |body: &[u8]| {
+            std::fs::write(&p, body).unwrap();
+            let mut f = std::fs::File::open(&p).unwrap();
+            trailing_filler(&mut f, body.len() as u64).unwrap()
+        };
+        let mut song = vec![0xffu8; 200_000];
+        assert_eq!(check(&song), 0);
+        // An ID3v1 tag of blank fields ends in spaces too: not filler.
+        song.extend(std::iter::repeat_n(b' ', 125));
+        assert_eq!(check(&song), 0);
+        // More than a chunk of it, to find across reads.
+        song.extend(std::iter::repeat_n(b' ', 100_000));
+        assert_eq!(check(&song), 100_125);
+        // A file of nothing but spaces isn't trimmed to nothing.
+        assert_eq!(check(&[b' '; 4000]), 0);
     }
 
     #[test]

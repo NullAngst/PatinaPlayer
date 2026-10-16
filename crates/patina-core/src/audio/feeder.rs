@@ -988,6 +988,16 @@ impl Feeder {
                     self.schedule_retry(self.entry, 1, e.to_string());
                     return;
                 }
+                // A server song that breaks off in its last couple of
+                // seconds has ended: what follows the music is the server's
+                // filler or the end of a length it guessed, not a fault in
+                // the song. It ends like any other song, with no error.
+                Err(e) if self.at_server_end() => {
+                    log::info!("server song ended with junk after the music ({e})");
+                    self.finish_track();
+                    self.next_track();
+                    return;
+                }
                 Err(e) => {
                     let label = self
                         .entry_info
@@ -1009,6 +1019,19 @@ impl Feeder {
         } else {
             self.mark();
         }
+    }
+
+    /// Decoding has reached the last two seconds of a server song, by the
+    /// length the server gave for it. Servers round that to the second.
+    fn at_server_end(&self) -> bool {
+        let info = &self.entry_info;
+        if info.remote.is_none() || info.kind != MediaKind::File {
+            return false;
+        }
+        let Some(len) = info.duration.filter(|d| !d.is_zero()) else {
+            return false;
+        };
+        self.position_at(self.write_point()) + Duration::from_secs(2) >= len
     }
 
     /// The stream switched rate or channels. What's in the ring plays out in
