@@ -1,8 +1,9 @@
-name: AppImage
+name: Release
 
-# Push a tag like v0.2.0 and this builds the AppImage and publishes it as a
-# GitHub release. Run it by hand from the Actions tab to get a test build
-# as a workflow artifact instead, without making a release.
+# Push a tag like v0.2.0 and this builds the AppImage and the Android APK
+# and publishes them both as one GitHub release. Run it by hand from the
+# Actions tab to get test builds as workflow artifacts instead, without
+# making a release.
 on:
   push:
     tags: ["v*"]
@@ -85,11 +86,106 @@ jobs:
             target/appimage/PatinaPlayer-*.AppImage
             target/appimage/PatinaPlayer-*.AppImage.zsync
 
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The runner has the Android SDK (build-tools, platforms) and NDK
+      # already; build-apk.sh takes the newest of each it finds.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Rust (latest stable) and the Android target
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-linux-android
+
+      - name: Refresh lockfile
+        run: cargo update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      # FFmpeg and Mbed TLS only rebuild when one of them, the NDK or the
+      # build script changes.
+      - name: FFmpeg cache key
+        id: ffkey
+        run: |
+          branch="release/$(awk '/^name = "ffmpeg-sys-next"/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock | cut -d. -f1,2)"
+          head="$(git ls-remote https://github.com/FFmpeg/FFmpeg "refs/heads/$branch" | cut -c1-12)"
+          tls="$(git ls-remote --tags --refs https://github.com/Mbed-TLS/mbedtls 'mbedtls-3.*' | sed 's#.*refs/tags/##' | grep -E '^mbedtls-3\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          ndk="$(basename "$ANDROID_NDK_LATEST_HOME")"
+          echo "key=ffmpeg-android-${head:-latest}-${tls}-ndk${ndk}-${{ hashFiles('packaging/build-ffmpeg-android.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        id: ffcache
+        with:
+          path: target/ffmpeg-android
+          key: ${{ steps.ffkey.outputs.key }}
+
+      # The release key, from the repository's secrets. See the signing
+      # guide for making it. A tag build fails without it, so a release
+      # never ships an APK that can't update the last one.
+      - name: Release key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 isn't set; this build gets a throwaway debug key"
+          fi
+
+      - name: Build APK
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          REQUIRE_RELEASE_KEY: ${{ github.ref_type == 'tag' && '1' || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
+          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
+        run: bash packaging/build-apk.sh
+
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PatinaPlayer-Android
+          path: target/apk/PatinaPlayer-*.apk
+
+  # One release for both, made once both builds are done, so the two jobs
+  # never race to create it. If one build fails, the other still ships.
+  publish:
+    needs: [appimage, android]
+    if: >-
+      !cancelled() && github.ref_type == 'tag' &&
+      (needs.appimage.result == 'success' || needs.android.result == 'success')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: PatinaPlayer-*
+          path: dist
+          merge-multiple: true
+
       - name: Publish release
-        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            target/appimage/PatinaPlayer-*.AppImage
-            target/appimage/PatinaPlayer-*.AppImage.zsync
+            dist/PatinaPlayer-*.AppImage
+            dist/PatinaPlayer-*.AppImage.zsync
+            dist/PatinaPlayer-*.apk
