@@ -592,6 +592,66 @@ component Bar inherits Rectangle {
     }
 }
 
+// The volume as a tall slider, for the popup on a touch screen: drag up
+// or down anywhere on it, or tap a spot. Big enough for a thumb.
+component VBar inherits Rectangle {
+    in property <float> value;
+    in property <bool> enabled: true;
+    in property <color> fill: P.verdigris;
+    in property <string> label;
+    callback changed(float);
+    property <float> drag: 0;
+    property <bool> dragging: ta.pressed && enabled;
+    property <float> shown: clamp(dragging ? drag : value, 0, 1);
+    // Room top and bottom so the knob stays on the slider at the ends.
+    property <length> pad: 14px;
+    property <length> run: self.height - 2 * self.pad;
+    accessible-role: slider;
+    accessible-label: label;
+    accessible-value: round(value * 100) + "%";
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.pad;
+        width: 10px;
+        height: root.run;
+        border-radius: 5px;
+        background: root.enabled ? P.wave : P.border;
+        Rectangle {
+            y: parent.height * (1 - root.shown);
+            height: parent.height - self.y;
+            border-radius: 5px;
+            background: root.enabled ? root.fill : transparent;
+        }
+    }
+    if root.enabled: Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.pad + root.run * (1 - root.shown) - self.height / 2;
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        background: P.text;
+        border-width: 2px;
+        border-color: P.raised;
+    }
+    ta := TouchArea {
+        function at(my: length) -> float {
+            return clamp(1 - (my - root.pad) / root.run, 0, 1);
+        }
+        pointer-event(e) => {
+            if !root.enabled { return; }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.drag = self.at(self.mouse-y);
+                root.changed(root.drag);
+            }
+        }
+        moved => {
+            if !root.enabled { return; }
+            root.drag = self.at(self.mouse-y);
+            root.changed(root.drag);
+        }
+    }
+}
+
 // A one-line text input that scrolls sideways with the cursor, the way
 // std-widgets' LineEdit does: a plain TextInput just runs off its edge,
 // so the end of a long URL could be neither seen nor reached.
@@ -2057,6 +2117,10 @@ export component AppWindow inherits Window {
     // 0 off, 1 all, 2 one
     in property <int> repeat;
     in property <float> volume;
+    // The volume as people read it: "64%". Fixed at 100% for bit-perfect.
+    property <string> volume-pct: (root.volume-locked ? 100 : round(clamp(root.volume, 0, 1) * 100)) + "%";
+    // The volume popup on a touch screen, opened from the volume button.
+    in-out property <bool> volume-open;
     in property <bool> muted;
     callback play-pause;
     callback prev;
@@ -2151,6 +2215,10 @@ export component AppWindow inherits Window {
             if root.dialog != 0 {
                 if e.text == Key.Escape || e.text == Key.Back { root.dlg-cancel(); return accept; }
                 return reject;
+            }
+            if (e.text == Key.Back || e.text == Key.Escape) && root.volume-open {
+                root.volume-open = false;
+                return accept;
             }
             if e.text == Key.Back && root.drawer-open {
                 root.drawer-open = false;
@@ -2741,7 +2809,7 @@ export component AppWindow inherits Window {
                 property <length> t-min: 220px;
                 // The controls that always stay: lyrics, queue, mute and
                 // the volume slider.
-                property <length> keep-w: 3 * 36px + 96px + 3 * 8px;
+                property <length> keep-w: Ui.touch ? 3 * 36px + 40px + 3 * 8px : 3 * 36px + 96px + 40px + 4 * 8px;
                 // One row, short of room for the badges: leave out the ones
                 // that are only status, or open what the sidebar opens too.
                 // Measured on the badges as they'd be (the probe below),
@@ -3055,14 +3123,24 @@ export component AppWindow inherits Window {
                             active: root.queue-panel;
                             clicked => { root.toggle-queue(); keys.focus(); }
                         }
+                        // Desktop: the button mutes and the slider sits beside
+                        // it. Touch: the button opens a tall slider, since a
+                        // short sideways one is too fiddly for a finger.
                         IconButton {
                             y: (parent.height - self.height) / 2;
                             icon: root.muted ? Icons.muted : Icons.volume;
-                            tip: root.muted ? "Unmute" : "Mute";
-                            active: root.muted;
-                            clicked => { root.toggle-mute(); keys.focus(); }
+                            tip: Ui.touch ? "Volume" : (root.muted ? "Unmute" : "Mute");
+                            active: Ui.touch ? root.volume-open : root.muted;
+                            clicked => {
+                                if Ui.touch {
+                                    root.volume-open = !root.volume-open;
+                                } else {
+                                    root.toggle-mute();
+                                }
+                                keys.focus();
+                            }
                         }
-                        Bar {
+                        if !Ui.touch: Bar {
                             width: root.tiny ? 64px : (root.tight ? 80px : 96px);
                             y: (parent.height - self.height) / 2;
                             label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
@@ -3072,6 +3150,22 @@ export component AppWindow inherits Window {
                             knob: 12px;
                             live: true;
                             changed(v) => { root.set-volume(v); }
+                        }
+                        Rectangle {
+                            width: 40px;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: root.volume-pct;
+                                horizontal-alignment: Ui.touch ? left : right;
+                                vertical-alignment: center;
+                                font-family: P.mono;
+                                font-size: 11.5px;
+                                color: root.muted ? P.wave : P.muted;
+                            }
+                            if Ui.touch: TouchArea {
+                                clicked => { root.volume-open = !root.volume-open; keys.focus(); }
+                            }
                         }
                     }
             }
@@ -3504,6 +3598,61 @@ export component AppWindow inherits Window {
                         alignment: start;
                         Chip { text: "Add to playlist"; clicked => { root.queue-save(); } }
                         Chip { text: "Clear"; danger: true; clicked => { root.queue-clear(); } }
+                    }
+                }
+            }
+        }
+
+        // ----- Volume popup (touch) -----
+        // A tall slider over the bottom bar's right end. A tap anywhere
+        // else, or Back, closes it.
+        if root.volume-open && Ui.touch: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            TouchArea { clicked => { root.volume-open = false; keys.focus(); } }
+            Rectangle {
+                width: 96px;
+                height: min(340px, keys.height - root.bar-h - 24px);
+                x: parent.width - self.width - 12px;
+                y: parent.height - root.bar-h - self.height - 8px;
+                border-radius: 12px * P.round;
+                border-width: 1px;
+                border-color: P.border;
+                background: P.raised;
+                drop-shadow-blur: 16px;
+                drop-shadow-color: P.shadow;
+                // Swallow presses on the panel itself, so they don't close it.
+                TouchArea {}
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Text {
+                        text: root.volume-pct;
+                        horizontal-alignment: center;
+                        font-family: P.mono;
+                        font-size: 18px;
+                        color: root.muted ? P.muted : P.text;
+                    }
+                    VBar {
+                        vertical-stretch: 1;
+                        label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
+                        value: root.volume-locked ? 1.0 : root.volume;
+                        enabled: !root.volume-locked;
+                        fill: root.muted ? P.wave : (P.kawaii ? P.mint : P.verdigris);
+                        changed(v) => { root.set-volume(v); }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        IconButton {
+                            width: 44px;
+                            height: 44px;
+                            icon-size: 20px;
+                            icon: root.muted ? Icons.muted : Icons.volume;
+                            tip: root.muted ? "Unmute" : "Mute";
+                            active: root.muted;
+                            enabled: !root.volume-locked;
+                            clicked => { root.toggle-mute(); }
+                        }
                     }
                 }
             }
