@@ -651,3 +651,92 @@ fn station_that_changes_format_keeps_playing() {
     assert!(!reconnected, "a format change isn't a dropped connection");
     p.send(Command::Quit);
 }
+
+/// Tapping a song over and over: each tap cuts the last one's open short.
+/// FFmpeg reports a probe stopped halfway as "Invalid data found when
+/// processing input" (or "End of file"), and that used to come out as an
+/// error on the song, which was marked failed and skipped past.
+#[test]
+fn repeated_taps_dont_report_a_cut_short_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m4a = tmp.path().join("song.m4a");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=f=440:r=44100:d=8",
+        "-ac",
+        "2",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        m4a.to_str().unwrap(),
+    ]);
+    let data = Arc::new(std::fs::read(&m4a).unwrap());
+    // Trickles the file out, so an open spans several taps' worth of time.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/song.m4a", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for s in listener.incoming().flatten() {
+            let data = data.clone();
+            std::thread::spawn(move || {
+                if read_request(&s).is_none() {
+                    return;
+                }
+                let mut s = &s;
+                if write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    data.len()
+                )
+                .is_err()
+                {
+                    return;
+                }
+                for chunk in data.chunks(256) {
+                    if s.write_all(chunk).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+            });
+        }
+    });
+
+    let p = null_player(Hooks::default());
+    let song = |n: u32| TrackInfo {
+        // An episode, so the queue keeps its title.
+        kind: MediaKind::Podcast,
+        url: Some(format!("{url}?n={n}")),
+        title: Some(format!("Song {n}")),
+        ..Default::default()
+    };
+    p.send(Command::SetQueueTracks {
+        tracks: (0..3).map(song).collect(),
+        start: 0,
+        pos: Duration::ZERO,
+    });
+    // Taps at uneven gaps, so some land mid-probe.
+    for i in 0..40u64 {
+        std::thread::sleep(Duration::from_millis(5 + (i * 7) % 23));
+        p.send(Command::SetQueueTracks {
+            tracks: (0..3).map(song).collect(),
+            start: 0,
+            pos: Duration::ZERO,
+        });
+    }
+    // The last tap plays, from the first song, with nothing reported.
+    wait(20, || {
+        let s = p.snapshot();
+        assert!(s.last_error.is_none(), "{:?}", s.last_error);
+        (s.state == patina_core::PlayState::Playing && s.position > Duration::from_millis(500))
+            .then_some(())
+    });
+    let s = p.snapshot();
+    assert_eq!(s.track.and_then(|t| t.title).as_deref(), Some("Song 0"));
+    while let Ok(e) = p.events().try_recv() {
+        assert!(!matches!(e, Event::Error(_)), "{e:?}");
+    }
+    p.send(Command::Quit);
+}

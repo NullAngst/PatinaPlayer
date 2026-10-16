@@ -145,6 +145,10 @@ impl Source {
             d.set("reconnect", "1");
             d.set("reconnect_on_network_error", "1");
             d.set("reconnect_delay_max", "10");
+            // Android's Mbed TLS has no CA store of its own.
+            if let Some(ca) = crate::net::ffmpeg_ca_file() {
+                d.set("ca_file", ca);
+            }
             if opts.live {
                 d.set("icy", "1");
                 d.set("reconnect_streamed", "1");

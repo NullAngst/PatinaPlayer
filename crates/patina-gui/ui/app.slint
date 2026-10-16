@@ -1713,6 +1713,7 @@ export component AppWindow inherits Window {
     // narrow: the sidebar folds to icons.
     out property <bool> narrow: win-w < 1000px;
     // tight: the bottom bar takes two rows, view buttons go under the title.
+    // (The bar also goes to two rows by itself when one won't fit.)
     out property <bool> tight: win-w < 820px;
     // tiny: the sidebar becomes a drawer, side panels cover the view.
     out property <bool> tiny: win-w < 600px;
@@ -1720,7 +1721,7 @@ export component AppWindow inherits Window {
     property <bool> short: win-h < 700px;
     in-out property <bool> drawer-open: false;
     property <length> side-w: tiny ? 0px : (narrow ? 64px : 228px);
-    property <length> bar-h: tight ? 132px : 84px;
+    property <length> bar-h: bar.two-row ? 132px : 84px;
     property <length> lyrics-w: tiny ? 0px : clamp(win-w * 0.3, 240px, 340px);
     property <length> queue-w: tiny ? 0px : clamp(win-w * 0.26, 220px, 300px);
     property <length> pad: tight ? 16px : 32px;
@@ -2531,33 +2532,63 @@ export component AppWindow inherits Window {
 
             // ----- Bottom bar -----
             // Placed by hand rather than by a layout, so it can switch
-            // between one row (now playing, transport, controls) and, on a
-            // tight window, two rows (now playing and controls, then the
-            // transport across the whole width).
+            // between one row (now playing, transport, controls) and two
+            // rows (now playing and controls, then the transport across the
+            // whole width). Nothing in it may overlap: a row that's short of
+            // room first leaves out the badges, then goes to two rows.
             bar := Rectangle {
                 height: root.bar-h;
                 background: P.surface;
                 property <length> bp: root.tight ? 12px : 20px;
                 property <length> gap: root.tight ? 10px : 20px;
+                // The least the now-playing side and the transport get.
+                // The transport's five buttons are 212px.
+                property <length> np-min: 160px;
+                property <length> t-min: 220px;
+                // The controls that always stay: lyrics, queue, mute and
+                // the volume slider.
+                property <length> keep-w: 3 * 36px + 96px + 3 * 8px;
+                // One row, short of room for the badges: leave out the ones
+                // that are only status, or open what the sidebar opens too.
+                // Measured on the badges as they'd be (the probe below),
+                // since what's on screen is what this decides.
+                out property <bool> lean: !root.tight && self.width < 2 * bp + np-min + 2 * gap + t-min + keep-w + probe.preferred-width + 8px;
+                // Two rows on a tight window, or when one row still won't
+                // fit what's left.
+                out property <bool> two-row: root.tight || self.width < 2 * bp + np-min + 2 * gap + t-min + rgt.preferred-width;
                 // Controls on the right: as wide as they need, within reason.
                 property <length> rw: min(rgt.preferred-width, self.width * 0.6);
                 // One row: the transport sits in the middle where it fits,
                 // and moves right of center when the now-playing side needs room.
-                property <length> tw: max(240px, min(clamp(self.width * 0.42, 300px, 560px), self.width - 2 * bp - 2 * gap - rw - 180px));
-                property <length> tx: max(bp + 180px + gap, min((self.width - tw) / 2, self.width - bp - rw - gap - tw));
-                property <length> row-h: root.tight ? 66px : self.height;
+                // two-row makes sure np-min and t-min always fit.
+                property <length> tw: max(t-min, min(clamp(self.width * 0.42, 300px, 560px), self.width - 2 * bp - 2 * gap - rw - np-min));
+                property <length> tx: max(bp + np-min + gap, min((self.width - tw) / 2, self.width - bp - rw - gap - tw));
+                property <length> row-h: two-row ? 66px : self.height;
                 Rectangle { height: 1px; y: 0; background: P.border; }
+
+                // Never shown: the badges a lean bar leaves out, laid out
+                // as they would be, for their width.
+                probe := HorizontalLayout {
+                    visible: false;
+                    spacing: 8px;
+                    if root.speed-label != "": Badge { text: root.speed-label; }
+                    if root.bp-badge != "": Badge { text: root.bp-badge; }
+                    if root.limit-label != "": Badge { text: root.limit-label; }
+                    Badge { text: "EQ"; }
+                    Badge { text: "AMP"; }
+                    if root.level-label != "": Badge { text: root.level-label; }
+                }
 
                     // Now playing.
                     np := HorizontalLayout {
                         x: bar.bp;
                         y: 0;
-                        width: root.tight ? bar.width - 2 * bar.bp - bar.gap - bar.rw : bar.tx - bar.gap - bar.bp;
+                        width: bar.two-row ? bar.width - 2 * bar.bp - bar.gap - bar.rw : bar.tx - bar.gap - bar.bp;
                         height: bar.row-h;
-                        spacing: root.tight ? 10px : 12px;
+                        spacing: bar.two-row ? 10px : 12px;
                         Cover {
-                            width: root.tight ? 44px : 56px;
-                            height: root.tight ? 44px : 56px;
+                            width: bar.two-row ? 44px : 56px;
+                            height: bar.two-row ? 44px : 56px;
                             y: (parent.height - self.height) / 2;
                             art: root.np-art;
                             has-art: root.np-has-art;
@@ -2609,10 +2640,10 @@ export component AppWindow inherits Window {
 
                     // Transport and seek.
                     VerticalLayout {
-                        x: root.tight ? bar.bp : bar.tx;
-                        y: root.tight ? bar.row-h - 6px : 0px;
-                        width: root.tight ? bar.width - 2 * bar.bp : bar.tw;
-                        height: root.tight ? bar.height - bar.row-h + 6px : bar.height;
+                        x: bar.two-row ? bar.bp : bar.tx;
+                        y: bar.two-row ? bar.row-h - 6px : 0px;
+                        width: bar.two-row ? bar.width - 2 * bar.bp : bar.tw;
+                        height: bar.two-row ? bar.height - bar.row-h + 6px : bar.height;
                         alignment: center;
                         spacing: 2px;
                         HorizontalLayout {
@@ -2742,7 +2773,7 @@ export component AppWindow inherits Window {
                             TouchArea { mouse-cursor: pointer; clicked => { root.speed-clicked(); } }
                         }
                         // Click it to hear why (or what device, and how).
-                        if root.bp-badge != "" && !root.tiny: Rectangle {
+                        if root.bp-badge != "" && !root.tiny && !bar.lean: Rectangle {
                             width: bpb.width;
                             bpb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -2754,14 +2785,14 @@ export component AppWindow inherits Window {
                                 clicked => { root.bp-clicked(); }
                             }
                         }
-                        if root.limit-label != "" && !root.tight: Badge {
+                        if root.limit-label != "" && !root.tight && !bar.lean: Badge {
                             y: (parent.height - self.height) / 2;
                             text: root.limit-label;
                             fg: P.copper;
                         }
                         // The EQ: lit when it's on and shaping the sound.
                         // Click it for the EQ view.
-                        if !root.tiny: Rectangle {
+                        if !root.tiny && !bar.lean: Rectangle {
                             width: eqb.width;
                             eqb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -2774,7 +2805,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // The amp stack: lit copper when it's working.
-                        if !root.tiny: Rectangle {
+                        if !root.tiny && !bar.lean: Rectangle {
                             width: ampb.width;
                             ampb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -2787,7 +2818,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // Click it for where the gain came from.
-                        if root.level-label != "" && !root.tight: Rectangle {
+                        if root.level-label != "" && !root.tight && !bar.lean: Rectangle {
                             width: lvb.width;
                             lvb := Badge {
                                 y: (parent.height - self.height) / 2;

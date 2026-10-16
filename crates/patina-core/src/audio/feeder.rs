@@ -537,6 +537,17 @@ impl Feeder {
         };
         let mut src = match opened {
             Ok(s) => s,
+            // Cut short by a newer command (another tap, a skip, a stop).
+            // FFmpeg reports a probe stopped halfway as whatever it made
+            // of the bytes it had: "Invalid data", "End of file", "no
+            // audio stream". None of that is the song's fault, so it's not
+            // marked failed, not reported, and not skipped past. A Seek
+            // that comes next reopens this entry, so it becomes the one
+            // open.
+            Err(_) if self.shared.abort_io.load(Ordering::Relaxed) => {
+                self.entry = entry;
+                return Opened::Interrupted;
+            }
             Err(e) if info.is_live() => {
                 // A station that doesn't answer gets retried, not skipped.
                 self.schedule_retry(entry, attempt, e);
@@ -969,6 +980,9 @@ impl Feeder {
                     }
                     self.convert();
                 }
+                // A command cut the read short; it's next in line and
+                // decides what happens to this source.
+                Err(_) if self.shared.abort_io.load(Ordering::Relaxed) => return,
                 Err(e) if live => {
                     self.source = None;
                     self.schedule_retry(self.entry, 1, e.to_string());
@@ -1165,7 +1179,8 @@ enum Opened {
     No,
     /// A live stream that didn't answer; a retry is scheduled.
     Retrying,
-    /// A command arrived while waiting for the old ring to drain.
+    /// A command arrived while opening, or while waiting for the old ring
+    /// to drain.
     Interrupted,
 }
 
