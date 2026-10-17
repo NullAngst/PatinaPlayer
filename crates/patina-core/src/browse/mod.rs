@@ -30,6 +30,7 @@ use crate::library::{
 };
 use crate::podcast::{PodEvent, PodcastService};
 use crate::remote::{RemoteService, ServerState, ServerStatus};
+use crate::track::MediaKind;
 use crate::{Command, Event, Player, TrackInfo};
 
 pub use model::*;
@@ -1255,6 +1256,80 @@ impl Browser {
             .filter(|e| !e.info.path.as_os_str().is_empty())
             .map(|e| vec![e.info.path.clone()])
             .unwrap_or_default()
+    }
+
+    // ----- Go to a song's album or artist -----
+
+    /// Open the album of the selected song, or its artist's albums.
+    pub fn go_to_selected(&mut self, artist: bool) {
+        match self.selected_item() {
+            Some(Item::Track(t)) => self.go_to_track(&t, artist),
+            _ => self.note("That isn't a song"),
+        }
+    }
+
+    /// The same for a song in the queue, by its place in play order.
+    pub fn go_to_queue_position(&mut self, pos: usize, artist: bool) {
+        let path = {
+            let q = self.player.queue();
+            q.at(pos)
+                .filter(|e| e.info.kind == MediaKind::File)
+                .map(|e| e.info.path.clone())
+        };
+        let found = path.and_then(|p| {
+            self.lib
+                .as_ref()
+                .and_then(|l| l.track_by_path(&p).ok().flatten())
+        });
+        match found {
+            Some(t) => self.go_to_track(&t, artist),
+            None => self.note("That isn't a song in the library"),
+        }
+    }
+
+    /// Open a song's album under Albums, or its artist under Artists. The
+    /// artist is the one the Artists view lists the song under: the
+    /// album's artist, or the song's own with Artists set to track artist.
+    pub fn go_to_track(&mut self, t: &TrackRow, artist: bool) {
+        let (section, src) = if artist {
+            let name = match self.prefs.artist_mode {
+                ArtistMode::AlbumArtist => self
+                    .lib
+                    .as_ref()
+                    .and_then(|l| l.album(&t.album_key).ok().flatten())
+                    .map(|a| a.artist)
+                    .or_else(|| t.album_artist.clone())
+                    .or_else(|| t.artist.clone()),
+                ArtistMode::TrackArtist => t.artist.clone(),
+            };
+            let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
+                return self.note("This song has no artist tag");
+            };
+            (Section::Artists, Source::ArtistAlbums(name))
+        } else {
+            (
+                Section::Albums,
+                Source::Album {
+                    key: t.album_key.clone(),
+                },
+            )
+        };
+        self.switch(section);
+        if let Some(stack) = self.stacks.get_mut(&section) {
+            stack.truncate(1);
+        }
+        self.push(src);
+        // On the song itself, where it's in the list.
+        if !artist
+            && let Some(l) = self.level_mut()
+            && let Some(i) = l
+                .items
+                .iter()
+                .position(|it| matches!(it, Item::Track(x) if x.path == t.path))
+        {
+            l.selected = i;
+        }
+        self.touch();
     }
 
     // ----- Sorting and modes -----

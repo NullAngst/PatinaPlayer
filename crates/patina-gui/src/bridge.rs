@@ -2564,6 +2564,10 @@ impl State {
                 self.open_pick(ui, "", paths);
             }
             "pl-remove" => self.b.edit_playlist(true, 0),
+            "go-album" | "go-artist" => {
+                self.b.go_to_selected(a == "go-artist");
+                self.after_go_to(ui);
+            }
             "st-edit" => {
                 if let Some(Item::Station { index, .. }) = item {
                     self.open_station(ui, Some(index));
@@ -2693,8 +2697,21 @@ impl State {
                 let paths = self.b.queue_paths_at(i);
                 self.open_pick(ui, "", paths);
             }
+            "go-album" | "go-artist" => {
+                self.b.go_to_queue_position(i, a == "go-artist");
+                self.after_go_to(ui);
+            }
             _ => {}
         }
+    }
+
+    /// After Go to album or artist: on a phone the queue panel covers the
+    /// view it opened, so it folds away.
+    fn after_go_to(&mut self, ui: &AppWindow) {
+        if ui.get_tiny() && ui.get_queue_panel() {
+            ui.set_queue_panel(false);
+        }
+        ui.set_drawer_open(false);
     }
 
     fn dlg_accept(&mut self, ui: &AppWindow) {

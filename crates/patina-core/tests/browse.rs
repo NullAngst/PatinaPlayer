@@ -568,3 +568,40 @@ fn folders_are_added_and_removed_from_the_app() {
     let cfg = Config::load_from(&fx.config).unwrap();
     assert!(!cfg.library.folders.contains(&extra_path));
 }
+
+#[test]
+fn a_song_goes_to_its_album_and_its_artist() {
+    use patina_core::browse::Source;
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Songs);
+    let i = index_of(
+        &b,
+        |it| matches!(it, Item::Track(t) if t.title == "Bleach Song 2"),
+    );
+    b.select(i);
+    b.go_to_selected(false);
+    assert_eq!(b.section, Section::Albums);
+    assert_eq!(b.depth(), 2);
+    assert!(matches!(&b.level().unwrap().source, Source::Album { .. }));
+    // The song is the one selected there.
+    let sel = b.level().unwrap().selected;
+    assert!(matches!(&items(&b)[sel], Item::Track(t) if t.title == "Bleach Song 2"));
+
+    b.switch(Section::Songs);
+    b.go_to_selected(true);
+    assert_eq!(b.section, Section::Artists);
+    assert_eq!(b.depth(), 2);
+    assert!(matches!(&b.level().unwrap().source, Source::ArtistAlbums(n) if n == "Nirvana"));
+    assert!(
+        items(&b)
+            .iter()
+            .any(|it| matches!(it, Item::Album(a) if a.name == "Bleach"))
+    );
+
+    // An album isn't a song: nothing moves.
+    b.switch(Section::Albums);
+    b.pop();
+    b.go_to_selected(true);
+    assert_eq!(b.section, Section::Albums);
+}

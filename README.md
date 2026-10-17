@@ -21,6 +21,7 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 - Search over everything at once. Every word has to match somewhere, so `nirv blea` finds Bleach.
 - Listening stats: Most listened (top five songs, albums and artists), Top albums and Top artists, built from your play counts. A song counts once you've heard half of it or four minutes, whichever comes first.
 - Favorites: star a folder, album or artist and it sits in the sidebar, one click away.
+- Right-click a song (long press on a phone), in any list or in the queue, for Go to album and Go to artist.
 - Every library view has Play, Shuffle, Add to queue and Add to playlist at the top, and they take the whole view. Shuffle on a folder of three hundred albums plays all of them in random order.
 - Ratings, 1 to 5 stars, on songs and albums.
 - Lyrics, only when you press the Lyrics button: the song's tags, an `.lrc` next to it, its server, then LRCLIB if you've turned that on. Synced lyrics follow the song.
@@ -339,6 +340,7 @@ These are the terminal app's keys. The desktop app uses the same ones, except th
 | e | Add the whole view to the queue |
 | P | Add the whole view to a playlist |
 | a / A | Add to the queue / play next |
+| i / I | Go to the selected song's album / artist (in the Queue too) |
 | p | Add to a playlist |
 | o / O | Sort Albums or Songs / reverse Songs |
 | t | Artists: album or track artist. Genres: albums or songs |

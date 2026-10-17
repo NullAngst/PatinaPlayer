@@ -1907,6 +1907,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ("P", "Add the whole view to a playlist"),
         ("Esc / Backspace", "Back up a level"),
         ("a / A", "Add to queue / play next"),
+        ("i / I", "Go to the selected song's album / artist"),
         ("p", "Add to a playlist"),
         (
             "f / F",

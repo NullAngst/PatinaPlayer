@@ -971,6 +971,10 @@ component ListRow inherits Rectangle {
                 title: "Add to playlist…";
                 activated => { root.act("playlist"); }
             }
+            // A song: its album, or its artist.
+            if item.kind == 0: MenuSeparator {}
+            if item.kind == 0: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
+            if item.kind == 0: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
             if item.rating >= 0: Menu {
@@ -1463,6 +1467,9 @@ component QueueLine inherits Rectangle {
             MenuItem { title: "Move up"; activated => { root.act("up"); } }
             MenuItem { title: "Move down"; activated => { root.act("down"); } }
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
+            MenuSeparator {}
+            MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
+            MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
             MenuSeparator {}
             MenuItem { title: "Remove"; activated => { root.act("remove"); } }
         }

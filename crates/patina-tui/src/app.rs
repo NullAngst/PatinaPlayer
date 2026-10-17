@@ -728,6 +728,14 @@ impl App {
                 let add = self.b.view_playlist_paths();
                 self.open_pick("Add this view to a playlist", add);
             }
+            KeyCode::Char('i') | KeyCode::Char('I') => {
+                let artist = k.code == KeyCode::Char('I');
+                if queue {
+                    self.b.go_to_queue_position(self.queue_sel, artist);
+                } else {
+                    self.b.go_to_selected(artist);
+                }
+            }
             KeyCode::Char('a') if !queue => self.b.add_selected_to_queue(false),
             KeyCode::Char('A') if !queue => self.b.add_selected_to_queue(true),
             KeyCode::Char('p') => self.pick_playlist(),
