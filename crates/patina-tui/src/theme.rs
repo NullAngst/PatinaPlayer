@@ -128,7 +128,8 @@ impl Theme {
             Kind::KawaiiLight => &KAWAII_LIGHT,
             Kind::KawaiiDark => &KAWAII_DARK,
             Kind::Light => &LIGHT,
-            Kind::Dark => &DARK,
+            // The terminal has no system colors to follow.
+            Kind::Dark | Kind::System => &DARK,
             Kind::Oled => &OLED,
         };
         let c = |i: usize| {

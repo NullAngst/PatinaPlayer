@@ -379,6 +379,26 @@ pub fn set_bit_perfect(device: i32, rate: u32, bits: u32, channels: u16) -> Resu
     .unwrap_or_else(|| Err("the Android side isn't ready".into()))
 }
 
+/// The system's Material You colors and dark mode, as one flat list (see
+/// `patina_gui::system_theme::SystemColors::from_flat`). None before
+/// Android 12, which has none.
+pub fn system_colors() -> Option<Vec<i32>> {
+    with_java(|env, class| {
+        let r = env
+            .call_static_method(class, "systemColors", "()[I", &[])?
+            .l()?;
+        if r.is_null() {
+            return Ok(None);
+        }
+        let arr = JIntArray::from(r);
+        let n = env.get_array_length(&arr)? as usize;
+        let mut v = vec![0; n];
+        env.get_int_array_region(&arr, 0, &mut v)?;
+        Ok(Some(v))
+    })
+    .flatten()
+}
+
 /// Back with nowhere left to go: send the app to the background.
 pub fn move_to_back() {
     with_java(|env, class| {

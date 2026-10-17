@@ -138,6 +138,41 @@ final class Native {
             secret, ok, live, light));
     }
 
+    /** Android's Material You palettes, in the order Rust reads them. */
+    private static final String[] TONAL = {
+        "system_accent1_", "system_accent2_", "system_accent3_",
+        "system_neutral1_", "system_neutral2_",
+    };
+    private static final int[] SHADES = {0, 10, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000};
+
+    /**
+     * The system's colors for the System theme: five tonal palettes of
+     * thirteen shades each (ARGB), then 1 for dark mode or 0 for light.
+     * Null before Android 12, which has no Material You. Looked up by name,
+     * so this builds against any SDK.
+     */
+    static int[] systemColors() {
+        if (android.os.Build.VERSION.SDK_INT < 31 || app == null) {
+            return null;
+        }
+        Activity a = activity.get();
+        android.content.res.Resources res = a != null ? a.getResources() : app.getResources();
+        int[] out = new int[TONAL.length * SHADES.length + 1];
+        int k = 0;
+        for (String p : TONAL) {
+            for (int shade : SHADES) {
+                int id = res.getIdentifier(p + shade, "color", "android");
+                if (id == 0) {
+                    return null;
+                }
+                out[k++] = res.getColor(id, null);
+            }
+        }
+        int night = res.getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        out[k] = night == android.content.res.Configuration.UI_MODE_NIGHT_YES ? 1 : 0;
+        return out;
+    }
+
     // ----- Devices -----
 
     private static void watchDevices() {

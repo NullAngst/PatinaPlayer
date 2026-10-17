@@ -24,7 +24,7 @@ import "fonts/ZenMaruGothic-Black.ttf";
 // (the same pink and butter on cocoa plum), 3 Light and 4 Dark (plain
 // greys and one blue), 5 OLED (true black). The names are Runout's;
 // `verdigris` is the main accent and `copper` the warm one in every theme.
-struct Palette {
+export struct Palette {
     bg: color,
     surface: color,
     raised: color,
@@ -55,7 +55,11 @@ export global P {
     in-out property <int> theme: 0;
     out property <bool> kawaii: theme == 1 || theme == 2;
     // A light palette: dark text on a pale ground.
-    out property <bool> light: theme == 1 || theme == 3;
+    out property <bool> light: theme == 1 || theme == 3 || (theme == 6 && system-light);
+    // Theme 6, System: the palette Rust builds from the system's colors
+    // (Material You on Android), and whether it's a light one.
+    in property <Palette> system;
+    in property <bool> system-light;
     property <[Palette]> all: [
         // Runout
         { bg: #0e1917, surface: #132220, raised: #172a27, border: #2a3d39, text: #e6ece9, muted: #8fa39d, verdigris: #5fb8a5, verdigris-dim: #2f5f55, copper: #d4884a, copper-dim: #5a3a22, wave: #4a5f5a, on-accent: #0b1513, playing-bg: #5fb8a51f, accent-text: #5fb8a5, hover: #15262399, sel-idle: #15262380, accent-hover: #6fc8b5, chip-hover: #1d332f, accent-edge: transparent, scrim: #050b0acc, shadow: #00000090, mint: #8ed8c3, butter: #ffd27a, dots: #34252f },
@@ -70,7 +74,7 @@ export global P {
         // OLED
         { bg: #000000, surface: #000000, raised: #121212, border: #1f1f1f, text: #f2f2f2, muted: #8a8a8a, verdigris: #6aa8ff, verdigris-dim: #1d3354, copper: #f0a868, copper-dim: #3d2a18, wave: #333333, on-accent: #000000, playing-bg: #6aa8ff1a, accent-text: #7ab2ff, hover: #0d0d0d, sel-idle: #0a0a0a, accent-hover: #85b8ff, chip-hover: #1a1a1a, accent-edge: transparent, scrim: #000000d9, shadow: #00000000, mint: #5cc4a8, butter: #e5c15a, dots: #0d0d0d },
     ];
-    property <Palette> c: all[theme];
+    property <Palette> c: theme == 6 ? system : all[theme];
 
     out property <color> bg: c.bg;
     out property <color> surface: c.surface;
@@ -406,6 +410,26 @@ component IconButton inherits Rectangle {
     ta := TouchArea {
         mouse-cursor: enabled ? pointer : default;
         clicked => { if enabled { root.clicked(); } }
+    }
+}
+
+// A row of buttons that scrolls sideways when it doesn't fit, instead of
+// making everything around it wider. A row that won't fit used to push
+// the whole view (header and all) past the right edge of a phone.
+component HScroll inherits Flickable {
+    in property <length> spacing: 8px;
+    in property <LayoutAlignment> align: start;
+    min-width: 0px;
+    preferred-width: row.preferred-width;
+    height: row.preferred-height;
+    content-width: max(self.width, row.preferred-width);
+    content-height: self.height;
+    row := HorizontalLayout {
+        width: root.content-width;
+        height: root.height;
+        spacing: root.spacing;
+        alignment: root.align;
+        @children
     }
 }
 
@@ -1835,10 +1859,14 @@ component EqPanel inherits Rectangle {
                 horizontal-stretch: 1;
                 PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
             }
-            Chip { h: 28px; text: root.on ? "On" : "Bypassed"; active: root.on; clicked => { root.act("eq-toggle"); } }
-            Chip { h: 28px; text: "Flat"; clicked => { root.act("eq-flat"); } }
-            Chip { h: 28px; text: "Import…"; clicked => { root.act("eq-import"); } }
-            Chip { h: 28px; text: "Save as…"; clicked => { root.act("eq-save"); } }
+            HScroll {
+                horizontal-stretch: 0;
+                max-width: self.preferred-width;
+                Chip { h: 28px; text: root.on ? "On" : "Bypassed"; active: root.on; clicked => { root.act("eq-toggle"); } }
+                Chip { h: 28px; text: "Flat"; clicked => { root.act("eq-flat"); } }
+                Chip { h: 28px; text: "Import…"; clicked => { root.act("eq-import"); } }
+                Chip { h: 28px; text: "Save as…"; clicked => { root.act("eq-save"); } }
+            }
         }
         graph := Rectangle {
             vertical-stretch: 1;
@@ -1933,16 +1961,32 @@ export component AppWindow inherits Window {
     // The window's size, copied over when it changes. The tiers below hang
     // off these copies rather than the size itself: the tiers change what
     // the layout needs, and the layout feeds the window's size, so binding
-    // to it directly would be a loop.
-    property <length> win-w: 1360px;
-    property <length> win-h: 860px;
+    // to it directly would be a loop. Rust sets them too, every tick, from
+    // the window's real size: `changed` only fires on a change, and a
+    // window that opens at its final size (a phone, a tablet) never
+    // changes, which left the tiers working from the 1360px default.
+    in-out property <length> win-w: 1360px;
+    in-out property <length> win-h: 860px;
     changed width => { self.win-w = self.width; }
     changed height => { self.win-h = self.height; }
     // Size tiers, widest first.
     // compact: the bottom bar drops the format badge and output chip.
     out property <bool> compact: win-w < 1180px;
-    // narrow: the sidebar folds to icons.
+    // narrow: the sidebar folds to icons, unless a setting says otherwise.
     out property <bool> narrow: win-w < 1000px;
+    // The sidebar setting for each way the screen is held: 0 by width (as
+    // above), 1 always expanded, 2 always folded to icons.
+    in property <int> side-land: 0;
+    in property <int> side-port: 0;
+    out property <bool> landscape: win-w >= win-h;
+    property <int> side-mode: landscape ? side-land : side-port;
+    // Folded to icons, by width or by choice.
+    out property <bool> side-folded: side-mode == 2 || (side-mode == 0 && narrow && !tiny);
+    // A drawer behind the menu button: a tiny window, unless the sidebar
+    // is set to stay folded, which keeps the icons on screen.
+    out property <bool> drawer: tiny && side-mode != 2;
+    // The fold button: fold (true) or expand, for this way of holding it.
+    callback side-fold(bool, bool);
     // tight: the bottom bar takes two rows, view buttons go under the title.
     // (The bar also goes to two rows by itself when one won't fit.)
     out property <bool> tight: win-w < 820px;
@@ -1951,7 +1995,7 @@ export component AppWindow inherits Window {
     // short: a smaller album header.
     property <bool> short: win-h < 700px;
     in-out property <bool> drawer-open: false;
-    property <length> side-w: tiny ? 0px : (narrow ? 64px : 228px);
+    property <length> side-w: drawer ? 0px : (side-folded ? 64px : 228px);
     property <length> bar-h: bar.two-row ? 132px : 84px;
     property <length> lyrics-w: tiny ? 0px : clamp(win-w * 0.3, 240px, 340px);
     property <length> queue-w: tiny ? 0px : clamp(win-w * 0.26, 220px, 300px);
@@ -2262,7 +2306,7 @@ export component AppWindow inherits Window {
                             padding-right: root.tight ? 12px : 24px;
                             spacing: root.tiny ? 4px : 8px;
                             // Tiny window: the sidebar opens as a drawer.
-                            if root.tiny: IconButton {
+                            if root.drawer: IconButton {
                                 y: (parent.height - self.height) / 2;
                                 icon: Icons.menu;
                                 tip: "Menu";
@@ -2363,9 +2407,13 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // View body
+                    // View body. Whatever is inside, it never makes the window
+                    // wider than it is: a row that doesn't fit scrolls or
+                    // cuts off within it.
                     Rectangle {
                         vertical-stretch: 1;
+                        min-width: 0px;
+                        clip: true;
 
                         // Album hero and track list. When the window is too
                         // short for the header, panels and some of the list,
@@ -2422,6 +2470,8 @@ export component AppWindow inherits Window {
                                     VerticalLayout {
                                         alignment: end;
                                         spacing: 6px;
+                                        horizontal-stretch: 1;
+                                        min-width: 0px;
                                         if !P.kawaii: Text {
                                             text: root.hero.kicker;
                                             font-size: 11px;
@@ -2475,7 +2525,8 @@ export component AppWindow inherits Window {
                                             if root.hero.rating >= 0 && root.hero.fav >= 0: Rectangle { width: 12px; }
                                             if root.hero.fav >= 0: Chip {
                                                 h: 26px;
-                                                text: root.hero.fav == 1 ? "★ In Favorites" : "☆ Add to Favorites";
+                                                text: root.tiny ? (root.hero.fav == 1 ? "★" : "☆") : (root.hero.fav == 1 ? "★ In Favorites" : "☆ Add to Favorites");
+                                                peek: root.hero.fav == 1 ? "In Favorites" : "Add to Favorites";
                                                 active: root.hero.fav == 1;
                                                 clicked => { root.hero-fav(); keys.focus(); }
                                             }
@@ -2483,8 +2534,8 @@ export component AppWindow inherits Window {
                                         HorizontalLayout {
                                             padding-top: root.short ? 6px : 12px;
                                             padding-bottom: P.kawaii ? 3px : 0px;
+                                            HScroll {
                                             spacing: root.tight ? 6px : 8px;
-                                            alignment: start;
                                             for a[i] in root.actions: Chip {
                                                 h: root.tight ? 32px : (P.kawaii ? 36px : 40px);
                                                 text: root.action-labels[i];
@@ -2492,6 +2543,7 @@ export component AppWindow inherits Window {
                                                 icon-only: (root.compact && i > 1) || (root.tight && i > 0) || root.tiny;
                                                 icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "queue" ? Icons.plus : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                                 clicked => { root.view-action(a); keys.focus(); }
+                                            }
                                             }
                                         }
                                     }
@@ -2504,6 +2556,8 @@ export component AppWindow inherits Window {
                                 spacing: 12px;
                                 VerticalLayout {
                                     spacing: 2px;
+                                    min-width: 0px;
+                                    horizontal-stretch: 1;
                                     if root.crumbs.length > 1: HorizontalLayout {
                                         spacing: 6px;
                                         alignment: start;
@@ -2535,12 +2589,11 @@ export component AppWindow inherits Window {
                                     }
                                     Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                                 }
-                                Rectangle { horizontal-stretch: 1; }
-                                if !root.tight: HorizontalLayout {
-                                    spacing: 8px;
-                                    alignment: end;
+                                if !root.tight: HScroll {
+                                    horizontal-stretch: 1;
+                                    y: parent.height - self.height;
+                                    align: end;
                                     for a[i] in root.actions: Chip {
-                                        y: parent.height - self.height;
                                         text: root.action-labels[i];
                                         icon: a == "new" || a == "subscribe" || a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                         icon-only: root.compact && (a == "queue" || a == "playlist");
@@ -2552,8 +2605,8 @@ export component AppWindow inherits Window {
                             // Tight window: the buttons go under the title.
                             if !root.hero.show && root.tight && root.actions.length > 0: HorizontalLayout {
                                 padding-bottom: 12px;
+                                HScroll {
                                 spacing: 6px;
-                                alignment: start;
                                 for a[i] in root.actions: Chip {
                                     text: root.action-labels[i];
                                     icon: a == "new" || a == "subscribe" || a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
@@ -2561,9 +2614,17 @@ export component AppWindow inherits Window {
                                     primary: a == "play";
                                     clicked => { root.view-action(a); keys.focus(); }
                                 }
+                                }
                             }
 
-                            if root.eq-panel: EqPanel {
+                            // On a touch screen the EQ is drawn over this spot
+                            // (below, after the list), not inside the scrolling
+                            // page: the page would take every drag up or down,
+                            // and the bands drag up and down.
+                            eq-spot := Rectangle {
+                                height: root.eq-panel && Ui.touch ? 280px : 0px;
+                            }
+                            if root.eq-panel && !Ui.touch: EqPanel {
                                 height: 280px;
                                 curve: root.eq-curve;
                                 bands: root.eq-bands;
@@ -2639,6 +2700,24 @@ export component AppWindow inherits Window {
                         }
                         }
 
+                        // The EQ on a touch screen, over its spot in the page and
+                        // moving with it. Out of the page, so a drag on it moves
+                        // the bands, not the page.
+                        if root.eq-panel && Ui.touch && root.layout == 0: EqPanel {
+                            x: lv.x + eq-spot.x;
+                            y: body.content-y + eq-spot.y;
+                            width: eq-spot.width;
+                            height: eq-spot.height;
+                            curve: root.eq-curve;
+                            bands: root.eq-bands;
+                            range: root.eq-range;
+                            on: root.eq-on;
+                            graphic: root.eq-graphic;
+                            info: root.eq-info;
+                            point(i, x, g) => { root.eq-point(i, x, g); }
+                            act(a) => { root.view-action(a); keys.focus(); }
+                        }
+
                         // Album grid.
                         Rectangle {
                         visible: root.layout == 1;
@@ -2652,6 +2731,8 @@ export component AppWindow inherits Window {
                                 spacing: 12px;
                                 VerticalLayout {
                                     spacing: 2px;
+                                    min-width: 0px;
+                                    horizontal-stretch: 1;
                                     if root.crumbs.length > 1: HorizontalLayout {
                                         spacing: 6px;
                                         alignment: start;
@@ -2683,12 +2764,11 @@ export component AppWindow inherits Window {
                                     }
                                     Text { text: root.view-sub; font-size: 12.5px; color: P.muted; overflow: elide; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
                                 }
-                                Rectangle { horizontal-stretch: 1; }
-                                if !root.tight: HorizontalLayout {
-                                    spacing: 8px;
-                                    alignment: end;
+                                if !root.tight: HScroll {
+                                    horizontal-stretch: 1;
+                                    y: parent.height - self.height;
+                                    align: end;
                                     for a[i] in root.actions: Chip {
-                                        y: parent.height - self.height;
                                         text: root.action-labels[i];
                                         icon: a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                         icon-only: root.compact && (a == "queue" || a == "playlist");
@@ -2700,14 +2780,15 @@ export component AppWindow inherits Window {
                             if root.tight && root.actions.length > 0: HorizontalLayout {
                                 padding-left: 8px;
                                 padding-bottom: 12px;
+                                HScroll {
                                 spacing: 6px;
-                                alignment: start;
                                 for a[i] in root.actions: Chip {
                                     text: root.action-labels[i];
                                     icon: a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                     icon-only: root.tiny && (a == "queue" || a == "playlist" || a == "shuffle");
                                     primary: a == "play";
                                     clicked => { root.view-action(a); keys.focus(); }
+                                }
                                 }
                             }
                             grid := Flickable {
@@ -3173,7 +3254,7 @@ export component AppWindow inherits Window {
 
         // Tiny window: the sidebar is a drawer over the view, with a scrim
         // behind it that closes it.
-        if root.tiny && root.drawer-open: Rectangle {
+        if root.drawer && root.drawer-open: Rectangle {
             y: 0;
             height: keys.height - root.bar-h;
             background: P.scrim;
@@ -3182,15 +3263,15 @@ export component AppWindow inherits Window {
 
         // ----- Sidebar -----
         sidebar := Rectangle {
-            // Folded to icons on a narrow window.
-            property <bool> folded: root.narrow && !root.tiny;
+            // Folded to icons on a narrow window, or by choice.
+            property <bool> folded: root.side-folded && !root.drawer;
             x: 0;
             y: 0;
-            width: root.tiny ? 228px : root.side-w;
+            width: root.drawer ? 228px : root.side-w;
             height: keys.height - root.bar-h;
-            visible: !root.tiny || root.drawer-open;
+            visible: !root.drawer || root.drawer-open;
             background: P.surface;
-            drop-shadow-blur: root.tiny ? 18px : 0px;
+            drop-shadow-blur: root.drawer ? 18px : 0px;
             drop-shadow-color: P.shadow;
             Rectangle {
                 x: parent.width - 1px;
@@ -3442,6 +3523,26 @@ export component AppWindow inherits Window {
                                         keys.focus();
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                // Fold to icons, or expand to names. It sticks for this
+                // way of holding the screen (Settings has both).
+                Rectangle {
+                    height: 44px;
+                    Rectangle { y: 0; height: 1px; background: P.border; }
+                    HorizontalLayout {
+                        padding-top: 8px;
+                        alignment: sidebar.folded ? center : end;
+                        IconButton {
+                            icon: sidebar.folded ? Icons.forward : Icons.back;
+                            tip: sidebar.folded ? "Expand the sidebar" : "Fold the sidebar to icons";
+                            clicked => {
+                                root.side-tip = "";
+                                root.drawer-open = false;
+                                root.side-fold(root.landscape, !sidebar.folded);
+                                keys.focus();
                             }
                         }
                     }

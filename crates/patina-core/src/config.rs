@@ -280,6 +280,67 @@ impl std::str::FromStr for ScrobbleMode {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppearanceConfig {
     pub theme: Theme,
+    /// The GUI's sidebar with the window wider than it's tall.
+    pub sidebar_landscape: SidebarMode,
+    /// And taller than it's wide.
+    pub sidebar_portrait: SidebarMode,
+}
+
+/// How the GUI's sidebar shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum SidebarMode {
+    /// By the window's width: names when there's room, icons when not,
+    /// and a drawer behind the menu button on a phone.
+    #[default]
+    Auto,
+    /// Names, whatever the width (a drawer on a phone).
+    Expanded,
+    /// Icons only, whatever the width. A phone keeps them on screen
+    /// instead of in a drawer.
+    Folded,
+}
+
+impl SidebarMode {
+    pub const ALL: [SidebarMode; 3] = [
+        SidebarMode::Auto,
+        SidebarMode::Expanded,
+        SidebarMode::Folded,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SidebarMode::Auto => "auto",
+            SidebarMode::Expanded => "expanded",
+            SidebarMode::Folded => "folded",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarMode::Auto => "By width",
+            SidebarMode::Expanded => "Expanded",
+            SidebarMode::Folded => "Folded to icons",
+        }
+    }
+
+    /// The GUI's number for it.
+    pub fn index(self) -> i32 {
+        match self {
+            SidebarMode::Auto => 0,
+            SidebarMode::Expanded => 1,
+            SidebarMode::Folded => 2,
+        }
+    }
+}
+
+impl std::str::FromStr for SidebarMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        SidebarMode::ALL
+            .into_iter()
+            .find(|m| m.as_str().eq_ignore_ascii_case(s.trim()))
+            .ok_or_else(|| format!("unknown sidebar mode \"{s}\" (auto, expanded, folded)"))
+    }
 }
 
 /// How both apps look. The TUI follows it as well as the GUI.
@@ -299,11 +360,16 @@ pub enum Theme {
     /// True black, so an OLED screen switches those pixels off. Saves
     /// battery on phones and stops grey glow in a dark room.
     Oled,
+    /// The system's own colors: Material You on Android 12 and later, in
+    /// the phone's light or dark mode. Elsewhere (and on older Android),
+    /// plain Dark.
+    System,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 6] = [
+    pub const ALL: [Theme; 7] = [
         Theme::Runout,
+        Theme::System,
         Theme::Light,
         Theme::Dark,
         Theme::Oled,
@@ -320,6 +386,7 @@ impl Theme {
             Theme::Light => "light",
             Theme::Dark => "dark",
             Theme::Oled => "oled",
+            Theme::System => "system",
         }
     }
 
@@ -331,6 +398,7 @@ impl Theme {
             Theme::Light => "Light",
             Theme::Dark => "Dark",
             Theme::Oled => "OLED (true black)",
+            Theme::System => "System (Material You)",
         }
     }
 
@@ -343,6 +411,7 @@ impl Theme {
             Theme::Light => 3,
             Theme::Dark => 4,
             Theme::Oled => 5,
+            Theme::System => 6,
         }
     }
 
@@ -364,7 +433,7 @@ impl std::str::FromStr for Theme {
             .find(|t| t.as_str().eq_ignore_ascii_case(s.trim()))
             .ok_or_else(|| {
                 format!(
-                    "unknown theme \"{s}\" (runout, light, dark, oled, kawaii-light, kawaii-dark)"
+                    "unknown theme \"{s}\" (runout, system, light, dark, oled, kawaii-light, kawaii-dark)"
                 )
             })
     }
@@ -545,6 +614,8 @@ struct RawServer {
 #[serde(deny_unknown_fields)]
 struct RawAppearance {
     theme: Option<String>,
+    sidebar_landscape: Option<String>,
+    sidebar_portrait: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -803,6 +874,17 @@ impl Config {
             })?,
             None => Theme::default(),
         };
+        let sidebar = |v: &Option<String>, key: &str| -> Result<SidebarMode, ConfigError> {
+            match v {
+                Some(t) => t.parse::<SidebarMode>().map_err(|msg| ConfigError::Parse {
+                    path: path.to_path_buf(),
+                    msg: format!("appearance.{key}: {msg}"),
+                }),
+                None => Ok(SidebarMode::default()),
+            }
+        };
+        let sidebar_landscape = sidebar(&look.sidebar_landscape, "sidebar_landscape")?;
+        let sidebar_portrait = sidebar(&look.sidebar_portrait, "sidebar_portrait")?;
         let backend = match out.backend {
             Some(b) => b.parse::<Backend>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -900,7 +982,11 @@ impl Config {
                 speed: pods.speed.unwrap_or(1.0).clamp(0.5, 3.0),
                 trim_silence: pods.trim_silence.unwrap_or(false),
             },
-            appearance: AppearanceConfig { theme },
+            appearance: AppearanceConfig {
+                theme,
+                sidebar_landscape,
+                sidebar_portrait,
+            },
             servers,
             cache,
             mixes,
@@ -1017,8 +1103,15 @@ online = false
 # How the app looks: runout (dark verdigris and copper), light or dark
 # (plain grey with a blue accent), oled (true black, for OLED screens),
 # kawaii-light (pastel pink and cream) or kawaii-dark (pastel on lavender).
-# The TUI follows it too.
+# The TUI follows it too. On Android, system follows the phone's own
+# colors (Material You, Android 12 and later) and its light or dark mode.
 theme = "runout"
+# The GUI's sidebar, with the window wider than it's tall and taller than
+# it's wide: auto (names when there's room, icons when not, a drawer on a
+# phone), expanded (names), or folded (icons; a phone keeps them on screen).
+# The button at the bottom of the sidebar sets the one in use.
+sidebar_landscape = "auto"
+sidebar_portrait = "auto"
 
 [playback]
 # Starting volume, 0 to 100.
@@ -1512,6 +1605,20 @@ mod tests {
 
     #[test]
     fn themes_parse() {
+        let c = Config::parse(
+            "[appearance]\nsidebar_landscape = \"folded\"\nsidebar_portrait = \"Expanded\"\n",
+            Path::new("x"),
+        )
+        .unwrap();
+        assert_eq!(c.appearance.sidebar_landscape, SidebarMode::Folded);
+        assert_eq!(c.appearance.sidebar_portrait, SidebarMode::Expanded);
+        assert!(
+            Config::parse(
+                "[appearance]\nsidebar_portrait = \"wide\"\n",
+                Path::new("x")
+            )
+            .is_err()
+        );
         let c = Config::parse("[appearance]\ntheme = \"kawaii-dark\"\n", Path::new("x")).unwrap();
         assert_eq!(c.appearance.theme, Theme::KawaiiDark);
         let c = Config::parse("[appearance]\ntheme = \"OLED\"\n", Path::new("x")).unwrap();

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::audio::output::exclusive::HwDevice;
 use crate::audio::output::{Backend, BitPerfect, OutDevice, RATES, SampleFormat};
-use crate::config::{Config, Theme};
+use crate::config::{Config, SidebarMode, Theme};
 use crate::dsp::resample::Quality;
 use crate::remote::{ServerStatus, StreamFormat};
 
@@ -20,6 +20,10 @@ pub enum Key {
     AddFolder,
     Watch,
     Theme,
+    /// The GUI's sidebar with the window wider than it's tall.
+    SidebarLandscape,
+    /// And taller than it's wide.
+    SidebarPortrait,
     StartVolume,
     FadeMs,
     Backend,
@@ -734,18 +738,65 @@ pub fn rows(
             disabled: None,
             key: Key::Theme,
             label: "Theme".into(),
-            help: "Runout, plain Light or Dark, OLED true black (saves power on OLED screens), or the pastel kawaii pair.",
-            control: Control::Choice {
-                options: Theme::ALL
-                    .iter()
-                    .map(|t| (t.as_str().to_string(), t.label().to_string()))
-                    .collect(),
-                index: Theme::ALL
-                    .iter()
-                    .position(|t| *t == cfg.appearance.theme)
-                    .unwrap_or(0),
+            help: if cfg!(target_os = "android") {
+                "Runout, System (your phone's Material You colors, light or dark with the phone), plain Light or Dark, OLED true black (saves power on OLED screens), or the pastel kawaii pair."
+            } else {
+                "Runout, plain Light or Dark, OLED true black (saves power on OLED screens), or the pastel kawaii pair."
+            },
+            control: {
+                // System follows Material You, which only Android has. A
+                // config set to it elsewhere still shows it, as plain Dark.
+                let themes: Vec<Theme> = Theme::ALL
+                    .into_iter()
+                    .filter(|t| {
+                        *t != Theme::System
+                            || cfg!(target_os = "android")
+                            || cfg.appearance.theme == Theme::System
+                    })
+                    .collect();
+                Control::Choice {
+                    options: themes
+                        .iter()
+                        .map(|t| (t.as_str().to_string(), t.label().to_string()))
+                        .collect(),
+                    index: themes
+                        .iter()
+                        .position(|t| *t == cfg.appearance.theme)
+                        .unwrap_or(0),
+                }
             },
         },
+    );
+    let sidebar = |key: Key, label: &str, help: &'static str, now: SidebarMode| Setting {
+        disabled: None,
+        key,
+        label: label.into(),
+        help,
+        control: Control::Choice {
+            options: SidebarMode::ALL
+                .iter()
+                .map(|m| (m.as_str().to_string(), m.label().to_string()))
+                .collect(),
+            index: SidebarMode::ALL.iter().position(|m| *m == now).unwrap_or(0),
+        },
+    };
+    push(
+        "Appearance",
+        sidebar(
+            Key::SidebarLandscape,
+            "Sidebar, landscape",
+            "With the window wider than it's tall. By width: names when there's room, icons when not. The button at the bottom of the sidebar sets this too. Window only, not the TUI.",
+            cfg.appearance.sidebar_landscape,
+        ),
+    );
+    push(
+        "Appearance",
+        sidebar(
+            Key::SidebarPortrait,
+            "Sidebar, portrait",
+            "With the window taller than it's wide. On a phone, Folded keeps the icons on screen instead of behind the menu button. Window only, not the TUI.",
+            cfg.appearance.sidebar_portrait,
+        ),
     );
 
     // Desktop

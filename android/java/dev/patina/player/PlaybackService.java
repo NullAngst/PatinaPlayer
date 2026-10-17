@@ -4,7 +4,6 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -17,11 +16,16 @@ import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
+import android.media.browse.MediaBrowser;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
-import android.os.IBinder;
+import android.os.Bundle;
 import android.os.SystemClock;
+import android.service.media.MediaBrowserService;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Keeps the music going with the screen off or the app in the background:
@@ -29,11 +33,25 @@ import android.os.SystemClock;
  * lock screen, Bluetooth buttons and Android Auto talk to, audio focus,
  * and pausing when headphones come out. All of it follows what the Rust
  * player reports through {@link Native#onState}.
+ *
+ * It's a MediaBrowserService so Android Auto takes it for a music app and
+ * drives its session: next and previous on the car's screen and wheel
+ * buttons, instead of the generic controls (seek back and forward) it
+ * gives an app it doesn't know. The browse tree is empty: the car shows
+ * what's playing and the controls; picking music is done on the phone.
  */
-public class PlaybackService extends Service {
+public class PlaybackService extends MediaBrowserService {
     private static final String CHANNEL = "playback";
     private static final int NOTE_ID = 1;
     private static final String ACTION = "dev.patina.player.ACTION";
+    private static final String ROOT = "root";
+    // Ask Android Auto to keep the next and previous slots for those two
+    // buttons, never giving them to anything else. Strings from
+    // androidx.media's MediaConstants, which this app doesn't link.
+    private static final String RESERVE_NEXT =
+        "android.media.playback.ALWAYS_RESERVE_SPACE_FOR.ACTION_SKIP_TO_NEXT";
+    private static final String RESERVE_PREV =
+        "android.media.playback.ALWAYS_RESERVE_SPACE_FOR.ACTION_SKIP_TO_PREVIOUS";
 
     private static PlaybackService running;
     // The latest state, kept for when the service is (re)created.
@@ -106,8 +124,18 @@ public class PlaybackService extends Service {
             @Override public void onSkipToPrevious() { Native.command(Native.BACK, 0); }
             @Override public void onStop() { Native.command(Native.STOP, 0); }
             @Override public void onSeekTo(long pos) { Native.command(Native.SEEK, pos); }
+            // Some cars send fast forward and rewind from the wheel's
+            // skip buttons. The app has no seeking by steps, so they skip.
+            @Override public void onFastForward() { Native.command(Native.NEXT, 0); }
+            @Override public void onRewind() { Native.command(Native.BACK, 0); }
         });
+        Bundle extras = new Bundle();
+        extras.putBoolean(RESERVE_NEXT, true);
+        extras.putBoolean(RESERVE_PREV, true);
+        session.setExtras(extras);
         session.setActive(true);
+        // Android Auto and other media browsers reach the session through this.
+        setSessionToken(session.getSessionToken());
         registerReceiver(noisy, new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
 
         AudioAttributes attrs = new AudioAttributes.Builder()
@@ -254,8 +282,16 @@ public class PlaybackService extends Service {
         super.onDestroy();
     }
 
+    // ----- Media browsing (Android Auto) -----
+
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
+    public BrowserRoot onGetRoot(String clientPackage, int clientUid, Bundle hints) {
+        return new BrowserRoot(ROOT, null);
+    }
+
+    @Override
+    public void onLoadChildren(String parentId, Result<List<MediaBrowser.MediaItem>> result) {
+        // Nothing to browse in the car: music is picked on the phone.
+        result.sendResult(new ArrayList<>());
     }
 }

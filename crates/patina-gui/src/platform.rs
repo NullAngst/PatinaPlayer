@@ -67,6 +67,12 @@ pub trait Hooks: Send + Sync {
     /// `id`. False if it couldn't be shown, and the window's own dialog is
     /// used instead.
     fn prompt(&self, id: u64, p: &Prompt) -> bool;
+    /// The system's colors for the System theme (Material You), asked
+    /// every couple of seconds while it's in use, so a wallpaper or
+    /// dark mode change shows. None where there are none.
+    fn system_colors(&self) -> Option<crate::system_theme::SystemColors> {
+        None
+    }
 }
 
 static HOOKS: OnceLock<Box<dyn Hooks>> = OnceLock::new();
@@ -75,6 +81,11 @@ static EVENTS: Mutex<Vec<(u64, PromptEvent)>> = Mutex::new(Vec::new());
 /// Set the platform's hooks. Only the first call counts.
 pub fn set_hooks(h: Box<dyn Hooks>) {
     let _ = HOOKS.set(h);
+}
+
+/// The system's colors, if the platform has any.
+pub(crate) fn system_colors() -> Option<crate::system_theme::SystemColors> {
+    hooks().and_then(|h| h.system_colors())
 }
 
 pub(crate) fn hooks() -> Option<&'static dyn Hooks> {

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tells Android Auto this is a media app (see the manifest). -->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>

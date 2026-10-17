@@ -128,6 +128,11 @@ impl Hooks for AndroidHooks {
     fn prompt(&self, id: u64, p: &Prompt) -> bool {
         jni_glue::prompt(id, p)
     }
+
+    fn system_colors(&self) -> Option<patina_gui::system_theme::SystemColors> {
+        jni_glue::system_colors()
+            .and_then(|v| patina_gui::system_theme::SystemColors::from_flat(&v))
+    }
 }
 
 /// Point the app's folders (config, library, cache) at Android's app

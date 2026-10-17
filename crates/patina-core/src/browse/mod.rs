@@ -1419,6 +1419,38 @@ impl Browser {
         .find(|s| &s.key == key)
     }
 
+    /// The button at the bottom of the GUI's sidebar: fold it to icons, or
+    /// expand it, for the way the screen is held now. Sticks, like the
+    /// setting it changes.
+    pub fn set_sidebar(&mut self, landscape: bool, fold: bool) {
+        let mode = if fold {
+            config::SidebarMode::Folded
+        } else {
+            config::SidebarMode::Expanded
+        };
+        if let Err(e) = self.save_sidebar(landscape, mode) {
+            self.error(format!("couldn't save the sidebar setting: {e}"));
+        }
+        self.refresh_section(Section::Settings);
+        self.touch();
+    }
+
+    fn save_sidebar(&mut self, landscape: bool, mode: config::SidebarMode) -> Result<(), String> {
+        let key = if landscape {
+            "sidebar_landscape"
+        } else {
+            "sidebar_portrait"
+        };
+        config::set_value(&self.config_path, "appearance", key, mode.as_str())
+            .map_err(|e| e.to_string())?;
+        if landscape {
+            self.config.appearance.sidebar_landscape = mode;
+        } else {
+            self.config.appearance.sidebar_portrait = mode;
+        }
+        Ok(())
+    }
+
     /// Apply a change from the Settings view: write it to config.toml
     /// (comments kept) and put it into effect now where that's possible.
     pub fn change_setting(&mut self, key: &Key, change: Change) {
@@ -1456,6 +1488,13 @@ impl Browser {
                     let v = &options[*index].0;
                     w(config::set_value(&path, "appearance", "theme", v.as_str()))?;
                     self.config.appearance.theme = v.parse().unwrap_or_default();
+                }
+                (
+                    Key::SidebarLandscape | Key::SidebarPortrait,
+                    Control::Choice { options, index },
+                ) => {
+                    let mode: config::SidebarMode = options[*index].0.parse().unwrap_or_default();
+                    self.save_sidebar(*key == Key::SidebarLandscape, mode)?;
                 }
                 (Key::ServerStream(name), Control::Choice { options, index }) => {
                     let (stream, kbps) = settings::parse_stream(&options[*index].0);

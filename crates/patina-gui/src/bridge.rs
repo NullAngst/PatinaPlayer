@@ -135,6 +135,10 @@ pub struct State {
     last_activate: Option<Instant>,
     /// The theme on screen, so a change in Settings redraws.
     theme: Option<Theme>,
+    /// The System theme: when the system's colors were last asked for,
+    /// and what was put on screen from them.
+    system_checked: Option<Instant>,
+    system_shown: Option<Option<crate::system_theme::SystemColors>>,
     /// MPRIS and the tray icon.
     desktop: crate::desktop::Desktop,
     /// What Back does with nowhere left to go back to (Android: send the
@@ -294,6 +298,8 @@ impl State {
             search_prompt: None,
             last_activate: None,
             theme: None,
+            system_checked: None,
+            system_shown: None,
             desktop,
             back_out: None,
             hide_on_close,
@@ -1321,7 +1327,25 @@ impl State {
         if let Some(found) = self.b.take_dlna_found() {
             self.open_dlna(ui, found);
         }
-        let theme = self.b.config.appearance.theme;
+        self.sync_window_size(ui);
+        let look = &self.b.config.appearance;
+        ui.set_side_land(look.sidebar_landscape.index());
+        ui.set_side_port(look.sidebar_portrait.index());
+        let theme = look.theme;
+        if theme == Theme::System
+            && self
+                .system_checked
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+        {
+            self.system_checked = Some(Instant::now());
+            let colors = platform::system_colors();
+            if self.system_shown.as_ref() != Some(&colors) {
+                let (pal, light) = crate::system_theme::palette(colors.as_ref());
+                ui.global::<P>().set_system(pal);
+                ui.global::<P>().set_system_light(light);
+                self.system_shown = Some(colors);
+            }
+        }
         if self.theme != Some(theme) {
             self.theme = Some(theme);
             ui.global::<P>().set_theme(theme.index());
@@ -1362,9 +1386,27 @@ impl State {
         if ui.get_queue_panel() && ui.get_lyrics_open() && narrow_window(ui) {
             ui.set_queue_panel(false);
         }
-        // The drawer only exists on a tiny window.
-        if ui.get_drawer_open() && !ui.get_tiny() {
+        // The drawer only exists on a tiny window (with the sidebar not
+        // set to stay folded).
+        if ui.get_drawer_open() && !ui.get_drawer() {
             ui.set_drawer_open(false);
+        }
+    }
+
+    /// The window's size tiers follow its real size. The UI copies its
+    /// size over when it changes, which misses a window that opens at its
+    /// final size and never changes (a phone, a tablet).
+    fn sync_window_size(&self, ui: &AppWindow) {
+        let w = ui.window();
+        let size = w.size().to_logical(w.scale_factor());
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return;
+        }
+        if (ui.get_win_w() - size.width).abs() > 0.5 {
+            ui.set_win_w(size.width);
+        }
+        if (ui.get_win_h() - size.height).abs() > 0.5 {
+            ui.set_win_h(size.height);
         }
     }
 
@@ -3062,6 +3104,9 @@ pub fn install(
     }
 
     on!(on_side_clicked, |s, u, i| s.b.activate_sidebar(i as usize));
+    on!(on_side_fold, |s, _u, landscape, fold| s
+        .b
+        .set_sidebar(landscape, fold));
     on!(on_back, |s, u| {
         s.b.pop();
     });

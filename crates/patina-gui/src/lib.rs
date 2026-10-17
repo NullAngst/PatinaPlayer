@@ -11,3 +11,4 @@ mod art;
 pub mod bridge;
 pub mod desktop;
 pub mod platform;
+pub mod system_theme;
