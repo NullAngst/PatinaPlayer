@@ -3121,7 +3121,13 @@ pub fn install(
         }};
     }
 
-    on!(on_side_clicked, |s, u, i| s.b.activate_sidebar(i as usize));
+    // A tap in the sidebar always shows the top of the view, even when the
+    // view is the one already open: that's how you get the breadcrumbs back
+    // after the page scrolled them away.
+    on!(on_side_clicked, |s, u, i| {
+        s.b.activate_sidebar(i as usize);
+        u.invoke_scroll_top();
+    });
     on!(on_side_fold, |s, _u, landscape, fold| s
         .b
         .set_sidebar(landscape, fold));

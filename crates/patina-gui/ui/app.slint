@@ -2682,7 +2682,13 @@ export component AppWindow inherits Window {
                                 // takes every drag the moment it can move at
                                 // all, and the rows in a short list under it
                                 // can't be reached.
-                                min-height: root.page-scroll ? max(180px, root.rows-height + 8px) : 180px;
+                                // A short window keeps only two rows' worth:
+                                // a phone on its side has about 250px here,
+                                // and 180px of list under the title and the
+                                // breadcrumbs made the page scroll, so a drag
+                                // meant for the list slid the breadcrumbs off
+                                // the top and they stayed gone.
+                                min-height: root.page-scroll ? max(180px, root.rows-height + 8px) : (root.short ? 80px : 180px);
                                 list := ListView {
                                     for r[i] in root.layout == 0 ? root.rows : []: ListRow {
                                         item: r;
