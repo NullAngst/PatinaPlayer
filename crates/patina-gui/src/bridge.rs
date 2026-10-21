@@ -1199,7 +1199,7 @@ impl State {
                 ui.set_bp_tone(tone);
                 ui.set_bp_tip(ss(tip));
                 ui.set_limit_label(ss(if s.limiting_db >= 0.1 {
-                    format!("LIM -{:.1} dB", s.limiting_db)
+                    format!("LIM -{:.1} dB", s.limiting_db.min(99.9))
                 } else {
                     String::new()
                 }));
@@ -1224,6 +1224,7 @@ impl State {
                 ui.set_np_has_art(false);
                 ui.set_badge(SharedString::new());
                 ui.set_bp_badge(SharedString::new());
+                ui.set_limit_label(SharedString::new());
                 ui.set_level_label(SharedString::new());
             }
         }

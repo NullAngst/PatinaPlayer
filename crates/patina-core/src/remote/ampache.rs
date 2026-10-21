@@ -361,20 +361,34 @@ impl Ampache {
         Ok(out)
     }
 
-    fn catalog_dirs(&self) -> Vec<(String, String)> {
+    /// The catalogs' folders, which song paths are made relative to.
+    /// A server that refuses to list them (an account below manager level)
+    /// is remembered as having none, so songs fall back to paths from their
+    /// tags. A failed request (the network, a session that just ended) is
+    /// an error and isn't remembered: guessing "no catalogs" then would move
+    /// every song synced afterwards to a tag path, and the folder you're in
+    /// would empty out under you.
+    fn catalog_dirs(&self) -> Result<Vec<(String, String)>> {
         let mut c = self.catalogs.lock().unwrap();
         if c.is_none() {
-            let list: Vec<Catalog> = self
+            let list: Vec<Catalog> = match self
                 .get("catalogs", &[])
                 .and_then(|v| self.items(v, "catalog"))
-                .unwrap_or_default();
+            {
+                Ok(list) => list,
+                Err(RemoteError::Server { code, message }) => {
+                    log::warn!("Ampache won't list catalogs ({code}: {message}); using tag paths");
+                    Vec::new()
+                }
+                Err(e) => return Err(e),
+            };
             *c = Some(
                 list.into_iter()
                     .filter_map(|c| Some((c.id, c.path.filter(|p| !p.is_empty())?)))
                     .collect(),
             );
         }
-        c.clone().unwrap_or_default()
+        Ok(c.clone().unwrap_or_default())
     }
 
     fn song(&self, s: Song, catalogs: &[(String, String)]) -> RemoteSong {
@@ -528,7 +542,7 @@ impl Client for Ampache {
     }
 
     fn album_songs(&self, album_id: &str) -> Result<Vec<RemoteSong>> {
-        let cats = self.catalog_dirs();
+        let cats = self.catalog_dirs()?;
         let list: Vec<Song> = self.paged("album_songs", "song", &[("filter", album_id.into())])?;
         Ok(list.into_iter().map(|s| self.song(s, &cats)).collect())
     }
@@ -653,7 +667,7 @@ impl Client for Ampache {
     }
 
     fn playlist_songs(&self, id: &str) -> Result<Vec<RemoteSong>> {
-        let cats = self.catalog_dirs();
+        let cats = self.catalog_dirs()?;
         let list: Vec<Song> = self.paged("playlist_songs", "song", &[("filter", id.into())])?;
         Ok(list.into_iter().map(|s| self.song(s, &cats)).collect())
     }

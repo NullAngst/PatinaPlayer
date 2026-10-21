@@ -1626,11 +1626,18 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         }
         _ => {}
     }
-    // The limiter at work, in copper: how much it's taking off.
-    if s.limiting_db >= 0.1 {
+    // The limiter: always there, padded to the width of its longest
+    // reading, so the title beside it doesn't jump when it starts or stops.
+    // Copper with how much it's taking off while it works, dim otherwise.
+    {
+        let (txt, fg) = if s.limiting_db >= 0.1 {
+            (format!("LIM -{:.1} dB", s.limiting_db.min(99.9)), t.copper)
+        } else {
+            ("LIM".to_string(), t.wave_raw)
+        };
         right.push(Span::styled(
-            format!(" LIM -{:.1} dB ", s.limiting_db),
-            Style::default().fg(t.copper).bg(t.raised),
+            format!(" {txt:^12} "),
+            Style::default().fg(fg).bg(t.raised),
         ));
         right.push(Span::raw(" "));
     }

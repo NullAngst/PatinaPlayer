@@ -2923,7 +2923,7 @@ export component AppWindow inherits Window {
                     spacing: 8px;
                     if root.speed-label != "": Badge { text: root.speed-label; }
                     if root.bp-badge != "": Badge { text: root.bp-badge; }
-                    if root.limit-label != "": Badge { text: root.limit-label; }
+                    Badge { text: "LIM -00.0 dB"; }
                     Badge { text: "EQ"; }
                     Badge { text: "AMP"; }
                     if root.level-label != "": Badge { text: root.level-label; }
@@ -3137,10 +3137,24 @@ export component AppWindow inherits Window {
                                 clicked => { root.bp-clicked(); }
                             }
                         }
-                        if root.limit-label != "" && !root.tight && !bar.lean: Badge {
-                            y: (parent.height - self.height) / 2;
-                            text: root.limit-label;
-                            fg: P.copper;
+                        // The limiter: always here, at the width of its
+                        // longest reading, so nothing beside it moves when
+                        // it starts or stops. Lit copper, with how much it's
+                        // taking off, while it works.
+                        if !root.tiny && !root.tight && !bar.lean: Rectangle {
+                            width: limw.preferred-width + 16px;
+                            limw := Text {
+                                visible: false;
+                                text: "LIM -00.0 dB";
+                                font-family: P.mono;
+                                font-size: 11px;
+                            }
+                            Badge {
+                                width: parent.width;
+                                y: (parent.height - self.height) / 2;
+                                text: root.limit-label != "" ? root.limit-label : "LIM";
+                                fg: root.limit-label != "" ? P.copper : P.wave;
+                            }
                         }
                         // The EQ: lit when it's on and shaping the sound.
                         // Click it for the EQ view.

@@ -587,8 +587,15 @@ impl Browser {
         }
         if s != Section::Queue && !self.stacks.contains_key(&s) {
             let level = self.build(&Source::Section(s));
+            if level.is_none() {
+                log::info!(
+                    "nav: {s:?} opened with nothing to show ({:?})",
+                    self.view_error
+                );
+            }
             self.stacks.insert(s, level.into_iter().collect());
         }
+        log::info!("nav: switch to {s:?}, depth {}", self.depth());
         self.sync_sidebar_sel();
         self.touch();
     }
@@ -636,6 +643,7 @@ impl Browser {
                 Some(l)
             }
             Err(e) => {
+                log::warn!("nav: couldn't open {src:?}: {e}");
                 self.view_error = Some(e);
                 None
             }
@@ -677,6 +685,12 @@ impl Browser {
 
     pub fn push(&mut self, src: Source) {
         if let Some(l) = self.build(&src) {
+            log::info!(
+                "nav: open {src:?} in {:?}, {} items, title {:?}",
+                self.section,
+                l.items.len(),
+                l.title
+            );
             self.stacks.entry(self.section).or_default().push(l);
             self.forward.remove(&self.section);
             self.touch();
@@ -689,6 +703,7 @@ impl Browser {
             && stack.len() > 1
         {
             let l = stack.pop().unwrap();
+            log::info!("nav: back from {:?}, depth {}", l.source, stack.len());
             // A search isn't worth going forward to; everything else is.
             if !matches!(l.source, Source::Search(_)) {
                 self.forward.entry(self.section).or_default().push(l.source);
@@ -727,6 +742,7 @@ impl Browser {
             && depth >= 1
         {
             stack.truncate(depth);
+            log::info!("nav: back to depth {}", stack.len());
             self.touch();
         }
     }
@@ -754,7 +770,10 @@ impl Browser {
                 level.selected = level.snap(level.selected, 1);
                 level.offset = old_off;
             }
-            Err(e) => self.view_error = Some(e),
+            Err(e) => {
+                log::warn!("nav: couldn't refresh {src:?}: {e}");
+                self.view_error = Some(e);
+            }
         }
         self.touch();
     }
