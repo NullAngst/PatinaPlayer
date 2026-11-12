@@ -1,19 +1,38 @@
 name: Release
 
-# Push a tag like v0.2.0 and this builds the AppImage and the Android APK
-# and publishes them both as one GitHub release. Run it by hand from the
-# Actions tab to get test builds as workflow artifacts instead, without
-# making a release.
+# Builds the AppImage and the Android APK from a tag and attaches them to
+# that tag's release, which has to exist already. Nothing here runs on a
+# push: make the release and its tag on the Releases page first, then run
+# this from Actions, Run workflow, with that tag picked under "Use workflow
+# from". Pushes to main and pull requests only run CI and Servers.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # Fails in seconds, before 15 minutes of builds, when the run can't end in
+  # a release: started on a branch, or no release made for the tag yet.
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check this run is on a tag with a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::This was run on the branch '$GITHUB_REF_NAME', not a tag. Make the release and its tag on the Releases page, then run this workflow again and pick that tag under 'Use workflow from'."
+            exit 1
+          fi
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::There's no release for the tag '$GITHUB_REF_NAME' yet. Go to Releases, draft a new release on that tag and publish it, then run this workflow again."
+            exit 1
+          fi
+          echo "Building $GITHUB_REF_NAME for its release."
+
   appimage:
+    needs: preflight
     # The AppImage needs a glibc at least as new as the runner's (2.39):
     # Ubuntu 24.04, Fedora 40, Debian 13 or newer.
     runs-on: ubuntu-24.04
@@ -63,7 +82,7 @@ jobs:
       - name: Build AppImage
         env:
           SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
-          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          VERSION: ${{ github.ref_name }}
           UPDATE_INFORMATION: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|PatinaPlayer-*x86_64.AppImage.zsync
           # The built-in Last.fm key and secret, from the repository's
           # secrets (Settings, Secrets and variables, Actions). Without
@@ -87,6 +106,7 @@ jobs:
             target/appimage/PatinaPlayer-*.AppImage.zsync
 
   android:
+    needs: preflight
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -131,8 +151,8 @@ jobs:
           key: ${{ steps.ffkey.outputs.key }}
 
       # The release key, from the repository's secrets. See the signing
-      # guide for making it. A tag build fails without it, so a release
-      # never ships an APK that can't update the last one.
+      # guide for making it. The build fails without it, so a release never
+      # ships an APK that can't update the last one.
       - name: Release key
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -148,8 +168,8 @@ jobs:
         env:
           ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_LATEST_HOME }}
           SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
-          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          REQUIRE_RELEASE_KEY: ${{ github.ref_type == 'tag' && '1' || '' }}
+          VERSION: ${{ github.ref_name }}
+          REQUIRE_RELEASE_KEY: "1"
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -166,14 +186,19 @@ jobs:
           name: PatinaPlayer-Android
           path: target/apk/PatinaPlayer-*.apk
 
-  # One release for both, made once both builds are done, so the two jobs
-  # never race to create it. If one build fails, the other still ships.
+  # Attaches both builds to the tag's existing release, once both are done,
+  # so the two jobs never race. If one build fails, the other still ships.
+  # --clobber lets a rerun on the same tag replace the files.
   publish:
     needs: [appimage, android]
     if: >-
-      !cancelled() && github.ref_type == 'tag' &&
+      !cancelled() &&
       (needs.appimage.result == 'success' || needs.android.result == 'success')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -181,11 +206,22 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      # Signed SLSA build provenance for the APK: who built it, from which
+      # commit and workflow. Signed through Sigstore with this run's OIDC
+      # identity and listed on the repository's Attestations page.
+      - name: Attest the APK
+        if: needs.android.result == 'success'
+        uses: actions/attest@v4
         with:
-          generate_release_notes: true
-          files: |
-            dist/PatinaPlayer-*.AppImage
-            dist/PatinaPlayer-*.AppImage.zsync
-            dist/PatinaPlayer-*.apk
+          subject-path: dist/PatinaPlayer-*.apk
+
+      - name: Attach the files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -- dist/PatinaPlayer-*
+          if [ ! -e "$1" ]; then
+            echo "::error::No build files came through to attach."
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$@" --clobber --repo "$GITHUB_REPOSITORY"
