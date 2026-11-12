@@ -114,6 +114,9 @@ pub struct State {
     queue_servers: Rc<VecModel<SharedString>>,
     last_gen: u64,
     last_queue_ver: u64,
+    /// Whether the sidebar was last drawn with Now Playing open, so it's
+    /// redrawn when the page opens or closes from the bottom bar or Esc.
+    np_shown: bool,
     /// Identity of the open level, to scroll back to the top on change.
     level_key: String,
     queue_sel: usize,
@@ -285,6 +288,10 @@ fn date(ts: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Rows the GUI puts at the top of the sidebar ahead of the core's (Now
+/// Playing), so a sidebar index minus this is the core's index.
+const SIDE_EXTRA: i32 = 1;
+
 impl State {
     fn new(b: Browser, hide_on_close: Rc<std::cell::Cell<bool>>) -> Self {
         let desktop = crate::desktop::Desktop::start(b.player.clone(), b.config.desktop.tray);
@@ -309,6 +316,7 @@ impl State {
             queue_servers: Rc::new(VecModel::default()),
             last_gen: u64::MAX,
             last_queue_ver: u64::MAX,
+            np_shown: false,
             level_key: String::new(),
             queue_sel: 0,
             follow: true,
@@ -1024,22 +1032,37 @@ impl State {
         ui.set_hero(hero.unwrap_or_default());
         if level_changed {
             ui.invoke_scroll_top();
+            // Browsing somewhere (search, back, Go to album, a link in a
+            // menu) shows where it went, rather than leaving Now Playing
+            // over it.
+            ui.set_np_open(false);
         }
     }
 
     fn sync_side(&mut self, ui: &AppWindow) {
         let icons = ui.global::<Icons>();
         let kawaii = self.b.config.appearance.theme.is_kawaii();
+        let np = ui.get_np_open();
+        self.np_shown = np;
         let status = self.b.service.as_ref().map(|s| s.status());
         let open_folder = match self.b.level().map(|l| &l.source) {
             Some(Source::Folder(p)) if self.b.section == Section::Folders => Some(p.clone()),
             _ => None,
         };
-        let items: Vec<SideItem> = self
-            .b
-            .sidebar
-            .iter()
-            .map(|e| match e {
+        // Now Playing first. It isn't one of the core's sections (the
+        // terminal app opens it as a popup), so it's added here and the
+        // sidebar's indexes are one past the core's: see SIDE_EXTRA.
+        let now_playing = SideItem {
+            kind: 0,
+            label: ss("Now Playing"),
+            sub: ss(if kawaii { "いま きいてる" } else { "" }),
+            icon: icons.get_now_playing(),
+            active: np,
+            count: SharedString::new(),
+            dot: 0,
+        };
+        let items: Vec<SideItem> = std::iter::once(now_playing)
+            .chain(self.b.sidebar.iter().map(|e| match e {
                 SideEntry::Section(s) => SideItem {
                     kind: 0,
                     label: ss(match s {
@@ -1067,7 +1090,7 @@ impl State {
                         Section::History => icons.get_history(),
                         Section::Ipod => icons.get_ipod(),
                     },
-                    active: *s == self.b.section,
+                    active: *s == self.b.section && !np,
                     count: ss(if *s == Section::Queue {
                         let n = self.b.player.queue().len();
                         if n > 0 { n.to_string() } else { String::new() }
@@ -1094,7 +1117,7 @@ impl State {
                         _ => tracks.to_string(),
                     }),
                     icon: SharedString::new(),
-                    active: open_folder.as_ref() == Some(path),
+                    active: open_folder.as_ref() == Some(path) && !np,
                     dot: match state {
                         ServerState::Ready => 0,
                         ServerState::Syncing { .. } | ServerState::Connecting => 1,
@@ -1124,7 +1147,7 @@ impl State {
                             None => tracks.to_string(),
                         }),
                         icon: SharedString::new(),
-                        active: open_folder.as_ref() == Some(path),
+                        active: open_folder.as_ref() == Some(path) && !np,
                         dot: if !present {
                             2
                         } else if scanning.is_some() {
@@ -1150,7 +1173,7 @@ impl State {
                     label: ss(name),
                     sub: SharedString::new(),
                     icon: icons.get_radio(),
-                    active: self.b.mix.as_ref().and_then(|m| m.saved) == Some(*id),
+                    active: self.b.mix.as_ref().and_then(|m| m.saved) == Some(*id) && !np,
                     count: SharedString::new(),
                     dot: 0,
                 },
@@ -1164,7 +1187,7 @@ impl State {
                     kind: 3,
                     ..Default::default()
                 },
-            })
+            }))
             .collect();
         if self.side.row_count() == items.len() {
             for (i, it) in items.into_iter().enumerate() {
@@ -1482,6 +1505,9 @@ impl State {
         if qv != self.last_queue_ver || gen_changed {
             self.last_queue_ver = qv;
             self.sync_queue(ui);
+        }
+        if ui.get_np_open() != self.np_shown {
+            self.sync_side(ui);
         }
         if std::mem::take(&mut self.marks_dirty) && !gen_changed {
             self.refresh_marks(ui);
@@ -3618,8 +3644,15 @@ pub fn install(
     // view is the one already open: that's how you get the breadcrumbs back
     // after the page scrolled them away.
     on!(on_side_clicked, |s, u, i| {
-        s.b.activate_sidebar(i as usize);
-        u.invoke_scroll_top();
+        if i < SIDE_EXTRA {
+            u.set_np_open(true);
+        } else {
+            // Somewhere else: Now Playing gets out of the way, even when
+            // it's the view already open underneath.
+            u.set_np_open(false);
+            s.b.activate_sidebar((i - SIDE_EXTRA) as usize);
+            u.invoke_scroll_top();
+        }
     });
     on!(on_side_fold, |s, _u, landscape, fold| s
         .b
@@ -3647,7 +3680,8 @@ pub fn install(
     on!(on_hero_fav, |s, _u| s.b.toggle_favorite_level());
     on!(on_lyrics_clicked, |s, u| s.toggle_lyrics(&u));
     on!(on_side_act, |s, _u, i, a| {
-        if let Some(SideEntry::Favorite { id, .. }) = s.b.sidebar.get(i as usize).cloned() {
+        let core = (i - SIDE_EXTRA).max(0) as usize;
+        if let Some(SideEntry::Favorite { id, .. }) = s.b.sidebar.get(core).cloned() {
             match a.as_str() {
                 "up" => s.b.favorite_move(id, -1),
                 "down" => s.b.favorite_move(id, 1),

@@ -1,5 +1,13 @@
 # Changes
 
+2026.11.12 - UX overhaul (Now Playing)
+
+* Now Playing has its own row at the top of the sidebar, lit while it's open. The cover in the bottom bar still opens and closes it.
+* Now Playing closes when you go somewhere else: a sidebar row (even the view already underneath it), a search, Back or Forward, a breadcrumb, or Go to album or artist. Before, it stayed over the view you'd gone to until you closed it yourself.
+* While Now Playing is open, no other sidebar row is lit, so the sidebar shows what's on screen.
+
+Reasons for changes: Now Playing was only reachable from the small cover in the bottom bar, and it blocked the view you'd just gone to.
+
 2026.11.12 - UX fixes (sizing)
 
 * Dialogs grow to fit their help line. The smart playlist dialog's four-line help was measured as one line, so the dialog came out too short and cut off its Cancel and Create buttons. The help line now sits in the dialog's own layout, which measures wrapped text at its real width.
