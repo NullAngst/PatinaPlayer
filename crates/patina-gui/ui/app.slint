@@ -498,7 +498,11 @@ component Chip inherits Rectangle {
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => { clicked(); }
-    HorizontalLayout {
+    // Sized by the icon and label alone. Without these the tooltip's text
+    // counts too, and an icon-only chip comes out as wide as its label.
+    min-width: hl.min-width;
+    preferred-width: hl.preferred-width;
+    hl := HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
         spacing: 7px;
@@ -1818,6 +1822,10 @@ component SelBar inherits Rectangle {
     // The queue's bar: remove and add to a playlist.
     in property <bool> queue;
     callback act(string);
+    // A phone, or a narrow window: the buttons that have an icon show just
+    // the icon (with the label as its tooltip), so they fit without
+    // scrolling sideways.
+    property <bool> narrow: root.width < 600px;
     height: 56px;
     Rectangle {
         y: 4px;
@@ -1843,14 +1851,14 @@ component SelBar inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 align: end;
                 spacing: 6px;
-                if !root.queue && root.count > 0: Chip { h: 30px; text: "Play"; icon: Icons.play; primary: true; clicked => { root.act("play"); } }
-                if !root.queue && root.count > 0: Chip { h: 30px; text: "Play next"; clicked => { root.act("next"); } }
-                if !root.queue && root.count > 0: Chip { h: 30px; text: "Add to queue"; icon: Icons.plus; clicked => { root.act("queue"); } }
-                if root.count > 0: Chip { h: 30px; text: "Add to playlist"; icon: Icons.playlists; clicked => { root.act("playlist"); } }
-                if root.ipod && !root.queue && root.count > 0: Chip { h: 30px; text: "Send to iPod"; icon: Icons.ipod; clicked => { root.act("ipod"); } }
+                if !root.queue && root.count > 0: Chip { h: 30px; text: "Play"; icon: Icons.play; icon-only: root.narrow; primary: true; clicked => { root.act("play"); } }
+                if !root.queue && root.count > 0: Chip { h: 30px; text: root.narrow ? "Next" : "Play next"; peek: "Play next"; clicked => { root.act("next"); } }
+                if !root.queue && root.count > 0: Chip { h: 30px; text: "Add to queue"; icon: Icons.plus; icon-only: root.narrow; clicked => { root.act("queue"); } }
+                if root.count > 0: Chip { h: 30px; text: "Add to playlist"; icon: Icons.playlists; icon-only: root.narrow; clicked => { root.act("playlist"); } }
+                if root.ipod && !root.queue && root.count > 0: Chip { h: 30px; text: "Send to iPod"; icon: Icons.ipod; icon-only: root.narrow; clicked => { root.act("ipod"); } }
                 if (root.in-playlist || root.queue) && root.count > 0: Chip { h: 30px; text: "Remove"; danger: true; clicked => { root.act("remove"); } }
-                Chip { h: 30px; text: "Pick all"; clicked => { root.act("all"); } }
-                Chip { h: 30px; text: "Done"; icon: Icons.close; clicked => { root.act("clear"); } }
+                Chip { h: 30px; text: "Pick all"; icon: root.narrow ? Icons.check : ""; icon-only: root.narrow; clicked => { root.act("all"); } }
+                Chip { h: 30px; text: "Done"; icon: Icons.close; icon-only: root.narrow; clicked => { root.act("clear"); } }
             }
         }
     }
@@ -4459,8 +4467,10 @@ export component AppWindow inherits Window {
                         color: P.text;
                     }
 
+                    // Hidden fields take no room: no spacing between fields,
+                    // a gap above each one only when it shows.
                     if root.dialog == 1: VerticalLayout {
-                        spacing: 12px;
+                        spacing: 0px;
                         f1 := Field {
                             autofocus: true;
                             label: root.dlg-label1;
@@ -4470,6 +4480,7 @@ export component AppWindow inherits Window {
                                 if root.dlg-two-fields { f2.focus-field(); } else { root.dlg-accept(); }
                             }
                         }
+                        Rectangle { height: root.dlg-two-fields ? 12px : 0px; }
                         f2 := Field {
                             visible: root.dlg-two-fields;
                             height: root.dlg-two-fields ? 58px : 0px;
@@ -4480,6 +4491,7 @@ export component AppWindow inherits Window {
                                 if root.dlg-four-fields { f3.focus-field(); } else { root.dlg-accept(); }
                             }
                         }
+                        Rectangle { height: root.dlg-four-fields ? 12px : 0px; }
                         f3 := Field {
                             visible: root.dlg-four-fields;
                             height: root.dlg-four-fields ? 58px : 0px;
@@ -4487,6 +4499,7 @@ export component AppWindow inherits Window {
                             text <=> root.dlg-text3;
                             accepted => { f4.focus-field(); }
                         }
+                        Rectangle { height: root.dlg-four-fields ? 12px : 0px; }
                         f4 := Field {
                             visible: root.dlg-four-fields;
                             height: root.dlg-four-fields ? 58px : 0px;
@@ -4495,12 +4508,12 @@ export component AppWindow inherits Window {
                             text <=> root.dlg-text4;
                             accepted => { root.dlg-accept(); }
                         }
-                        if root.dlg-note != "": Text {
-                            text: root.dlg-note;
-                            wrap: word-wrap;
-                            font-size: 12px;
-                            color: root.dlg-note-warn ? P.copper : P.muted;
-                        }
+                    }
+                    if root.dialog == 1 && root.dlg-note != "": Text {
+                        text: root.dlg-note;
+                        wrap: word-wrap;
+                        font-size: 12px;
+                        color: root.dlg-note-warn ? P.copper : P.muted;
                     }
 
                     // Playlists to pick from. Scrolls once there are many.

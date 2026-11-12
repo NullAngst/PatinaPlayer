@@ -1,5 +1,15 @@
 # Changes
 
+2026.11.12 - UX fixes (sizing)
+
+* Dialogs grow to fit their help line. The smart playlist dialog's four-line help was measured as one line, so the dialog came out too short and cut off its Cancel and Create buttons. The help line now sits in the dialog's own layout, which measures wrapped text at its real width.
+* Dialogs with fewer fields no longer leave an empty gap where the hidden fields were.
+* Icon-only buttons are icon-sized again. Their tooltip's text was counted in their width, so on a narrow window "Add to queue" and "Add to playlist" came out as wide as their labels with only an icon inside.
+* The picked-rows bar fits a phone: below 600 px wide its buttons show only their icons (Pick all gets a check mark, Play next becomes Next), with the full labels as tooltips. Before, most of them were off the right edge.
+* Terminal app: text boxes longer than the box show their end, with a "…" in front, so the cursor stays in view. Before, a long export path, server address or smart playlist rule ran off the edge.
+
+Reasons for changes: the smart playlist dialog was cut off at its bottom. Checking every wrapped text and narrow layout for the same kind of problem turned up the others.
+
 2026.11.12 - UX overhaul (icon)
 
 * New icon: a portable cassette player in cream, with an orange cassette and red trim on a dark brown tile. A simpler drawing of it is used at 16 to 32 px, where the full one's buttons and stripes blur.

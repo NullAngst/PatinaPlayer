@@ -487,7 +487,10 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         let t = &app.theme;
         let line = Line::from(vec![
             Span::styled(" / ", Style::default().fg(t.verdigris)),
-            Span::styled(buf.clone(), Style::default().fg(t.text)),
+            Span::styled(
+                fit_tail(buf, title_a.width.saturating_sub(4) as usize),
+                Style::default().fg(t.text),
+            ),
             Span::styled("▏", Style::default().fg(t.verdigris)),
         ]);
         f.render_widget(
@@ -1945,7 +1948,10 @@ fn draw_input_note(
     let r = popup(area, w, 3 + note_lines.len() as u16);
     f.render_widget(Clear, r);
     let mut lines = vec![Line::from(vec![
-        Span::styled(format!(" {buf}"), Style::default().fg(t.text)),
+        Span::styled(
+            format!(" {}", fit_tail(buf, r.width.saturating_sub(4) as usize)),
+            Style::default().fg(t.text),
+        ),
         Span::styled("▏", Style::default().fg(t.verdigris)),
     ])];
     let style = Style::default().fg(if warn { t.copper } else { t.muted });
@@ -1955,6 +1961,27 @@ fn draw_input_note(
             .map(|l| Line::from(Span::styled(format!(" {l}"), style))),
     );
     f.render_widget(Paragraph::new(lines).block(frame_block(app, title)), r);
+}
+
+/// What's being typed, cut to `cols` columns from the end with a "…" in
+/// front when it's longer, so the end and the cursor after it stay in view.
+fn fit_tail(s: &str, cols: usize) -> String {
+    let width = |x: &str| Span::raw(x).width();
+    if width(s) <= cols {
+        return s.to_string();
+    }
+    let mut kept = Vec::new();
+    let mut used = 1; // the "…"
+    for c in s.chars().rev() {
+        let cw = width(c.encode_utf8(&mut [0; 4]));
+        if used + cw > cols {
+            break;
+        }
+        used += cw;
+        kept.push(c);
+    }
+    kept.reverse();
+    format!("…{}", kept.into_iter().collect::<String>())
 }
 
 /// Words wrapped to `w` columns.
@@ -2101,7 +2128,10 @@ fn draw_input_box(f: &mut Frame, app: &App, area: Rect, title: &str, buf: &str) 
     let r = popup(area, 50, 3);
     f.render_widget(Clear, r);
     let line = Line::from(vec![
-        Span::styled(format!(" {buf}"), Style::default().fg(t.text)),
+        Span::styled(
+            format!(" {}", fit_tail(buf, r.width.saturating_sub(4) as usize)),
+            Style::default().fg(t.text),
+        ),
         Span::styled("▏", Style::default().fg(t.verdigris)),
     ]);
     f.render_widget(Paragraph::new(line).block(frame_block(app, title)), r);
@@ -2337,5 +2367,22 @@ mod tests {
     fn dates() {
         assert_eq!(super::chrono_date(0).unwrap(), "1970-01-01");
         assert_eq!(super::chrono_date(1_791_021_600).unwrap(), "2026-10-03");
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::fit_tail;
+
+    #[test]
+    fn long_input_shows_its_end() {
+        assert_eq!(fit_tail("short", 10), "short");
+        assert_eq!(
+            fit_tail("/home/zack/Music/Playlists/Mix.m3u8", 12),
+            "…ts/Mix.m3u8"
+        );
+        assert_eq!(fit_tail("abc", 0), "…");
+        // Wide characters count as two columns.
+        assert_eq!(fit_tail("曲曲曲曲", 5), "…曲曲");
     }
 }
