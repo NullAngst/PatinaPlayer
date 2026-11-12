@@ -1,0 +1,108 @@
+name: deps
+
+# Weekly: move Go itself, every Go module and every npm package to its
+# newest release, rebuild the image against the newest base images, and
+# open a PR. govulncheck and npm audit gate the PR: if either finds
+# something, no PR is opened and the run is red.
+# Run it by hand once after the first push to commit go.sum.
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      # True once the DEPS_TOKEN secret exists. Moving the pinned actions
+      # edits files under .github/workflows, and GitHub never lets the
+      # built-in token push those. See "Dependencies" in the README.
+      HAS_DEPS_TOKEN: ${{ secrets.DEPS_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # This job runs freshly updated third-party code (go test, the
+          # npm build). Keep the write token out of .git/config so none of
+          # that can push. The pull-request step passes its own token.
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - name: DEPS_TOKEN still works
+        if: env.HAS_DEPS_TOKEN == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DEPS_TOKEN }}
+        run: |
+          # Fine-grained tokens expire. An expired one fails the PR step
+          # with "Bad credentials", so check it first and fall back to the
+          # built-in token, with a warning that says what to do.
+          if gh api "repos/$GITHUB_REPOSITORY" --jq .full_name >/dev/null 2>&1; then
+            echo "DEPS_TOKEN works."
+          else
+            echo "::warning::DEPS_TOKEN has expired or was revoked. Make a new one (maintenance.md, step 2). This run falls back to the built-in token: no pinned-action moves, and CI won't run on the PR."
+            echo "HAS_DEPS_TOKEN=false" >> "$GITHUB_ENV"
+          fi
+      - name: Go and Go modules
+        # go get go@latest moves the go line in go.mod to the newest Go.
+        run: go get go@latest && go get -u ./... && go mod tidy
+      - name: npm packages
+        working-directory: web/src
+        # --ignore-scripts: freshly bumped packages get no install hooks.
+        run: npx --yes npm-check-updates -u && npm install --ignore-scripts && npm run build
+      # PRs opened with the built-in token do not trigger other workflows,
+      # so the checks run here before the PR exists.
+      - run: go vet ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      - run: go test -race ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: npm audit
+        working-directory: web/src
+        run: npm audit
+      - name: Image builds against the newest base images
+        run: docker build --pull -t fleetling:deps-check .
+      - name: Pinned actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Third-party actions are pinned to a full commit, with the
+          # release it came from after the #. Move each one to the commit
+          # of its newest release. The pin stays a commit, so a tag moved
+          # later can't swap the code, and the PR shows every change.
+          set -euo pipefail
+          for f in .github/workflows/*.yml; do
+            grep -oE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}' "$f" | sort -u | while read -r _ ref; do
+              repo=${ref%@*}
+              old=${ref#*@}
+              tag=$(gh api "repos/$repo/releases/latest" --jq .tag_name) || { echo "::warning::could not read the latest release of $repo"; continue; }
+              [[ $tag =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::warning::unexpected tag name from $repo"; continue; }
+              sha=$(gh api "repos/$repo/commits/$tag" --jq .sha) || { echo "::warning::could not resolve $repo $tag"; continue; }
+              [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::warning::unexpected commit from $repo"; continue; }
+              [ "$sha" = "$old" ] && continue
+              if [ "$HAS_DEPS_TOKEN" != "true" ]; then
+                echo "::warning::$repo has a newer release, $tag. Add the DEPS_TOKEN secret and this workflow moves it for you."
+                continue
+              fi
+              sed -i -E "s|$repo@$old( # [^ ]+)?|$repo@$sha # $tag|" "$f"
+              echo "$f: $repo now at $tag ($sha)"
+            done
+          done
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # The built-in token can't push workflow changes, and PRs it
+          # opens don't run CI. DEPS_TOKEN fixes both when it is set.
+          token: ${{ env.HAS_DEPS_TOKEN == 'true' && secrets.DEPS_TOKEN || github.token }}
+          branch: deps/weekly
+          delete-branch: true
+          commit-message: "Update dependencies"
+          title: "Weekly dependency update"
+          body: |
+            Automated update: `go get go@latest`, `go get -u ./...`, `go mod tidy`, `npm-check-updates -u`, and the pinned third-party actions moved to the commit of their newest release.
+            vet, staticcheck, the race tests, govulncheck, npm audit and an image build with `--pull` all passed in the deps run before this PR was opened.
