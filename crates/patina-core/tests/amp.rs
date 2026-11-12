@@ -176,6 +176,7 @@ fn browser(f: &Fx, cfg: Config) -> Browser {
         mixes: None,
         level: None,
         scrobble: None,
+        listenbrainz: None,
         config: cfg,
         settings_info: SettingsInfo {
             config_path: f.config.clone(),

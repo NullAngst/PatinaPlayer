@@ -4816,6 +4816,7 @@ dependencies = [
  "ffmpeg-next",
  "hex",
  "image",
+ "libloading",
  "lofty",
  "log",
  "md-5",

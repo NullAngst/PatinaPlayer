@@ -77,6 +77,19 @@ pub trait Hooks: Send + Sync {
 
 static HOOKS: OnceLock<Box<dyn Hooks>> = OnceLock::new();
 static EVENTS: Mutex<Vec<(u64, PromptEvent)>> = Mutex::new(Vec::new());
+/// Things picked to play outside the window (a car, through Android Auto),
+/// by their browse id, waiting for the window's loop to play them.
+static MEDIA: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Play something by its car browse id; see `patina_core::browse::auto`.
+/// Safe from any thread: the window's loop picks it up on its next tick.
+pub fn play_media_id(id: String) {
+    MEDIA.lock().unwrap().push(id);
+}
+
+pub(crate) fn take_media_ids() -> Vec<String> {
+    std::mem::take(&mut *MEDIA.lock().unwrap())
+}
 
 /// Set the platform's hooks. Only the first call counts.
 pub fn set_hooks(h: Box<dyn Hooks>) {

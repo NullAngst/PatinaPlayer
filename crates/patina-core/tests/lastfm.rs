@@ -376,6 +376,7 @@ fn rig(name: &str, mode: ScrobbleMode, linked_here: bool, song_secs: u32) -> Rig
         mixes: None,
         level: None,
         scrobble: Some(svc),
+        listenbrainz: None,
         config: cfg,
         settings_info: SettingsInfo {
             config_path: config,

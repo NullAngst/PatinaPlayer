@@ -82,6 +82,22 @@ pub enum InputPurpose {
         key: SettingKey,
         label: String,
     },
+    /// A smart playlist's name, then its query. `edit` is the one being
+    /// changed, `query` what it had.
+    SmartName {
+        edit: Option<i64>,
+        query: String,
+    },
+    SmartQuery {
+        name: String,
+        edit: Option<i64>,
+    },
+    /// Where to write a playlist file: the selection's, or the queue's.
+    Export {
+        queue: bool,
+    },
+    /// An .m3u, .m3u8 or .pls file to read in.
+    Import,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +111,8 @@ pub enum ConfirmAction {
     RemoveServer(String),
     ClearCache,
     DeleteMix(i64),
+    DeleteSmart(i64),
+    IpodRemove(patina_core::browse::ipod::IpodRow),
 }
 
 pub enum Modal {
@@ -137,6 +155,8 @@ pub enum Modal {
         options: Vec<String>,
         selected: usize,
     },
+    /// The Now Playing page: the cover large, the format, the sound chain.
+    NowPlaying,
 }
 
 pub struct App {
@@ -310,7 +330,7 @@ impl App {
     /// playlist.
     fn pick_playlist(&mut self) {
         let add = if self.b.section == Section::Queue {
-            self.b.queue_paths_at(self.queue_sel)
+            self.b.queue_selection_paths(self.queue_sel)
         } else {
             self.b.playlist_paths_for_selection()
         };
@@ -371,9 +391,33 @@ impl App {
             self.pick_device();
             return;
         }
+        if ctrl && k.code == KeyCode::Char('n') {
+            self.modal = match self.modal {
+                Modal::NowPlaying => Modal::None,
+                Modal::None => Modal::NowPlaying,
+                _ => return,
+            };
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('p') && matches!(self.modal, Modal::None) {
+            if self.b.section == Section::Queue {
+                return self.b.note("Send to iPod works on the library's lists");
+            }
+            self.b.send_selection_to_ipod();
+            return;
+        }
         match std::mem::replace(&mut self.modal, Modal::None) {
             Modal::None => {}
             Modal::Help => return,
+            // The playback keys still work over the page; Esc closes it.
+            Modal::NowPlaying => {
+                if matches!(k.code, KeyCode::Esc | KeyCode::Backspace) {
+                    return;
+                }
+                self.modal = Modal::NowPlaying;
+                self.global_key(k);
+                return;
+            }
             Modal::Input { purpose, buf } => return self.input_key(k, purpose, buf),
             Modal::PickPlaylist {
                 title,
@@ -496,8 +540,14 @@ impl App {
     fn global_key(&mut self, k: KeyEvent) -> bool {
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let p = &self.b.player;
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
-            KeyCode::Char(' ') => p.send(Command::TogglePause),
+            // In a list, Space picks the row; anywhere else, and with Ctrl,
+            // it pauses. c pauses from anywhere.
+            KeyCode::Char(' ') if !ctrl && self.focus == Focus::Content && self.can_mark() => {
+                self.mark_and_move();
+            }
+            KeyCode::Char(' ') | KeyCode::Char('c') => p.send(Command::TogglePause),
             KeyCode::Char('n') => p.send(Command::Next),
             KeyCode::Char('b') => p.send(Command::Back),
             KeyCode::Left => p.send(Command::SeekBy(if shift { -30.0 } else { -5.0 })),
@@ -535,6 +585,10 @@ impl App {
                 };
             }
             KeyCode::F(5) => self.b.rescan(),
+            KeyCode::Char('H') => {
+                self.b.switch(Section::History);
+                self.focus = Focus::Content;
+            }
             KeyCode::Char('[') => self.b.nudge_tempo(-0.1),
             KeyCode::Char(']') => self.b.nudge_tempo(0.1),
             KeyCode::Char('z') => self.b.toggle_trim(),
@@ -551,6 +605,65 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// Whether Space picks rows here: lists of songs, albums, artists,
+    /// folders, genres and playlists, and the queue.
+    fn can_mark(&self) -> bool {
+        if self.b.section == Section::Queue {
+            return !self.b.player.queue().is_empty();
+        }
+        if matches!(
+            self.b.section,
+            Section::Settings | Section::Eq | Section::Amp | Section::Ipod
+        ) {
+            return false;
+        }
+        matches!(
+            self.b.selected_item(),
+            Some(
+                Item::Track(_)
+                    | Item::Missing { .. }
+                    | Item::Album(_)
+                    | Item::Artist(_)
+                    | Item::Dir { .. }
+                    | Item::Root { .. }
+                    | Item::Genre(_)
+                    | Item::Playlist(_)
+                    | Item::Smart(_)
+                    | Item::Mix(_)
+                    | Item::Episode(_)
+                    | Item::Station { .. }
+            )
+        )
+    }
+
+    /// Space: pick the row (or let it go), then move to the next one.
+    fn mark_and_move(&mut self) {
+        if self.b.section == Section::Queue {
+            self.b.toggle_queue_mark(self.queue_sel);
+        } else if let Some(i) = self.b.level().map(|l| l.selected) {
+            self.b.toggle_mark(i);
+        }
+        self.move_sel(1);
+    }
+
+    /// U: pick every row, or let them all go.
+    fn mark_all(&mut self) {
+        if self.b.section == Section::Queue {
+            if self.b.clear_queue_marks() {
+                return;
+            }
+            let n = self.b.player.queue().len();
+            if n > 0 {
+                self.b.toggle_queue_mark(0);
+                self.b.mark_queue_range(n - 1);
+            }
+            return;
+        }
+        if !self.b.clear_marks() {
+            self.b.mark_all();
+        }
     }
 
     fn sidebar_key(&mut self, k: KeyEvent) {
@@ -710,7 +823,112 @@ impl App {
         let queue = self.b.section == Section::Queue;
         let playlist = self.b.in_playlist().is_some();
         let lists = self.b.section == Section::Playlists && !playlist;
+        let smart = self.b.smart_target();
+        let in_smart = matches!(
+            self.b.level().map(|l| &l.source),
+            Some(Source::Smart { .. })
+        );
+        if self.b.section == Section::Ipod {
+            match (k.code, self.b.selected_item()) {
+                (KeyCode::Char('d') | KeyCode::Delete, Some(Item::Ipod(row))) => {
+                    use patina_core::browse::ipod::IpodKind;
+                    let msg = match &row.kind {
+                        IpodKind::Playlist(n) => format!("Take the playlist \"{n}\" off the iPod?"),
+                        IpodKind::Album { album, .. } => {
+                            format!("Delete {album} from the iPod?")
+                        }
+                    };
+                    self.modal = Modal::Confirm {
+                        msg,
+                        action: ConfirmAction::IpodRemove(row),
+                    };
+                    return;
+                }
+                (KeyCode::Char('E'), _) => {
+                    self.b.list_action(ListAction::IpodEject);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match k.code {
+            KeyCode::Esc if self.b.marked_count() > 0 || !self.b.queue_marks.is_empty() => {
+                self.b.clear_marks();
+                self.b.clear_queue_marks();
+            }
+            KeyCode::Char('U') => self.mark_all(),
+            // Picked rows: Enter plays just them, in list order.
+            KeyCode::Enter if !queue && self.b.marked_count() > 0 => {
+                self.b.play_selection();
+                self.follow = true;
+            }
+            KeyCode::Char('<') => {
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::Import,
+                    buf: "~/".into(),
+                }
+            }
+            KeyCode::Char('>') => {
+                let name = if queue {
+                    Some("Queue".to_string())
+                } else {
+                    self.b.export_subject().map(|(n, _)| n)
+                };
+                match name {
+                    Some(n) => {
+                        self.modal = Modal::Input {
+                            purpose: InputPurpose::Export { queue },
+                            buf: self.b.default_export_path(&n).display().to_string(),
+                        }
+                    }
+                    None => self
+                        .b
+                        .note("Pick a playlist, or open a list of songs, to export"),
+                }
+            }
+            KeyCode::Char('S') if lists => {
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::SmartName {
+                        edit: None,
+                        query: String::new(),
+                    },
+                    buf: String::new(),
+                }
+            }
+            KeyCode::Char('E') if (lists || in_smart) && smart.is_some() => {
+                if let Some(p) = smart {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::SmartQuery {
+                            name: p.name,
+                            edit: Some(p.id),
+                        },
+                        buf: p.query,
+                    }
+                }
+            }
+            KeyCode::Char('R')
+                if lists && matches!(self.b.selected_item(), Some(Item::Smart(_))) =>
+            {
+                if let Some(Item::Smart(p)) = self.b.selected_item() {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::SmartName {
+                            edit: Some(p.id),
+                            query: p.query,
+                        },
+                        buf: p.name,
+                    }
+                }
+            }
+            KeyCode::Char('D')
+                if lists && matches!(self.b.selected_item(), Some(Item::Smart(_))) =>
+            {
+                if let Some(Item::Smart(p)) = self.b.selected_item() {
+                    self.modal = Modal::Confirm {
+                        msg: format!("Delete the smart playlist \"{}\"?", p.name),
+                        action: ConfirmAction::DeleteSmart(p.id),
+                    }
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
             KeyCode::PageUp => self.move_sel(-self.page()),
@@ -783,7 +1001,7 @@ impl App {
 
             // Queue editing.
             KeyCode::Char('d') | KeyCode::Delete if queue => {
-                self.b.remove_queue_position(self.queue_sel)
+                self.b.remove_queue_selection(self.queue_sel)
             }
             KeyCode::Char('J') if queue => {
                 self.queue_sel = self.b.move_queue_position(self.queue_sel, 1);
@@ -806,6 +1024,10 @@ impl App {
                 }
                 None => self.b.note("No connected server keeps a play queue"),
             },
+            KeyCode::Char('S') if queue && !self.b.queue_marks.is_empty() => {
+                let add = self.b.queue_selection_paths(self.queue_sel);
+                self.open_pick("Add the picked songs to a playlist", add);
+            }
             KeyCode::Char('S') if queue => {
                 let add = self.b.queue_playlist_paths();
                 self.open_pick("Add the queue to a playlist", add);
@@ -1218,6 +1440,48 @@ impl App {
             },
             InputPurpose::RenamePlaylist { id } => self.b.rename_playlist(id, &text),
             InputPurpose::RenameMix { id } => self.b.rename_mix(id, &text),
+            InputPurpose::SmartName { edit, query } => {
+                if text.is_empty() {
+                    return;
+                }
+                // Renaming keeps the query; a new one goes on to ask for it.
+                match edit {
+                    Some(id) => {
+                        self.b.update_smart(id, &text, &query);
+                    }
+                    None => {
+                        self.modal = Modal::Input {
+                            purpose: InputPurpose::SmartQuery {
+                                name: text,
+                                edit: None,
+                            },
+                            buf: query,
+                        }
+                    }
+                }
+            }
+            InputPurpose::SmartQuery { name, edit } => {
+                let ok = match edit {
+                    Some(id) => self.b.update_smart(id, &name, &text),
+                    None => self.b.create_smart(&name, &text),
+                };
+                if !ok {
+                    // Keep the box up to fix the query.
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::SmartQuery { name, edit },
+                        buf: text,
+                    };
+                }
+            }
+            InputPurpose::Export { queue } => {
+                let path = std::path::PathBuf::from(&text);
+                if queue {
+                    self.b.export_queue_to(&path);
+                } else {
+                    self.b.export_to(&path);
+                }
+            }
+            InputPurpose::Import => self.b.import_playlist_file(std::path::Path::new(&text)),
         }
     }
 
@@ -1277,6 +1541,8 @@ impl App {
             ConfirmAction::RemoveServer(n) => self.b.remove_server(&n),
             ConfirmAction::ClearCache => self.b.list_action(ListAction::ClearCache),
             ConfirmAction::DeleteMix(id) => self.b.delete_mix(id),
+            ConfirmAction::DeleteSmart(id) => self.b.delete_smart(id),
+            ConfirmAction::IpodRemove(row) => self.b.remove_from_ipod(&row),
         }
     }
 

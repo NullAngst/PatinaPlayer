@@ -96,6 +96,7 @@ fn browser(fx: &Fixture) -> Browser {
         mixes: None,
         level: None,
         scrobble: None,
+        listenbrainz: None,
         config: Config {
             library: patina_core::config::LibraryConfig {
                 folders: vec![fx.root.clone()],
@@ -205,8 +206,14 @@ fn search_groups_results() {
     assert!(b.in_search());
     b.set_search("bleach");
     let it = items(&b);
-    assert!(it.iter().any(|i| matches!(i, Item::Header("Albums"))));
-    assert!(it.iter().any(|i| matches!(i, Item::Header("Songs"))));
+    assert!(
+        it.iter()
+            .any(|i| matches!(i, Item::Header(h) if h == "Albums"))
+    );
+    assert!(
+        it.iter()
+            .any(|i| matches!(i, Item::Header(h) if h == "Songs"))
+    );
     let songs = it.iter().filter(|i| matches!(i, Item::Track(_))).count();
     assert_eq!(songs, 2);
     assert!(

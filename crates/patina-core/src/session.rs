@@ -251,6 +251,20 @@ impl Session {
             .map_err(|e| log::warn!("Last.fm is unavailable: {e}"))
             .ok()
         };
+        // ListenBrainz: its listen queue is in the library database too.
+        let listenbrainz = if opts.no_library {
+            None
+        } else {
+            let c = &cfg.listenbrainz;
+            crate::listenbrainz::ListenBrainz::start(
+                &db_path,
+                &c.url,
+                &c.user,
+                Arc::new(crate::secrets::Secrets::open()),
+            )
+            .map_err(|e| log::warn!("ListenBrainz is unavailable: {e}"))
+            .ok()
+        };
         let browser = Browser::new(Startup {
             player,
             lib,
@@ -261,6 +275,7 @@ impl Session {
             mixes,
             level,
             scrobble,
+            listenbrainz,
             config: cfg.clone(),
             settings_info: SettingsInfo {
                 config_path: config_path.clone(),

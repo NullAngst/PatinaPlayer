@@ -199,7 +199,7 @@ impl Browser {
     }
 
     pub fn toggle_pin_selected(&mut self) {
-        if let Some(item) = self.selected_item() {
+        for item in self.selection_items() {
             self.toggle_pin(&item);
         }
     }
@@ -258,8 +258,21 @@ impl Browser {
     // ----- Downloads view -----
 
     pub fn list_action(&mut self, a: ListAction) {
+        match a {
+            ListAction::ClearHistory => return self.clear_history(),
+            ListAction::IpodFavorites
+            | ListAction::IpodStop
+            | ListAction::IpodRefresh
+            | ListAction::IpodEject => return self.ipod_action(a),
+            _ => {}
+        }
         let Some(c) = &self.cache else { return };
         match a {
+            ListAction::ClearHistory
+            | ListAction::IpodFavorites
+            | ListAction::IpodStop
+            | ListAction::IpodRefresh
+            | ListAction::IpodEject => unreachable!("handled above"),
             ListAction::PauseDownloads => {
                 c.pause(None, true);
                 self.cache_status.paused = true;

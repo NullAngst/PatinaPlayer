@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 8;
+pub const VERSION: i64 = 9;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -285,6 +285,38 @@ CREATE TABLE favorites (
 );
 "#;
 
+/// Listening history, smart playlists and the ListenBrainz queue. A play
+/// is kept by the song's URI, like playlist items, so a rescan or a
+/// re-sync that rewrites rows keeps the history. Smart playlists are a
+/// query, run again every time they're opened, so they never go stale.
+const V9: &str = r#"
+CREATE TABLE plays (
+    id          INTEGER PRIMARY KEY,
+    song        BLOB NOT NULL,
+    played_at   INTEGER NOT NULL
+);
+CREATE INDEX plays_time ON plays(played_at);
+
+CREATE TABLE smart_playlists (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    query       TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE lb_listens (
+    id            INTEGER PRIMARY KEY,
+    artist        TEXT NOT NULL,
+    track         TEXT NOT NULL,
+    album         TEXT,
+    track_no      INTEGER,
+    duration      INTEGER,
+    played_at     INTEGER NOT NULL,
+    tries         INTEGER NOT NULL DEFAULT 0
+);
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -322,6 +354,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 8 {
         tx.execute_batch(V8)?;
+    }
+    if current < 9 {
+        tx.execute_batch(V9)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

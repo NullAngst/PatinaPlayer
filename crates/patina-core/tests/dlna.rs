@@ -304,6 +304,7 @@ fn the_browser_finds_adds_renames_and_removes_one() {
         mixes: None,
         level: None,
         scrobble: None,
+        listenbrainz: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             config_path: config.clone(),

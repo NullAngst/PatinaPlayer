@@ -50,6 +50,7 @@ ebur128 = "0.1"
 # Sample rate conversion, for fixed-rate output and for gapless joins
 # between songs at different rates.
 rubato = "5"
+libloading = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

@@ -257,6 +257,27 @@ impl Browser {
         self.push(src);
     }
 
+    /// A favorite as the row it stands for, for its songs.
+    pub(super) fn favorite_item(&self, f: &Favorite) -> Option<Item> {
+        let lib = self.lib.as_ref()?;
+        Some(match f.kind {
+            FavKind::Folder => {
+                let path = f.path();
+                Item::Dir {
+                    name: f.label.clone(),
+                    path,
+                }
+            }
+            FavKind::Album => Item::Album(lib.album(&f.key_str()).ok().flatten()?),
+            FavKind::Artist => Item::Artist(crate::library::ArtistRow {
+                name: f.key_str(),
+                albums: 0,
+                tracks: 0,
+                plays: 0,
+            }),
+        })
+    }
+
     // ----- Ratings -----
 
     /// Tell a server about marks waiting for it, if it's there now. If

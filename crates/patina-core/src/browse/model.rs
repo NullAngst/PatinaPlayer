@@ -32,10 +32,14 @@ pub enum Section {
     Eq,
     /// The amp stack.
     Amp,
+    /// Every play, newest first, by day.
+    History,
     /// Your top five songs, albums and artists.
     MostListened,
     TopAlbums,
     TopArtists,
+    /// A plugged-in iPod.
+    Ipod,
 }
 
 impl Section {
@@ -64,7 +68,8 @@ impl Section {
     }
 
     /// The listening stats, which sit together in the sidebar.
-    pub const STATS: [Section; 3] = [
+    pub const STATS: [Section; 4] = [
+        Section::History,
         Section::MostListened,
         Section::TopAlbums,
         Section::TopArtists,
@@ -85,9 +90,11 @@ impl Section {
             Section::Settings => "Settings",
             Section::Eq => "EQ",
             Section::Amp => "Amp",
+            Section::History => "Recently played",
             Section::MostListened => "Most listened",
             Section::TopAlbums => "Top albums",
             Section::TopArtists => "Top artists",
+            Section::Ipod => "iPod",
         }
     }
 }
@@ -99,10 +106,26 @@ pub enum Source {
     Section(Section),
     Folder(PathBuf),
     ArtistAlbums(String),
-    Album { key: String },
-    Genre { norm: String, name: String },
-    Playlist { id: i64, name: String },
-    Podcast { id: i64, title: String },
+    Album {
+        key: String,
+    },
+    Genre {
+        norm: String,
+        name: String,
+    },
+    Playlist {
+        id: i64,
+        name: String,
+    },
+    /// A smart playlist: its query, run again each time.
+    Smart {
+        id: i64,
+        name: String,
+    },
+    Podcast {
+        id: i64,
+        title: String,
+    },
     Search(String),
 }
 
@@ -136,8 +159,9 @@ pub enum Item {
     },
     Podcast(PodcastRow),
     Episode(EpisodeRow),
-    /// Group label inside search results. Not selectable.
-    Header(&'static str),
+    /// Group label inside search results, or a day in Recently played.
+    /// Not selectable.
+    Header(std::borrow::Cow<'static, str>),
     /// One option in Settings.
     Setting(super::settings::Setting),
     /// Label and value, for Downloads.
@@ -151,6 +175,10 @@ pub enum Item {
     Job(JobRow),
     /// A saved mix, in Playlists.
     Mix(crate::library::mixes::SavedMixRow),
+    /// A smart playlist, in Playlists.
+    Smart(crate::library::smart::SmartRow),
+    /// A playlist or an album on the iPod.
+    Ipod(super::ipod::IpodRow),
     /// A button that sits in a list, in Downloads.
     Action {
         action: ListAction,
@@ -164,6 +192,13 @@ pub enum ListAction {
     PauseDownloads,
     ResumeDownloads,
     ClearCache,
+    /// In Recently played.
+    ClearHistory,
+    // In the iPod view.
+    IpodFavorites,
+    IpodStop,
+    IpodRefresh,
+    IpodEject,
 }
 
 /// One download, as Downloads shows it.
@@ -218,7 +253,7 @@ pub fn fmt_bytes(b: u64) -> String {
     }
 }
 
-fn songs(n: usize) -> String {
+pub(super) fn songs(n: usize) -> String {
     format!("{n} song{}", if n == 1 { "" } else { "s" })
 }
 
@@ -283,6 +318,8 @@ impl Item {
             Item::Setting(s) => format!("s:{:?}", s.key),
             Item::Pinned(p) => format!("pin:{}", p.pin.id),
             Item::Mix(m) => format!("mix:{}", m.id),
+            Item::Smart(m) => format!("sp:{}", m.id),
+            Item::Ipod(r) => format!("ipod:{:?}", r.kind),
             Item::Job(j) => format!("job:{:?}", j.key),
             Item::Action { action, .. } => format!("act:{action:?}"),
         }
@@ -295,9 +332,49 @@ pub struct Level {
     pub items: Vec<Item>,
     pub selected: usize,
     pub offset: usize,
+    /// Rows picked for a multiple selection, by [`Item::key`], so they
+    /// stay picked when the list refreshes under them.
+    pub marked: std::collections::HashSet<String>,
+    /// Where a range selection starts: the row last picked on its own.
+    pub anchor: Option<usize>,
 }
 
 impl Level {
+    pub fn new(title: String, source: Source, items: Vec<Item>) -> Self {
+        Self {
+            title,
+            source,
+            items,
+            selected: 0,
+            offset: 0,
+            marked: Default::default(),
+            anchor: None,
+        }
+    }
+
+    pub fn is_marked(&self, index: usize) -> bool {
+        !self.marked.is_empty()
+            && self
+                .items
+                .get(index)
+                .is_some_and(|i| self.marked.contains(&i.key()))
+    }
+
+    /// The marked rows, in list order.
+    pub fn marked_items(&self) -> Vec<&Item> {
+        if self.marked.is_empty() {
+            return Vec::new();
+        }
+        let mut seen = std::collections::HashSet::new();
+        self.items
+            .iter()
+            .filter(|i| {
+                let k = i.key();
+                self.marked.contains(&k) && seen.insert(k)
+            })
+            .collect()
+    }
+
     pub fn selected_item(&self) -> Option<&Item> {
         self.items.get(self.selected)
     }
@@ -347,6 +424,7 @@ pub struct SettingsState<'a> {
     /// A whole-library loudness run is going; None without the library.
     pub measuring: Option<bool>,
     pub lastfm: Option<crate::scrobble::ScrobbleStatus>,
+    pub listenbrainz: Option<crate::listenbrainz::LbStatus>,
     pub outputs: &'a [crate::audio::output::OutDevice],
 }
 
@@ -364,6 +442,7 @@ pub struct Ctx<'a> {
     pub cache: Option<&'a crate::cache::Status>,
     pub eq: &'a super::eq::EqState,
     pub amp: &'a super::amp::AmpState,
+    pub ipod: super::ipod::IpodView,
 }
 
 /// Queue entry for one of your stations.
@@ -439,7 +518,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 })
                 .collect();
             if !theirs.is_empty() {
-                items.push(Item::Header("On your servers"));
+                items.push(Item::Header("On your servers".into()));
                 items.extend(theirs);
             }
             Ok(("Radio".into(), items))
@@ -471,6 +550,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 super::settings::Live {
                     measuring: st.measuring,
                     lastfm: st.lastfm.clone(),
+                    listenbrainz: st.listenbrainz.clone(),
                     outputs: st.outputs.to_vec(),
                 },
             );
@@ -480,7 +560,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 if group != last
                     && let Some(g) = group
                 {
-                    items.push(Item::Header(g));
+                    items.push(Item::Header(g.into()));
                 }
                 last = group;
                 items.push(Item::Setting(setting));
@@ -502,7 +582,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 if group != last
                     && let Some(g) = group
                 {
-                    items.push(Item::Header(g));
+                    items.push(Item::Header(g.into()));
                 }
                 last = group;
                 items.push(Item::Setting(setting));
@@ -524,7 +604,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 if group != last
                     && let Some(g) = group
                 {
-                    items.push(Item::Header(g));
+                    items.push(Item::Header(g.into()));
                 }
                 last = group;
                 items.push(Item::Setting(setting));
@@ -540,7 +620,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                 downloads(st, &mut items);
             }
             if !eps.is_empty() {
-                items.push(Item::Header("Downloaded episodes"));
+                items.push(Item::Header("Downloaded episodes".into()));
                 items.extend(eps.into_iter().map(Item::Episode));
             } else if ctx.cache.is_none() {
                 items.push(Item::Info {
@@ -551,6 +631,17 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             Ok(("Downloads".into(), items))
         }
         Source::Section(Section::Queue) => Ok(("Queue".into(), Vec::new())),
+        Source::Section(Section::Ipod) => {
+            let mut items = Vec::new();
+            super::ipod::rows(&ctx.ipod, &mut items);
+            let title = ctx
+                .ipod
+                .contents
+                .as_ref()
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "iPod".into());
+            Ok((title, items))
+        }
         _ => {
             let Some(lib) = lib else { return none() };
             build_library(lib, prefs, source)
@@ -561,7 +652,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
 /// The cache's part of Downloads: how full it is, what's downloading,
 /// and what's pinned.
 fn downloads(st: &crate::cache::Status, items: &mut Vec<Item>) {
-    items.push(Item::Header("Storage"));
+    items.push(Item::Header("Storage".into()));
     items.push(Item::Info {
         label: "Cache".into(),
         value: if st.cap == 0 {
@@ -630,7 +721,7 @@ fn downloads(st: &crate::cache::Status, items: &mut Vec<Item>) {
         error: q.error.clone(),
     }));
     if !jobs.is_empty() {
-        items.push(Item::Header("Downloading"));
+        items.push(Item::Header("Downloading".into()));
         let shown = st.queue.len();
         items.extend(jobs.into_iter().map(Item::Job));
         if st.waiting > shown {
@@ -641,7 +732,7 @@ fn downloads(st: &crate::cache::Status, items: &mut Vec<Item>) {
         }
     }
     if !st.pins.is_empty() {
-        items.push(Item::Header("Pinned for offline"));
+        items.push(Item::Header("Pinned for offline".into()));
         items.extend(st.pins.iter().cloned().map(Item::Pinned));
     }
 }
@@ -654,21 +745,44 @@ fn build_library(
 ) -> Result<(String, Vec<Item>), String> {
     let err = |e: crate::library::LibError| e.to_string();
     match source {
+        Source::Section(Section::History) => {
+            let plays = lib
+                .recent_plays(crate::library::history::SHOWN)
+                .map_err(err)?;
+            let now = crate::library::now_secs();
+            let mut items = Vec::new();
+            let mut day = String::new();
+            for p in plays {
+                let d = crate::library::history::day_label(p.played_at, now);
+                if d != day {
+                    items.push(Item::Header(d.clone().into()));
+                    day = d;
+                }
+                items.push(Item::Track(p.track));
+            }
+            if !items.is_empty() {
+                items.push(Item::Action {
+                    action: ListAction::ClearHistory,
+                    label: "Clear the history".into(),
+                });
+            }
+            Ok(("Recently played".into(), items))
+        }
         Source::Section(Section::MostListened) => {
             let mut items = Vec::new();
             let songs = lib.top_tracks(5).map_err(err)?;
             if !songs.is_empty() {
-                items.push(Item::Header("Songs"));
+                items.push(Item::Header("Songs".into()));
                 items.extend(songs.into_iter().map(Item::Track));
             }
             let albums = lib.top_albums(5).map_err(err)?;
             if !albums.is_empty() {
-                items.push(Item::Header("Albums"));
+                items.push(Item::Header("Albums".into()));
                 items.extend(albums.into_iter().map(Item::Album));
             }
             let artists = lib.top_artists(prefs.artist_mode, 5).map_err(err)?;
             if !artists.is_empty() {
-                items.push(Item::Header("Artists"));
+                items.push(Item::Header("Artists".into()));
                 items.extend(artists.into_iter().map(Item::Artist));
             }
             Ok(("Most listened".into(), items))
@@ -780,13 +894,18 @@ fn build_library(
             let mut rows = vec![lib.hearted_row().map_err(err)?];
             rows.extend(lib.playlists().map_err(err)?);
             let mixes = lib.saved_mixes().map_err(err)?;
+            let smart = lib.smart_playlists().map_err(err)?;
             let mut items = Vec::new();
-            if !mixes.is_empty() {
-                items.push(Item::Header("Playlists"));
+            if !mixes.is_empty() || !smart.is_empty() {
+                items.push(Item::Header("Playlists".into()));
             }
             items.extend(rows.into_iter().map(Item::Playlist));
+            if !smart.is_empty() {
+                items.push(Item::Header("Smart playlists".into()));
+                items.extend(smart.into_iter().map(Item::Smart));
+            }
             if !mixes.is_empty() {
-                items.push(Item::Header("Saved mixes"));
+                items.push(Item::Header("Saved mixes".into()));
                 items.extend(mixes.into_iter().map(Item::Mix));
             }
             Ok(("Playlists".into(), items))
@@ -804,19 +923,23 @@ fn build_library(
                     .collect(),
             ))
         }
+        Source::Smart { id, name } => {
+            let t = lib.smart_tracks(*id).map_err(err)?;
+            Ok((name.clone(), t.into_iter().map(Item::Track).collect()))
+        }
         Source::Search(q) => {
             let res = lib.search(q, 200).map_err(err)?;
             let mut items = Vec::new();
             if !res.artists.is_empty() {
-                items.push(Item::Header("Artists"));
+                items.push(Item::Header("Artists".into()));
                 items.extend(res.artists.into_iter().map(Item::Artist));
             }
             if !res.albums.is_empty() {
-                items.push(Item::Header("Albums"));
+                items.push(Item::Header("Albums".into()));
                 items.extend(res.albums.into_iter().map(Item::Album));
             }
             if !res.tracks.is_empty() {
-                items.push(Item::Header("Songs"));
+                items.push(Item::Header("Songs".into()));
                 items.extend(res.tracks.into_iter().map(Item::Track));
             }
             Ok((format!("Search: {q}"), items))
@@ -829,7 +952,8 @@ fn build_library(
             | Section::Eq
             | Section::Amp
             | Section::Downloads
-            | Section::Queue,
+            | Section::Queue
+            | Section::Ipod,
         )
         | Source::Podcast { .. } => Ok((String::new(), Vec::new())),
     }
@@ -852,6 +976,10 @@ pub fn open(item: &Item) -> Option<Source> {
         Item::Podcast(p) => Some(Source::Podcast {
             id: p.id,
             title: p.title.clone(),
+        }),
+        Item::Smart(p) => Some(Source::Smart {
+            id: p.id,
+            name: p.name.clone(),
         }),
         Item::Pinned(p) => {
             use crate::cache::PinKind;
@@ -929,6 +1057,7 @@ pub fn tracks_of(lib: &Library, item: &Item, prefs: &ViewPrefs) -> Vec<TrackRow>
             .map(|v| v.into_iter().filter_map(|(_, t)| t).collect()),
         Item::Pinned(p) => crate::cache::store::resolve(lib, &p.pin),
         Item::Mix(m) => Ok(crate::mix::resolve_saved(lib, m)),
+        Item::Smart(p) => lib.smart_tracks(p.id),
         _ => Ok(Vec::new()),
     };
     r.unwrap_or_default()
@@ -948,28 +1077,22 @@ mod tests {
     }
 
     fn level(items: Vec<Item>) -> Level {
-        Level {
-            title: String::new(),
-            source: Source::Section(Section::Songs),
-            items,
-            selected: 0,
-            offset: 0,
-        }
+        Level::new(String::new(), Source::Section(Section::Songs), items)
     }
 
     #[test]
     fn selection_skips_headers() {
         let l = level(vec![
-            Item::Header("Artists"),
+            Item::Header("Artists".into()),
             artist("A"),
-            Item::Header("Albums"),
+            Item::Header("Albums".into()),
             artist("B"),
         ]);
         assert_eq!(l.snap(0, 1), 1);
         assert_eq!(l.snap(2, 1), 3);
         assert_eq!(l.snap(2, -1), 1);
         // Nothing selectable below the last header: fall back upward.
-        let l = level(vec![artist("A"), Item::Header("Songs")]);
+        let l = level(vec![artist("A"), Item::Header("Songs".into())]);
         assert_eq!(l.snap(1, 1), 0);
     }
 

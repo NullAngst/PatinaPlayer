@@ -19,12 +19,39 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 
 - Folders, Artists (by album artist or track artist), Albums (by name, artist, year, recently added, most played, rating or random), Songs (sortable on seven columns), Genres, Playlists, Radio, Podcasts, Queue and Downloads.
 - Search over everything at once. Every word has to match somewhere, so `nirv blea` finds Bleach.
+- Recently played: every song you've heard, newest first, under Today, Yesterday, the weekday or the date. Albums and Songs can sort by recently played too.
 - Listening stats: Most listened (top five songs, albums and artists), Top albums and Top artists, built from your play counts. A song counts once you've heard half of it or four minutes, whichever comes first.
 - Favorites: star a folder, album or artist and it sits in the sidebar, one click away.
 - Right-click a song (long press on a phone), in any list or in the queue, for Go to album and Go to artist.
+- Pick several rows and act on them at once: play them, queue them, add them to a playlist, keep them offline, send them to an iPod, or take them out of a playlist or the queue. Ctrl-click and Shift-click on the desktop, Space in the terminal app, and on a phone long press, Select, then tap the others. A bar at the bottom says how many are picked.
+- Drag songs by the grip at the right of each row to reorder the queue or a playlist. On a touch screen, tap the grip to lift the song and tap where it should go.
+- Now Playing: tap the cover in the bottom bar (Ctrl+N in the terminal app) for the big cover, the song, its format, whether it's bit-perfect, the output it's going to, every stage of the sound chain that's touching it, and the lyrics beside it.
+- Hover any icon button for what it does.
 - Every library view has Play, Shuffle, Add to queue and Add to playlist at the top, and they take the whole view. Shuffle on a folder of three hundred albums plays all of them in random order.
 - Ratings, 1 to 5 stars, on songs and albums.
 - Lyrics, only when you press the Lyrics button: the song's tags, an `.lrc` next to it, its server, then LRCLIB if you've turned that on. Synced lyrics follow the song.
+
+### Smart playlists
+
+A smart playlist is a saved search that keeps itself up to date. Make one from Playlists with New smart playlist (`S` in the terminal app). Type the rules and the dialog says how many songs match as you type, or what's wrong with the rules.
+
+```
+rating >= 4 and genre is "blues rock" and played > 180d sort by random limit 100
+```
+
+- Fields: `title`, `artist`, `albumartist`, `album`, `genre`, `year`, `rating`, `albumrating`, `plays`, `played`, `added`, `length`, `format`, `rate`, `bits`, `lossless`, `folder`, `source`.
+- Text: `is`, `isnt`, `contains`, `starts`, `ends`, and `~` for contains. Quote anything with a space in it.
+- Numbers: `=`, `!=`, `<`, `<=`, `>`, `>=`, and ranges like `year 1990-1999`.
+- Times are ages: `played > 180d` is not played in six months (or never), `added < 2w` is added in the last two weeks. `h`, `d`, `w`, `mo` and `y` all work, and so do dates like `added > 2024-06`.
+- Lengths as `4:30` or `5m`, sample rates as `44.1k`.
+- `and`, `or`, `not` and parentheses. Two rules side by side mean `and`.
+- Shortcuts: `played never`, `lossless`, `lossy`, `unrated`.
+- At the end, `sort by <field> [asc|desc]` (or `sort by random`) and `limit N`.
+
+### Playlists in and out
+
+- Import M3U, M3U8 and PLS files from Playlists (Import, or `<` in the terminal app). Each entry matches your library by its path, then by its last folders and file name, so a playlist made on another computer with the music somewhere else still lines up. Entries that match nothing are kept as missing songs if they're local paths, so they turn up when the files do. Web addresses are left out, and the import says how many of each there were.
+- Export a playlist, a smart playlist, a mix, the queue or any list of songs as M3U8 (Export, or `>`). It goes to a `Playlists` folder in your first library folder unless you say otherwise. Local songs go out as full paths. Server songs go out as their `server://` paths, which only PatinaPlayer reads.
 
 ### Playback
 
@@ -63,11 +90,23 @@ Everything in the chain glides when you change it, so nothing clicks or zippers.
 - Who's similar comes from your server first, then Last.fm (with an API key), then your own genre tags, which works with local folders and no key at all. Only songs you have get played.
 - Save a mix you like. It remembers who was similar, so it plays the same way later without the server or Last.fm.
 
-### Last.fm
+### Last.fm and ListenBrainz
 
-- Link your account from Settings. Now Playing, scrobbles by Last.fm's rules, and love (the heart) that's kept in the library and sent to Last.fm.
-- Scrobbles made offline wait in the library and go out later with their original times.
-- For each server you choose who scrobbles: the app, the server, or both. Navidrome and others pass plays on themselves, so picking the right one keeps plays from counting twice.
+- Link your Last.fm account from Settings. Now Playing, scrobbles by Last.fm's rules, and love (the heart) that's kept in the library and sent to Last.fm.
+- ListenBrainz runs alongside it, or on its own. Paste your user token from listenbrainz.org/settings into Settings, ListenBrainz. It's checked, and kept in your keyring. Listens and Now Playing go out by the same rules as Last.fm scrobbles. A self-hosted ListenBrainz, or anything else with the same API (Maloja, Koito), works by setting its address.
+- Scrobbles and listens made offline wait in the library and go out later with their original times.
+- For each server you choose who scrobbles, separately for Last.fm and ListenBrainz: the app, the server, or both. Navidrome and others pass plays on themselves, so picking the right one keeps plays from counting twice.
+
+### iPod
+
+Plug in a classic iPod, a mini, or an older nano and it shows up in the sidebar under Sources once your desktop mounts it. The iPod view lists the playlists and albums on it, with how much space is left.
+
+- Send to iPod (right-click, or Ctrl+P in the terminal app) takes the selection, the picked rows, or the whole view. A playlist, smart playlist or mix arrives as a playlist of the same name on the iPod. Send Favorites puts everything you've starred on it.
+- Songs the iPod can't play (FLAC, Opus, Vorbis, anything above 48 kHz or 16 bits) are converted on the way. Settings, iPod picks what to: Apple Lossless at 16 bits (the default, with lossy songs going to AAC), AAC 256 kbps, or MP3 320 kbps. MP3, AAC and ALAC it can play go across untouched. Covers go too.
+- Songs already on it (same artist, album, title and track) aren't sent twice.
+- Take a playlist or an album off it, and eject it when you're done, from the same view.
+
+It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` on Debian and Ubuntu, `libgpod` on Fedora, Arch and openSUSE), and the `ffmpeg` command for converting. Without libgpod the iPod view says so and nothing else changes.
 
 ### Radio and podcasts
 
@@ -94,7 +133,8 @@ Everything in the chain glides when you change it, so nothing clicks or zippers.
 - Your Music folder is in the library from the first start. Add more with Android's folder picker.
 - Tap opens and plays, long press opens the menu that right-click opens on the desktop. Text is typed in Android's own dialogs, which stay clear of the keyboard.
 - Music keeps playing with the screen off, with the notification, lock screen controls, Bluetooth buttons, and pausing when headphones come out or a call comes in.
-- Android Auto shows what's playing, with next, previous and play/pause. Music is picked on the phone, since the car has nothing to browse yet.
+- Android Auto shows what's playing, with next, previous and play/pause, and has music to browse from the car: Shuffle everything, Favorites, Playlists, Smart playlists, Recently played, Mixes and Recently added albums.
+- A home screen widget with the cover, the song, and back, play or pause, and next.
 - The System theme (Android 12 and later) follows your wallpaper's Material You colors and the phone's light or dark mode.
 - The volume button opens a tall slider, easier to hit with a thumb than the bar's.
 - Bit-perfect to a USB DAC on Android 14 and later, where the phone's maker offers it.
@@ -112,7 +152,7 @@ Download `PatinaPlayer-<version>-x86_64.AppImage` from Releases.
 
 IT NEEDS GLIBC 2.39 OR NEWER, since it's built on Ubuntu 24.04. Kubuntu 24.04, Fedora 40, Debian 13 and later are fine. Older systems get a glibc error and nothing else.
 
-FFmpeg is built into it, audio only, so your distro's FFmpeg doesn't matter. PipeWire, ALSA, GnuTLS, OpenGL, fontconfig and glibc come from your system.
+FFmpeg is built into it, audio only, so your distro's FFmpeg doesn't matter. PipeWire, ALSA, GnuTLS, OpenGL, fontconfig and glibc come from your system. So do libgpod and the `ffmpeg` command, which only the iPod sync needs.
 
 ### The APK
 
@@ -133,6 +173,7 @@ It's arm64 only, which covers every phone from the last several years.
 - clang and pkg-config, since the FFmpeg and PipeWire bindings are generated at build time
 - For the desktop app: xkbcommon, Wayland, fontconfig, freetype, the X11 cursor, randr and input libraries, and OpenGL headers
 - For the tests: the `ffmpeg` command itself, since they make their own audio files
+- Optional, for the iPod sync and its test: libgpod (`libgpod4` on Ubuntu). It's loaded when an iPod turns up, so the build doesn't need it.
 
 SQLite is built into the binary, so there's nothing to install for it.
 
@@ -165,19 +206,24 @@ On another distro the names differ but the list is the same. Fedora calls them `
 
 Without a release key in the environment it signs with a debug key kept in `target/android-debug.keystore`, which is fine for your own phone. The script's header lists the four signing variables.
 
-### Releases from GitHub
+## Making a release
 
-Push a tag and the Release workflow builds the AppImage and the APK and puts both on one release:
+The Release workflow builds the AppImage and the APK from a tag and attaches them to that tag's release. It only runs when you start it, never on a push.
 
-1. Tag a version: `git tag v0.2.0`
-2. Push the tag: `git push origin v0.2.0`
-3. Wait for the Release workflow under Actions. The first run takes about 15 minutes; later ones are faster, since FFmpeg and the Rust build are cached.
+1. Go to Releases on GitHub and click Draft a new release.
+2. Under Choose a tag, type a new tag (like `v1.2.0`) and create it there, on `main`.
+3. Write the notes and click Publish release.
+4. Go to Actions and click the Release workflow.
+5. Click Run workflow, pick that tag under "Use workflow from", and run it.
+6. Wait. The first run takes about 15 minutes; later ones are faster, since FFmpeg and the Rust build are cached. The AppImage, its `.zsync` and the APK land on the release you made.
 
-THE APK HAS TO BE SIGNED WITH THE SAME KEY EVERY RELEASE, or Android refuses to install it over the old one and the app's data is lost to a reinstall. Put the keystore and its passwords in the repository's secrets once. Until they're there, tag builds stop at the APK step on purpose, and the AppImage still ships.
+If it was run on a branch, or there's no release for the tag yet, it stops in the first few seconds and says which. Running it again on the same tag replaces the files on the release.
+
+THE APK HAS TO BE SIGNED WITH THE SAME KEY EVERY RELEASE, or Android refuses to install it over the old one and the app's data is lost to a reinstall. Put the keystore and its passwords in the repository's secrets once (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`). Until they're there, the APK build fails on purpose and the AppImage still ships.
+
+Every APK on a release has a signed SLSA build provenance attestation: a record, signed through Sigstore, that this workflow built it from that commit. They're listed on the repository's Attestations page, under the Actions tab's sidebar. This works as is for a public repository; a private one needs GitHub Enterprise Cloud for it.
 
 A Last.fm API key and secret can be built in from the `LASTFM_KEY` and `LASTFM_SECRET` secrets. Without them, scrobbling needs your own key in Settings (free from last.fm/api/account/create).
-
-To run the workflow without a release, start it by hand from the Actions tab. The builds land as artifacts on that run.
 
 ## First run
 
@@ -289,6 +335,17 @@ love_stars = false       # love also stars the song on its server
 [lastfm.servers]         # who scrobbles each server's songs: app, server or both
 Home = "server"
 
+[listenbrainz]
+scrobble = true          # the token itself is in your keyring, set from Settings
+user = ""                # the account the token belongs to; Settings fills it in
+url = ""                 # another server with the same API; empty is api.listenbrainz.org
+
+[listenbrainz.servers]   # app, server or both, like [lastfm.servers]
+Home = "app"
+
+[ipod]
+target = "alac"          # what songs it can't play become: alac, aac or mp3
+
 [[radio.station]]
 name = "Some Station"
 url = "https://example.com/listen.pls"
@@ -310,11 +367,11 @@ Where everything else goes:
 |---|---|
 | Settings | `~/.config/patinaplayer/config.toml` |
 | EQ and amp stack presets | `~/.config/patinaplayer/presets/eq/` and `presets/amp/` |
-| Library index, playlists, play counts, ratings, podcast positions, loudness, waiting scrobbles | `~/.local/share/patinaplayer/library.db` |
+| Library index, playlists, smart playlists, play counts, listening history, ratings, podcast positions, loudness, waiting scrobbles and listens | `~/.local/share/patinaplayer/library.db` |
 | Songs kept offline, downloaded episodes | `~/.local/share/patinaplayer/offline/` |
 | Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
 | Cover art at the sizes the app draws | `~/.cache/patinaplayer/art/` |
-| Server passwords, the Last.fm session | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
+| Server passwords, the Last.fm session, the ListenBrainz token | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
 
 The index and the offline songs live in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists or a pinned library to that. The two caches are safe to wipe. They refill as you play.
 
@@ -322,11 +379,17 @@ On Android all of it lives in the app's private storage.
 
 ## Keys
 
-These are the terminal app's keys. The desktop app uses the same ones, except there's no Tab focus switching, `Delete` removes from the queue or the open playlist, `Ctrl+F` also searches, `Alt+Left` and `Alt+Right` go back and forward, and the per-view letter commands live in the right-click menu and the buttons at the top of each view. `?` lists them in either app.
+These are the terminal app's keys. The desktop app uses the same ones, except there's no Tab focus switching, `Delete` removes from the queue or the open playlist, `Ctrl+F` also searches, `Alt+Left` and `Alt+Right` go back and forward, Ctrl-click and Shift-click (or Shift+Up and Shift+Down) pick rows, Space always pauses, and the per-view letter commands live in the right-click menu and the buttons at the top of each view. `?` lists them in either app.
+
+HEADS UP IF YOU'VE USED THE TERMINAL APP BEFORE: Space in a list now picks the row instead of pausing. `c` pauses from anywhere, and so does Ctrl+Space or Space in the sidebar.
 
 | Key | Action |
 |---|---|
-| Space | Play / pause |
+| c, Ctrl+Space | Play / pause (Space too, outside a list) |
+| Space | In a list: pick the row and move down |
+| U | Pick every row in the view |
+| Esc | Drop the picks, or back up a level when nothing's picked |
+| Enter | With rows picked, play just those |
 | n / b | Next / back (back restarts the song if you're more than 3 seconds in) |
 | Left / Right | Seek 5 s, Shift for 30 s |
 | + / -, m | Volume, mute |
@@ -335,13 +398,17 @@ These are the terminal app's keys. The desktop app uses the same ones, except th
 | Tab | Switch between the sidebar and the list |
 | / | Search |
 | Enter | Open, or play the list from the selected song |
-| Esc / Backspace | Back up a level |
+| Backspace | Back up a level |
 | v / V | Play the whole view in order / shuffled |
 | e | Add the whole view to the queue |
 | P | Add the whole view to a playlist |
 | a / A | Add to the queue / play next |
 | i / I | Go to the selected song's album / artist (in the Queue too) |
-| p | Add to a playlist |
+| p | Add to a playlist (the picked rows, if any) |
+| H | Recently played |
+| Ctrl+N | Now Playing |
+| Ctrl+P | Send the selection, the picked rows or the whole view to the iPod |
+| < / > | Import a playlist file / export the selection or view as M3U8 |
 | o / O | Sort Albums or Songs / reverse Songs |
 | t | Artists: album or track artist. Genres: albums or songs |
 | f / F | Keep the selection / the whole view offline, or stop |
@@ -359,7 +426,7 @@ These are the terminal app's keys. The desktop app uses the same ones, except th
 | F5 | Check folders for changes and refresh podcast feeds |
 | Ctrl+Q | Quit |
 
-In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe; in a show, `w` downloads, `x` deletes the download, `P` marks played. In the Queue: `d` remove, `J`/`K` move, `S` save to a playlist, `L` load the queue saved on your server, `C` clear. In Playlists: `N` new, `R` rename, `D` delete. In Downloads: `w` pauses or resumes, `x` cancels or unpins, `W` pauses everything, `C` clears the cache. In Settings and the EQ: Enter flips, cycles or edits, `h`/`l` step a value down or up.
+In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe; in a show, `w` downloads, `x` deletes the download, `P` marks played. In the Queue: `d` remove (the picked songs, if any), `J`/`K` move, `S` save to a playlist (the picked songs, if any), `L` load the queue saved on your server, `C` clear. In Playlists: `N` new, `S` new smart playlist, `R` rename, `D` delete, `E` edit a smart playlist's rules. In Recently played: the Clear the history row at the top empties it. In the iPod view: `d` take a playlist or album off, `E` eject. In Downloads: `w` pauses or resumes, `x` cancels or unpins, `W` pauses everything, `C` clears the cache. In Settings and the EQ: Enter flips, cycles or edits, `h`/`l` step a value down or up.
 
 TUI cover art picks a protocol by asking the terminal. To force one: `patinaplayer-tui --art kitty` (or `sixel`, `iterm2`, `blocks`, `off`). Konsole supports kitty images. Inside tmux, auto usually falls back to blocks.
 
@@ -374,7 +441,7 @@ crates/
 android/            manifest, icons and the Java side (permissions, media session, Android Auto, devices)
 assets/             app icon and desktop file
 packaging/          AppImage and APK builds, FFmpeg for each
-.github/workflows/  tests on every push, real servers in containers, releases on tags
+.github/workflows/  tests on every push, real servers in containers, releases when you run them on a tag
 ```
 
 The core owns all the state, and every view and what each action does lives in `patina-core/src/browse`, so both frontends only draw and take input. The library runs on its own thread with SQLite in WAL mode, so views read while a scan writes. The queue refers to entries by id, never by position, which is what lets you reorder while the decoder is already reading the next song.
@@ -400,7 +467,10 @@ To time indexing on your own collection: `cargo run --release -p patina-core --e
 - A tag edit on the server that leaves an album's song count, length and dates alone isn't seen by the regular sync. Sync now, in Settings, reads every album and catches it.
 - Metered connections are only detected through NetworkManager.
 - inotify needs one watch per folder, so a very large library can run past `fs.inotify.max_user_watches`. The app says so if it does, and raising the limit with `sysctl` fixes it.
-- On Android, folders are added by path, so a folder from a cloud app's storage provider can't go in. Add that music through a server instead. Bit-perfect depends on the phone's maker offering it. Android Auto has nothing to browse; music is picked on the phone.
+- On Android, folders are added by path, so a folder from a cloud app's storage provider can't go in. Add that music through a server instead. Bit-perfect depends on the phone's maker offering it.
+- The home screen widget's buttons control the player while the app is running. After the phone restarts, or Android stops the app, they open it instead, since there's no player to tell until it starts.
+- The iPod sync covers what libgpod covers: iPod classic, the older nanos (up to the 5th generation), minis, and shuffles up to the 2nd generation. The 6th and 7th generation nanos and the iPod touch don't work. It's desktop only. Play counts and ratings made on the iPod don't come back.
+- Smart playlists are typed rules, not a form of drop-downs. The dialog checks them as you type and the examples are one click away, but it's still a small language to learn.
 - FFmpeg doesn't check certificates on HTTPS radio and podcast streams. Server, Last.fm and lyrics calls go through the app's own HTTP client, which does.
 - Crossfeed is a simple bs2b-style crossfeed, not a measured head model. Width, balance and crossfeed only touch stereo; anything with more channels passes through untouched.
 

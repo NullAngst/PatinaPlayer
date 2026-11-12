@@ -39,6 +39,10 @@ final class Native {
 
     static Context app;
     static Handler main;
+    // The Rust library is loaded and listening. A service Android starts
+    // on its own (Android Auto, a widget tap) can run in a process where
+    // the activity, and so the library, never started.
+    private static volatile boolean ready;
     private static WeakReference<Activity> activity = new WeakReference<>(null);
     private static WifiManager.MulticastLock multicast;
 
@@ -50,6 +54,7 @@ final class Native {
         activity = new WeakReference<>(a);
         main = new Handler(Looper.getMainLooper());
         nativeInit();
+        ready = true;
         // DLNA servers are found by a multicast search, which Android drops
         // unless an app holds this.
         if (multicast == null) {
@@ -63,7 +68,21 @@ final class Native {
         watchDevices();
     }
 
+    static boolean ready() {
+        return ready;
+    }
+
     // ----- Into Rust -----
+
+    /**
+     * What the car can browse under an id ("root" for the top): four
+     * strings a row, the id, title, subtitle, and "b", "p" or "bp" for
+     * browsable, playable or both.
+     */
+    static native String[] browse(String parent);
+
+    /** Play something the car picked, by its browse id. */
+    static native void playMediaId(String id);
 
     /** Keeps this class, so Rust's threads can find it. */
     static native void nativeInit();

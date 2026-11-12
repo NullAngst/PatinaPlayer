@@ -103,6 +103,7 @@ fn browser(fx: &Fx) -> Browser {
         mixes: None,
         level: None,
         scrobble: None,
+        listenbrainz: None,
         config: Config {
             library: patina_core::config::LibraryConfig {
                 folders: vec![fx.root.clone()],

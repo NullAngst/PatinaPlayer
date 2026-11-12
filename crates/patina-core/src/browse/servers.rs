@@ -348,6 +348,12 @@ impl Browser {
             let _ = config::set_scrobble_mode(&self.config_path, &cfg.name, m);
             self.config.lastfm.servers.insert(cfg.name.clone(), m);
         }
+        if let Some(old) = replaces.as_ref().filter(|o| **o != cfg.name)
+            && let Some(m) = self.config.listenbrainz.servers.remove(old)
+        {
+            let _ = config::set_listenbrainz_mode(&self.config_path, &cfg.name, m);
+            self.config.listenbrainz.servers.insert(cfg.name.clone(), m);
+        }
         if let Some(c) = &self.cache {
             // Kept songs and pins follow a renamed server, before the old
             // name is forgotten.

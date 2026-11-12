@@ -219,7 +219,8 @@ export struct Row {
     // 0 track, 1 album, 2 artist, 3 folder, 4 genre, 5 playlist, 6 station,
     // 7 podcast, 8 episode, 9 header, 10 info, 11 missing file, 12 setting,
     // 13 pinned for offline, 14 a download, 15 a button in the list,
-    // 16 a saved mix
+    // 16 a saved mix, 17 a smart playlist, 18 a playlist or album on the
+    // iPod
     kind: int,
     num: string,
     title: string,
@@ -252,6 +253,8 @@ export struct Row {
     fav: int,
     // A playlist that can't be renamed or deleted (Hearted songs).
     fixed: bool,
+    // Picked for a multiple selection.
+    marked: bool,
 }
 
 export struct QueueRow {
@@ -260,6 +263,7 @@ export struct QueueRow {
     playing: bool,
     failed: bool,
     off: bool,
+    marked: bool,
     art: image,
     has-art: bool,
 }
@@ -290,6 +294,14 @@ export struct AmpUnit {
     name: string,
     on: bool,
     knobs: [AmpKnob],
+}
+
+// One stage of the sound chain, for the Now Playing page.
+export struct ChainRow {
+    name: string,
+    state: string,
+    // Doing something to the sound right now.
+    on: bool,
 }
 
 export struct Hero {
@@ -375,6 +387,32 @@ export global Icons {
     // A four-point sparkle.
     out property <string> sparkle: "M12 2C12.8 8 16 11.2 22 12C16 12.8 12.8 16 12 22C11.2 16 8 12.8 2 12C8 11.2 11.2 8 12 2z";
     out property <string> menu: "M4 6h16M4 12h16M4 18h16";
+    // A clock: Recently played.
+    out property <string> history: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 7v5l3 2";
+    // A classic iPod: the body, the screen and the wheel.
+    out property <string> ipod: "M6 2h12v20H6zM8 4h8v6H8zM9.5 15.5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0";
+    // Six dots: drag to move.
+    out property <string> grip: "M7 8h10M7 12h10M7 16h10";
+    out property <string> check: "M5 12l5 5 9-10";
+}
+
+// A tooltip with the window's own look, for buttons that only show an
+// icon. Slint shows it after the pointer rests a moment, and not on touch.
+component Tip inherits Rectangle {
+    in property <string> text;
+    border-radius: 6px * P.round;
+    border-width: 1px;
+    border-color: P.border;
+    background: P.raised;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: P.shadow;
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        padding-top: 5px;
+        padding-bottom: 5px;
+        Text { text: root.text; font-size: 12px; color: P.text; }
+    }
 }
 
 component IconButton inherits Rectangle {
@@ -410,6 +448,9 @@ component IconButton inherits Rectangle {
     ta := TouchArea {
         mouse-cursor: enabled ? pointer : default;
         clicked => { if enabled { root.clicked(); } }
+    }
+    if root.tip != "" && !Ui.touch: Tooltip {
+        Tip { text: root.tip; }
     }
 }
 
@@ -495,6 +536,9 @@ component Chip inherits Rectangle {
         cut: (root.icon-only && root.icon != "")
             || measure.preferred-width > root.width - 24px - (root.icon != "" ? 22px : 0px) + 0.5px;
         tapped => { root.clicked(); }
+    }
+    if root.icon-only && root.icon != "" && !Ui.touch: Tooltip {
+        Tip { text: root.peek; }
     }
 }
 
@@ -803,9 +847,28 @@ component ListRow inherits Rectangle {
     in property <bool> album-tracks;
     // The open list is Hearted songs: removing a song unhearts it.
     in property <bool> hearted;
+    // Picking rows: a tap picks instead of opening (on a phone, once
+    // Select has been chosen from a menu).
+    in property <bool> marking;
+    // The open list is a playlist that can be put in a new order.
+    in property <bool> draggable;
+    // On a phone: a row was lifted to move, and a tap drops it here.
+    in property <bool> moving;
+    in property <bool> lifted;
+    // An iPod is plugged in.
+    in property <bool> ipod;
     callback select;
     callback activate;
     callback act(string);
+    // Pick this row (Ctrl-click), or every row from the last pick (Shift).
+    callback mark(bool);
+    // Dragged by this many rows, up (less than 0) or down.
+    callback drag-to(int);
+    // A modified click picks rows; it doesn't open one too.
+    property <bool> mod-click;
+    property <bool> dragging;
+    property <length> drag-dy;
+    property <length> grip-y;
     // Held long enough to open the menu; the release then doesn't open
     // or play the row too.
     property <bool> long-fired;
@@ -831,9 +894,15 @@ component ListRow inherits Rectangle {
         || item.can-mix
         || item.rating >= 0
         || item.fav >= 0
-        || item.can-pin;
+        || item.can-pin
+        || item.kind == 17
+        || item.kind == 18;
+    // Rows that can be picked for a multiple selection.
+    property <bool> markable: item.selectable && (item.kind <= 8 || item.kind == 11 || item.kind == 16 || item.kind == 17);
+    property <bool> has-grip: root.draggable && (item.kind == 0 || item.kind == 11);
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
-    background: item.playing ? P.playing-bg : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent));
+    z: root.dragging ? 10 : 0;
+    background: root.dragging ? transparent : (item.playing ? P.playing-bg : (item.marked || root.lifted ? P.raised : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent))));
     border-radius: 6px * P.round;
     border-width: item.playing && P.kawaii ? 2px : 0px;
     border-color: P.verdigris;
@@ -849,9 +918,31 @@ component ListRow inherits Rectangle {
         letter-spacing: 0.9px;
     }
 
+    // Picked: a bar down the left edge.
+    if item.marked || root.lifted: Rectangle {
+        x: 0px;
+        y: root.dragging ? root.drag-dy + 6px : 6px;
+        width: 3px;
+        height: parent.height - 12px;
+        border-radius: 1.5px;
+        background: root.lifted ? P.copper : P.verdigris;
+    }
+    // A row being dragged floats where the pointer is.
+    if root.dragging: Rectangle {
+        y: root.drag-dy;
+        height: parent.height;
+        border-radius: 6px * P.round;
+        border-width: 1px;
+        border-color: P.verdigris-dim;
+        background: P.raised;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: P.shadow;
+    }
     if item.kind != 9 && item.kind != 12: HorizontalLayout {
+        y: root.dragging ? root.drag-dy : 0px;
+        height: root.height;
         padding-left: 8px;
-        padding-right: 12px;
+        padding-right: root.has-grip ? 40px : 12px;
         spacing: 12px;
         // Number, play marker or kind glyph, with a dot for pinned.
         Rectangle {
@@ -868,13 +959,13 @@ component ListRow inherits Rectangle {
             Text {
                 width: parent.width;
                 height: parent.height;
-                text: item.playing ? (P.kawaii ? "♪" : "▶") : (item.kind == 4 && item.on ? "✓" : (item.kind == 16 ? "∞" : (item.kind == 5 && item.fixed ? "♥" : item.num)));
+                text: item.marked ? "✓" : (item.playing ? (P.kawaii ? "♪" : "▶") : (item.kind == 4 && item.on ? "✓" : (item.kind == 16 ? "∞" : (item.kind == 17 ? "⚙" : (item.kind == 5 && item.fixed ? "♥" : item.num)))));
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 font-family: P.mono;
                 font-size: 12px;
                 font-weight: P.kawaii ? 700 : 400;
-                color: item.playing || (item.kind == 4 && item.on) || (item.kind == 5 && item.fixed) ? P.accent-text : (P.kawaii ? P.muted : P.wave);
+                color: item.marked || item.playing || (item.kind == 4 && item.on) || (item.kind == 5 && item.fixed) ? P.accent-text : (P.kawaii ? P.muted : P.wave);
             }
         }
         if item.kind == 1 || item.kind == 3: Rectangle {
@@ -946,6 +1037,12 @@ component ListRow inherits Rectangle {
             // The whole title, when the row cuts it short.
             if root.title-cut && item.kind != 12: MenuItem { title: root.title-full; enabled: false; }
             if root.title-cut && item.kind != 12: MenuSeparator {}
+            // Picking several: this row in or out of the selection.
+            if root.markable: MenuItem {
+                title: item.marked ? "Unselect" : "Select";
+                activated => { root.act("select"); }
+            }
+            if root.markable: MenuSeparator {}
             // Things that play.
             if item.kind <= 8 || item.kind == 13 || item.kind == 16: MenuItem {
                 title: item.kind == 8 ? "Play (resume)" : "Play";
@@ -967,9 +1064,13 @@ component ListRow inherits Rectangle {
                 title: "Add to queue";
                 activated => { root.act("queue"); }
             }
-            if item.kind <= 5: MenuItem {
+            if item.kind <= 5 || item.kind == 17: MenuItem {
                 title: "Add to playlist…";
                 activated => { root.act("playlist"); }
+            }
+            if root.ipod && (item.kind <= 5 || item.kind == 16 || item.kind == 17): MenuItem {
+                title: "Send to iPod";
+                activated => { root.act("ipod"); }
             }
             // A song: its album, or its artist.
             if item.kind == 0: MenuSeparator {}
@@ -1038,6 +1139,13 @@ component ListRow inherits Rectangle {
             if item.kind == 5 && !item.fixed: MenuSeparator {}
             if item.kind == 5 && !item.fixed: MenuItem { title: "Rename…"; activated => { root.act("pl-rename"); } }
             if item.kind == 5 && !item.fixed: MenuItem { title: "Delete…"; activated => { root.act("pl-delete"); } }
+            if item.kind == 5 || item.kind == 16 || item.kind == 17: MenuItem { title: "Export as M3U8…"; activated => { root.act("export"); } }
+            // Smart playlists.
+            if item.kind == 17: MenuSeparator {}
+            if item.kind == 17: MenuItem { title: "Edit…"; activated => { root.act("smart-edit"); } }
+            if item.kind == 17: MenuItem { title: "Delete…"; activated => { root.act("smart-delete"); } }
+            // On the iPod.
+            if item.kind == 18: MenuItem { title: "Remove from iPod…"; activated => { root.act("ipod-remove"); } }
         }
         // A long press on a touch screen opens the same menu.
         hold := Timer {
@@ -1073,6 +1181,12 @@ component ListRow inherits Rectangle {
                 }
                 if e.kind == PointerEventKind.down && item.selectable {
                     root.long-fired = false;
+                    root.mod-click = false;
+                    if e.button == PointerEventButton.left && root.markable && (e.modifiers.control || e.modifiers.shift) {
+                        root.mod-click = true;
+                        root.mark(e.modifiers.shift);
+                        return;
+                    }
                     root.select();
                     if e.button == PointerEventButton.right {
                         if root.has-menu { cm.show({ x: self.mouse-x, y: self.mouse-y }); }
@@ -1094,10 +1208,69 @@ component ListRow inherits Rectangle {
             }
             // One click or tap opens a folder, artist or album, or plays a
             // song or station. Settings rows act through their own controls.
+            // While rows are being picked, a tap picks; while one is lifted
+            // to move, a tap drops it here.
             clicked => {
-                if !root.long-fired && item.selectable && item.kind != 12 { root.activate(); }
+                if root.long-fired || root.mod-click || !item.selectable || item.kind == 12 { return; }
+                if root.moving && root.has-grip {
+                    root.act("drop");
+                } else if root.marking && root.markable {
+                    root.mark(false);
+                } else {
+                    root.activate();
+                }
             }
         }
+    }
+
+    // The handle a playlist's song is dragged by. With a mouse it drags;
+    // on a touch screen, where a drag would scroll the list, a tap lifts
+    // the row and a tap on another row drops it there.
+    if root.has-grip: Rectangle {
+        x: parent.width - 36px;
+        width: 32px;
+        height: root.height;
+        // The icon rides with the row; the touch area stays put, so the
+        // pointer is measured from where the drag started.
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 + (root.dragging ? root.drag-dy : 0px);
+            d: Icons.grip;
+            size: 16px;
+            stroke: root.lifted || root.dragging || gta.has-hover ? P.accent-text : P.wave;
+        }
+        gta := TouchArea {
+            mouse-cursor: Ui.touch ? pointer : grab;
+            pointer-event(e) => {
+                if Ui.touch {
+                    return;
+                }
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    root.select();
+                    root.grip-y = self.mouse-y;
+                    root.drag-dy = 0px;
+                    root.dragging = true;
+                }
+                if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.dragging {
+                    // Where it was let go, not where the last move left it.
+                    if e.kind == PointerEventKind.up {
+                        root.drag-dy = self.mouse-y - root.grip-y;
+                    }
+                    root.dragging = false;
+                    root.drag-to(round(root.drag-dy / 40px));
+                    root.drag-dy = 0px;
+                }
+            }
+            moved => {
+                if root.dragging {
+                    root.drag-dy = self.mouse-y - root.grip-y;
+                }
+            }
+            clicked => {
+                if Ui.touch { root.act(root.lifted ? "lift-cancel" : "lift"); }
+            }
+        }
+        if !Ui.touch: Tooltip { Tip { text: "Drag to move"; } }
     }
 
     // A settings row: label and help on the left, its control on the
@@ -1291,14 +1464,20 @@ component ListRow inherits Rectangle {
 component AlbumTile inherits Rectangle {
     in property <Row> item;
     in property <bool> selected;
+    in property <bool> marking;
+    in property <bool> ipod;
     callback select;
     callback activate;
     callback act(string);
+    callback mark(bool);
     property <bool> long-fired;
+    property <bool> mod-click;
     property <length> press-x;
     property <length> press-y;
     border-radius: 8px * P.round;
-    background: selected ? P.raised : (ta.has-hover ? P.hover : transparent);
+    background: selected || item.marked ? P.raised : (ta.has-hover ? P.hover : transparent);
+    border-width: item.marked ? 2px : 0px;
+    border-color: P.verdigris;
     VerticalLayout {
         padding: 8px;
         spacing: 6px;
@@ -1312,6 +1491,22 @@ component AlbumTile inherits Rectangle {
                 radius: 6px;
                 // Its server is away and none of it is kept: faded.
                 opacity: item.off ? 0.35 : 1.0;
+            }
+            // Picked: a check in the corner.
+            if item.marked: Rectangle {
+                x: 6px;
+                y: 6px;
+                width: 24px;
+                height: 24px;
+                border-radius: 12px;
+                background: P.verdigris;
+                Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    d: Icons.check;
+                    size: 14px;
+                    stroke: P.on-accent;
+                }
             }
             // Pinned for offline: a badge in the corner.
             if item.pinned: Rectangle {
@@ -1352,10 +1547,13 @@ component AlbumTile inherits Rectangle {
             if tile-title.preferred-width > tile-title.width + 0.5px: MenuItem { title: item.title; enabled: false; }
             if tile-sub.preferred-width > tile-sub.width + 0.5px: MenuItem { title: item.sub; enabled: false; }
             if tile-title.preferred-width > tile-title.width + 0.5px || tile-sub.preferred-width > tile-sub.width + 0.5px: MenuSeparator {}
+            MenuItem { title: item.marked ? "Unselect" : "Select"; activated => { root.act("select"); } }
+            MenuSeparator {}
             MenuItem { title: "Play"; activated => { root.act("play"); } }
             MenuItem { title: "Play next"; activated => { root.act("next"); } }
             MenuItem { title: "Add to queue"; activated => { root.act("queue"); } }
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
+            if root.ipod: MenuItem { title: "Send to iPod"; activated => { root.act("ipod"); } }
             if item.can-mix: MenuItem { title: "Artist mix"; activated => { root.act("mix"); } }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
@@ -1394,6 +1592,12 @@ component AlbumTile inherits Rectangle {
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down {
                     root.long-fired = false;
+                    root.mod-click = false;
+                    if e.button == PointerEventButton.left && (e.modifiers.control || e.modifiers.shift) {
+                        root.mod-click = true;
+                        root.mark(e.modifiers.shift);
+                        return;
+                    }
                     root.select();
                     if e.button == PointerEventButton.right {
                         tcm.show({ x: self.mouse-x, y: self.mouse-y });
@@ -1414,7 +1618,8 @@ component AlbumTile inherits Rectangle {
                 }
             }
             clicked => {
-                if !root.long-fired { root.activate(); }
+                if root.long-fired || root.mod-click { return; }
+                if root.marking { root.mark(false); } else { root.activate(); }
             }
         }
     }
@@ -1426,24 +1631,54 @@ component QueueLine inherits Rectangle {
     in property <QueueRow> q;
     in property <int> n;
     in property <bool> selected;
+    in property <bool> marking;
+    in property <bool> moving;
+    in property <bool> lifted;
     callback select;
     callback activate;
     callback act(string);
+    callback mark(bool);
+    callback drag-to(int);
     property <bool> long-fired;
+    property <bool> mod-click;
+    property <bool> dragging;
+    property <length> drag-dy;
+    property <length> grip-y;
     property <length> press-x;
     property <length> press-y;
     height: 52px;
+    z: root.dragging ? 10 : 0;
     border-radius: 6px * P.round;
     border-width: q.playing && P.kawaii ? 2px : 0px;
     border-color: P.verdigris;
-    background: q.playing ? P.playing-bg : (selected ? P.raised : (qta.has-hover ? P.hover : transparent));
+    background: root.dragging ? transparent : (q.playing ? P.playing-bg : (selected || q.marked || root.lifted ? P.raised : (qta.has-hover ? P.hover : transparent)));
+    if q.marked || root.lifted: Rectangle {
+        x: 0px;
+        y: root.dragging ? root.drag-dy + 8px : 8px;
+        width: 3px;
+        height: parent.height - 16px;
+        border-radius: 1.5px;
+        background: root.lifted ? P.copper : P.verdigris;
+    }
+    if root.dragging: Rectangle {
+        y: root.drag-dy;
+        height: parent.height;
+        border-radius: 6px * P.round;
+        border-width: 1px;
+        border-color: P.verdigris-dim;
+        background: P.raised;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: P.shadow;
+    }
     HorizontalLayout {
+        y: root.dragging ? root.drag-dy : 0px;
+        height: root.height;
         padding: 6px;
-        padding-right: 12px;
+        padding-right: 44px;
         spacing: 12px;
         Text {
             width: 32px;
-            text: q.playing ? (P.kawaii ? "♪" : "▶") : root.n;
+            text: q.marked ? "✓" : (q.playing ? (P.kawaii ? "♪" : "▶") : root.n);
             horizontal-alignment: right;
             vertical-alignment: center;
             font-family: P.mono;
@@ -1463,6 +1698,8 @@ component QueueLine inherits Rectangle {
             if line-title.preferred-width > line-title.width + 0.5px: MenuItem { title: q.title; enabled: false; }
             if line-sub.preferred-width > line-sub.width + 0.5px: MenuItem { title: q.sub; enabled: false; }
             if line-title.preferred-width > line-title.width + 0.5px || line-sub.preferred-width > line-sub.width + 0.5px: MenuSeparator {}
+            MenuItem { title: q.marked ? "Unselect" : "Select"; activated => { root.act("select"); } }
+            MenuSeparator {}
             MenuItem { title: "Play"; activated => { root.act("play"); } }
             MenuItem { title: "Move up"; activated => { root.act("up"); } }
             MenuItem { title: "Move down"; activated => { root.act("down"); } }
@@ -1488,6 +1725,12 @@ component QueueLine inherits Rectangle {
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down {
                     root.long-fired = false;
+                    root.mod-click = false;
+                    if e.button == PointerEventButton.left && (e.modifiers.control || e.modifiers.shift) {
+                        root.mod-click = true;
+                        root.mark(e.modifiers.shift);
+                        return;
+                    }
                     root.select();
                     if e.button == PointerEventButton.right {
                         qcm.show({ x: self.mouse-x, y: self.mouse-y });
@@ -1508,7 +1751,281 @@ component QueueLine inherits Rectangle {
                 }
             }
             clicked => {
-                if !root.long-fired { root.activate(); }
+                if root.long-fired || root.mod-click { return; }
+                if root.moving {
+                    root.act("drop");
+                } else if root.marking {
+                    root.mark(false);
+                } else {
+                    root.activate();
+                }
+            }
+        }
+    }
+    Rectangle {
+        x: parent.width - 38px;
+        width: 32px;
+        height: root.height;
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 + (root.dragging ? root.drag-dy : 0px);
+            d: Icons.grip;
+            size: 16px;
+            stroke: root.lifted || root.dragging || qgta.has-hover ? P.accent-text : P.wave;
+        }
+        qgta := TouchArea {
+            mouse-cursor: Ui.touch ? pointer : grab;
+            pointer-event(e) => {
+                if Ui.touch {
+                    return;
+                }
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    root.select();
+                    root.grip-y = self.mouse-y;
+                    root.drag-dy = 0px;
+                    root.dragging = true;
+                }
+                if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.dragging {
+                    // Where it was let go, not where the last move left it.
+                    if e.kind == PointerEventKind.up {
+                        root.drag-dy = self.mouse-y - root.grip-y;
+                    }
+                    root.dragging = false;
+                    root.drag-to(round(root.drag-dy / 52px));
+                    root.drag-dy = 0px;
+                }
+            }
+            moved => {
+                if root.dragging {
+                    root.drag-dy = self.mouse-y - root.grip-y;
+                }
+            }
+            clicked => {
+                if Ui.touch { root.act(root.lifted ? "lift-cancel" : "lift"); }
+            }
+        }
+        if !Ui.touch: Tooltip { Tip { text: "Drag to move"; } }
+    }
+}
+
+// The bar over a list while rows are picked: how many, and what to do
+// with them all at once.
+component SelBar inherits Rectangle {
+    in property <int> count;
+    in property <bool> ipod;
+    // In a playlist: the picked songs can come out of it.
+    in property <bool> in-playlist;
+    // The queue's bar: remove and add to a playlist.
+    in property <bool> queue;
+    callback act(string);
+    height: 56px;
+    Rectangle {
+        y: 4px;
+        height: 44px;
+        border-radius: 8px * P.round;
+        border-width: 1px;
+        border-color: P.verdigris-dim;
+        background: P.raised;
+        drop-shadow-blur: 14px;
+        drop-shadow-color: P.shadow;
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 8px;
+            spacing: 8px;
+            Text {
+                text: root.count == 0 ? "Tap rows to pick them" : (root.count == 1 ? "1 picked" : root.count + " picked");
+                vertical-alignment: center;
+                font-weight: 600;
+                color: P.accent-text;
+            }
+            HScroll {
+                horizontal-stretch: 1;
+                y: (parent.height - self.height) / 2;
+                align: end;
+                spacing: 6px;
+                if !root.queue && root.count > 0: Chip { h: 30px; text: "Play"; icon: Icons.play; primary: true; clicked => { root.act("play"); } }
+                if !root.queue && root.count > 0: Chip { h: 30px; text: "Play next"; clicked => { root.act("next"); } }
+                if !root.queue && root.count > 0: Chip { h: 30px; text: "Add to queue"; icon: Icons.plus; clicked => { root.act("queue"); } }
+                if root.count > 0: Chip { h: 30px; text: "Add to playlist"; icon: Icons.playlists; clicked => { root.act("playlist"); } }
+                if root.ipod && !root.queue && root.count > 0: Chip { h: 30px; text: "Send to iPod"; icon: Icons.ipod; clicked => { root.act("ipod"); } }
+                if (root.in-playlist || root.queue) && root.count > 0: Chip { h: 30px; text: "Remove"; danger: true; clicked => { root.act("remove"); } }
+                Chip { h: 30px; text: "Pick all"; clicked => { root.act("all"); } }
+                Chip { h: 30px; text: "Done"; icon: Icons.close; clicked => { root.act("clear"); } }
+            }
+        }
+    }
+}
+
+component NpInfo inherits VerticalLayout {
+    in property <bool> has-track;
+    in property <string> title;
+    in property <string> artist;
+    in property <string> album;
+    in property <string> format;
+    in property <string> path;
+    in property <string> output;
+    in property <[ChainRow]> chain;
+    in property <int> rating;
+    in property <int> love-state;
+    callback rate(int);
+    callback love;
+    spacing: 8px;
+    alignment: start;
+    min-width: 0px;
+    Text {
+        text: root.has-track ? root.title : "Nothing playing";
+        font-family: P.serif;
+        font-weight: P.kawaii ? 900 : 700;
+        font-size: 30px;
+        wrap: word-wrap;
+        color: root.has-track ? P.text : P.muted;
+    }
+    if root.artist != "": Text { text: root.artist; font-size: 17px; color: P.text; wrap: word-wrap; }
+    if root.album != "": Text { text: root.album; font-size: 14px; color: P.muted; wrap: word-wrap; }
+    if root.has-track: HorizontalLayout {
+        spacing: 4px;
+        alignment: start;
+        if root.rating >= 0: HorizontalLayout {
+            spacing: 0px;
+            for n in [1, 2, 3, 4, 5]: Text {
+                width: 22px;
+                text: n <= root.rating ? "★" : "☆";
+                font-size: 18px;
+                color: n <= root.rating ? P.copper : (rsa.has-hover ? P.copper-dim : P.wave);
+                rsa := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.rate(n == root.rating ? 0 : n); }
+                }
+            }
+        }
+        if root.love-state > 0: IconButton {
+            icon: Icons.heart;
+            tip: root.love-state == 2 ? "Hearted" : "Heart";
+            filled: root.love-state == 2;
+            active: root.love-state == 2;
+            clicked => { root.love(); }
+        }
+    }
+    Rectangle { height: 6px; }
+    if root.format != "": HorizontalLayout {
+        alignment: start;
+        Badge { text: root.format; fg: P.accent-text; }
+    }
+    if root.path != "": Text { text: root.path; font-size: 12.5px; color: P.muted; wrap: word-wrap; }
+    if root.output != "": Text { text: "Output: " + root.output; font-size: 12.5px; color: P.muted; wrap: word-wrap; }
+    if root.chain.length > 0: Rectangle { height: 8px; }
+    if root.chain.length > 0: Text {
+        text: "SOUND CHAIN";
+        font-size: 11px;
+        letter-spacing: 1.1px;
+        color: P.muted;
+    }
+    for c in root.chain: HorizontalLayout {
+        spacing: 12px;
+        Rectangle {
+            width: 8px;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: c.on ? P.verdigris : P.border;
+            }
+        }
+        Text { width: 110px; text: c.name; font-size: 13px; color: P.text; vertical-alignment: center; }
+        Text { horizontal-stretch: 1; text: c.state; font-size: 13px; color: c.on ? P.accent-text : P.muted; overflow: elide; vertical-alignment: center; }
+    }
+}
+
+// The Now Playing page: the cover large, what's playing, how it's
+// reaching the speakers, and the sound chain it goes through.
+component NowPlayingPage inherits Rectangle {
+    in property <bool> has-track;
+    in property <string> title;
+    in property <string> artist;
+    in property <string> album;
+    in property <string> format;
+    in property <string> path;
+    in property <string> output;
+    in property <[ChainRow]> chain;
+    in property <image> art;
+    in property <bool> has-art;
+    in property <int> rating: -1;
+    in property <int> love-state;
+    in property <bool> lyrics-open;
+    in property <bool> tight;
+    callback close;
+    callback rate(int);
+    callback love;
+    callback lyrics;
+    callback queue;
+    property <bool> wide: self.width >= 760px;
+    property <length> pad: tight ? 16px : 32px;
+    background: P.bg;
+    TouchArea {}
+    fl := Flickable {
+        content-height: max(self.height, body.preferred-height);
+        body := VerticalLayout {
+            width: fl.width;
+            padding: root.pad;
+            spacing: 18px;
+            HorizontalLayout {
+                Text {
+                    text: P.kawaii ? "NOW PLAYING · いま きいてる" : "NOW PLAYING";
+                    font-size: 11px;
+                    letter-spacing: 1.2px;
+                    color: P.muted;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                IconButton { icon: Icons.lyrics; tip: "Lyrics"; active: root.lyrics-open; clicked => { root.lyrics(); } }
+                IconButton { icon: Icons.queue-panel; tip: "Queue"; clicked => { root.queue(); } }
+                IconButton { icon: Icons.close; tip: "Close"; clicked => { root.close(); } }
+            }
+            lay := HorizontalLayout {
+                spacing: 36px;
+                alignment: root.wide ? start : center;
+                // Big on a wide window; on a narrow one the details go
+                // under it, so it takes the width.
+                Cover {
+                    property <length> side: root.wide
+                        ? min(fl.height - 2 * root.pad - 80px, fl.width * 0.42, 560px)
+                        : min(fl.width - 2 * root.pad, 420px);
+                    width: max(self.side, 120px);
+                    height: max(self.side, 120px);
+                    art: root.art;
+                    has-art: root.has-art;
+                    radius: 10px;
+                }
+                if root.wide: NpInfo {
+                    horizontal-stretch: 1;
+                    has-track: root.has-track;
+                    title: root.title;
+                    artist: root.artist;
+                    album: root.album;
+                    format: root.format;
+                    path: root.path;
+                    output: root.output;
+                    chain: root.chain;
+                    rating: root.rating;
+                    love-state: root.love-state;
+                    rate(n) => { root.rate(n); }
+                    love => { root.love(); }
+                }
+            }
+            if !root.wide: NpInfo {
+                has-track: root.has-track;
+                title: root.title;
+                artist: root.artist;
+                album: root.album;
+                format: root.format;
+                path: root.path;
+                output: root.output;
+                chain: root.chain;
+                rating: root.rating;
+                love-state: root.love-state;
+                rate(n) => { root.rate(n); }
+                love => { root.love(); }
             }
         }
     }
@@ -2059,6 +2576,21 @@ export component AppWindow inherits Window {
     callback row-select(int);
     callback row-activate(int);
     callback row-act(int, string);
+    // Picking rows: one in or out, or a range from the last one picked.
+    callback row-mark(int, bool);
+    // A playlist row dragged from one place to another.
+    callback row-drag(int, int);
+    // A button on the picked-rows bar.
+    callback sel-action(string);
+    in property <int> marked-count;
+    // Taps pick rows (a phone, after Select).
+    in property <bool> marking;
+    // The open list is a playlist whose order can change.
+    in property <bool> draggable;
+    // A playlist row lifted to move, on a phone; -1 for none.
+    in property <int> lifted: -1;
+    // An iPod is plugged in.
+    in property <bool> ipod;
     callback view-action(string);
     callback crumb-clicked(int);
 
@@ -2082,6 +2614,11 @@ export component AppWindow inherits Window {
     callback queue-select(int);
     callback queue-activate(int);
     callback queue-act(int, string);
+    callback queue-mark(int, bool);
+    callback queue-drag(int, int);
+    in property <int> queue-marked-count;
+    in property <bool> queue-marking;
+    in property <int> queue-lifted: -1;
     callback queue-save;
     callback queue-clear;
     // Servers that keep a play queue: "Queue from <name>" loads theirs.
@@ -2116,6 +2653,14 @@ export component AppWindow inherits Window {
     callback lyrics-clicked;
     in property <image> np-art;
     in property <bool> np-has-art;
+    // The Now Playing page.
+    in-out property <bool> np-open;
+    in property <string> np-artist;
+    in property <string> np-album;
+    in property <string> np-format;
+    in property <string> np-path;
+    in property <string> np-output;
+    in property <[ChainRow]> np-chain;
     in property <bool> playing;
     in property <bool> live;
     in property <bool> has-track;
@@ -2210,6 +2755,11 @@ export component AppWindow inherits Window {
     callback dlg-accept;
     callback dlg-pick(int);
     callback dlg-cancel;
+    // Typed into a dialog's field (by its number), for a live check.
+    callback dlg-edited(int, string);
+    // A line under a text dialog's fields: what the text will do.
+    in property <string> dlg-note;
+    in property <bool> dlg-note-warn;
 
     // Keys not taken by a text field.
     callback key(string, bool, bool, bool) -> bool;
@@ -2277,6 +2827,10 @@ export component AppWindow inherits Window {
             }
             if e.text == Key.Back && root.tiny && root.queue-panel {
                 root.toggle-queue();
+                return accept;
+            }
+            if (e.text == Key.Escape || e.text == Key.Back) && root.np-open {
+                root.np-open = false;
                 return accept;
             }
             if e.text == Key.Back && root.tiny && root.lyrics-open {
@@ -2696,9 +3250,16 @@ export component AppWindow inherits Window {
                                         focused: keys.has-focus;
                                         album-tracks: root.album-tracks;
                                         hearted: root.hearted-open;
+                                        marking: root.marking;
+                                        draggable: root.draggable;
+                                        moving: root.lifted >= 0;
+                                        lifted: i == root.lifted;
+                                        ipod: root.ipod;
                                         select => { root.row-select(i); keys.focus(); }
                                         activate => { root.row-activate(i); }
                                         act(a) => { root.row-select(i); root.row-act(i, a); }
+                                        mark(range) => { root.row-mark(i, range); keys.focus(); }
+                                        drag-to(d) => { if d != 0 { root.row-drag(i, i + d); } keys.focus(); }
                                     }
                                 }
                                 if root.rows.length == 0: Text {
@@ -2816,9 +3377,12 @@ export component AppWindow inherits Window {
                                     height: grid.cell + 44px;
                                     item: r;
                                     selected: i == root.selected;
+                                    marking: root.marking;
+                                    ipod: root.ipod;
                                     select => { root.row-select(i); keys.focus(); }
                                     activate => { root.row-activate(i); }
                                     act(a) => { root.row-select(i); root.row-act(i, a); }
+                                    mark(range) => { root.row-mark(i, range); keys.focus(); }
                                 }
                             }
                         }
@@ -2866,9 +3430,14 @@ export component AppWindow inherits Window {
                                     q: q;
                                     n: i + 1;
                                     selected: i == root.queue-sel;
+                                    marking: root.queue-marking;
+                                    moving: root.queue-lifted >= 0;
+                                    lifted: i == root.queue-lifted;
                                     select => { root.queue-select(i); keys.focus(); }
                                     activate => { root.queue-activate(i); }
                                     act(a) => { root.queue-act(i, a); }
+                                    mark(range) => { root.queue-mark(i, range); keys.focus(); }
+                                    drag-to(d) => { if d != 0 { root.queue-drag(i, i + d); } keys.focus(); }
                                 }
                             }
                             if root.queue.length == 0: Text {
@@ -2878,6 +3447,50 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                             }
                         }
+                        }
+
+                        // Picked rows: how many, and what to do with them,
+                        // floating over the foot of the list so picking a
+                        // row never moves the others under the pointer.
+                        if root.layout != 2 && (root.marked-count > 0 || root.marking): SelBar {
+                            x: root.pad;
+                            y: parent.height - self.height;
+                            width: parent.width - 2 * root.pad;
+                            count: root.marked-count;
+                            ipod: root.ipod;
+                            in-playlist: root.draggable;
+                            act(a) => { root.sel-action(a); keys.focus(); }
+                        }
+                        if root.layout == 2 && (root.queue-marked-count > 0 || root.queue-marking): SelBar {
+                            x: root.pad;
+                            y: parent.height - self.height;
+                            width: parent.width - 2 * root.pad;
+                            count: root.queue-marked-count;
+                            queue: true;
+                            act(a) => { root.sel-action("q-" + a); keys.focus(); }
+                        }
+
+                        // The Now Playing page, over the view.
+                        if root.np-open: NowPlayingPage {
+                            has-track: root.has-track;
+                            title: root.np-title;
+                            artist: root.np-artist;
+                            album: root.np-album;
+                            format: root.np-format;
+                            path: root.np-path;
+                            output: root.np-output;
+                            chain: root.np-chain;
+                            art: root.np-art;
+                            has-art: root.np-has-art;
+                            rating: root.np-rating;
+                            love-state: root.love-state;
+                            lyrics-open: root.lyrics-open;
+                            tight: root.tight;
+                            close => { root.np-open = false; keys.focus(); }
+                            rate(n) => { root.np-rate(n); keys.focus(); }
+                            love => { root.love-clicked(); keys.focus(); }
+                            lyrics => { root.lyrics-clicked(); keys.focus(); }
+                            queue => { root.toggle-queue(); keys.focus(); }
                         }
                     }
                 }
@@ -2948,6 +3561,11 @@ export component AppWindow inherits Window {
                             y: (parent.height - self.height) / 2;
                             art: root.np-art;
                             has-art: root.np-has-art;
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.np-open = !root.np-open; keys.focus(); }
+                            }
+                            if !Ui.touch: Tooltip { Tip { text: root.np-open ? "Close Now Playing" : "Now Playing"; } }
                         }
                         VerticalLayout {
                             alignment: center;
@@ -3847,6 +4465,7 @@ export component AppWindow inherits Window {
                             autofocus: true;
                             label: root.dlg-label1;
                             text <=> root.dlg-text1;
+                            edited(t) => { root.dlg-edited(1, t); }
                             accepted => {
                                 if root.dlg-two-fields { f2.focus-field(); } else { root.dlg-accept(); }
                             }
@@ -3856,6 +4475,7 @@ export component AppWindow inherits Window {
                             height: root.dlg-two-fields ? 58px : 0px;
                             label: root.dlg-label2;
                             text <=> root.dlg-text2;
+                            edited(t) => { root.dlg-edited(2, t); }
                             accepted => {
                                 if root.dlg-four-fields { f3.focus-field(); } else { root.dlg-accept(); }
                             }
@@ -3874,6 +4494,12 @@ export component AppWindow inherits Window {
                             label: root.dlg-label4;
                             text <=> root.dlg-text4;
                             accepted => { root.dlg-accept(); }
+                        }
+                        if root.dlg-note != "": Text {
+                            text: root.dlg-note;
+                            wrap: word-wrap;
+                            font-size: 12px;
+                            color: root.dlg-note-warn ? P.copper : P.muted;
                         }
                     }
 

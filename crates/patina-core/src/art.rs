@@ -92,6 +92,18 @@ fn embedded_bytes(track: &Path) -> Option<Vec<u8>> {
     best.map(|p| p.data().to_vec())
 }
 
+/// The cover image as it's stored, embedded or in the folder, undecoded:
+/// for handing to something that decodes it itself (the iPod).
+pub fn original_bytes(track: &Path) -> Option<Vec<u8>> {
+    if crate::remote::is_remote(track) {
+        return None;
+    }
+    match find(track)? {
+        Origin::Embedded(p) => embedded_bytes(&p),
+        Origin::File(p) => std::fs::read(p).ok(),
+    }
+}
+
 /// Find art for a track without decoding it.
 pub fn find(track: &Path) -> Option<Origin> {
     // Reading pictures means reading tags; cheap next to decoding audio.

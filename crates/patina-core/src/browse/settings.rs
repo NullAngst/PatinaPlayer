@@ -70,6 +70,15 @@ pub enum Key {
     LoveStars,
     /// Who scrobbles a server's songs.
     ServerScrobble(String),
+    /// Who tells ListenBrainz about a server's songs.
+    ServerListenBrainz(String),
+    /// The ListenBrainz user token.
+    LbToken,
+    /// Another server with the ListenBrainz API.
+    LbUrl,
+    LbScrobble,
+    /// Where the iPod's songs are converted to, when they need to be.
+    IpodFormat,
     LevelMode,
     /// Target loudness, LUFS.
     LevelTarget,
@@ -315,6 +324,8 @@ pub struct Live {
     pub measuring: Option<bool>,
     /// Last.fm's status; None without the library.
     pub lastfm: Option<crate::scrobble::ScrobbleStatus>,
+    /// ListenBrainz's status; None without the library.
+    pub listenbrainz: Option<crate::listenbrainz::LbStatus>,
     /// Devices the shared output can play to, as last looked up.
     pub outputs: Vec<OutDevice>,
 }
@@ -366,6 +377,7 @@ pub fn rows(
     let Live {
         measuring,
         lastfm,
+        listenbrainz,
         outputs,
     } = live;
     let lastfm = lastfm.as_ref();
@@ -483,6 +495,28 @@ pub fn rows(
                     },
                 },
             );
+            if listenbrainz.as_ref().is_some_and(|l| l.has_token) {
+                let mode = cfg.listenbrainz.mode(&sc.name);
+                push(
+                    "Servers",
+                    Setting {
+                        disabled: None,
+                        key: Key::ServerListenBrainz(sc.name.clone()),
+                        label: format!("{}: ListenBrainz", sc.name),
+                        help: "Who tells ListenBrainz about this server's songs. Pick the server if it sends them itself (Navidrome's ListenBrainz agent); both counts every play twice if it does.",
+                        control: Control::Choice {
+                            options: crate::config::ScrobbleMode::ALL
+                                .iter()
+                                .map(|m| (m.as_str().to_string(), m.label().to_string()))
+                                .collect(),
+                            index: crate::config::ScrobbleMode::ALL
+                                .iter()
+                                .position(|m| *m == mode)
+                                .unwrap_or(0),
+                        },
+                    },
+                );
+            }
             push(
                 "Servers",
                 Setting {
@@ -730,6 +764,89 @@ pub fn rows(
             },
         );
     }
+
+    // ListenBrainz
+    if let Some(st) = &listenbrainz {
+        let lb = &cfg.listenbrainz;
+        let mut label = if !st.user.is_empty() {
+            format!("Token · {}", st.user)
+        } else if st.has_token {
+            "Token · not checked yet".to_string()
+        } else {
+            "Token".to_string()
+        };
+        if st.waiting > 0 {
+            label.push_str(&format!(
+                " · {} listen{} waiting",
+                st.waiting,
+                if st.waiting == 1 { "" } else { "s" }
+            ));
+        }
+        if let Some(p) = &st.problem {
+            label.push_str(&format!(" · {p}"));
+        }
+        push(
+            "ListenBrainz",
+            Setting {
+                disabled: None,
+                key: Key::LbToken,
+                label,
+                help: "Your user token, from listenbrainz.org/settings. It's checked, then kept in your keyring. Clear it to stop.",
+                control: Control::Text {
+                    value: if st.has_token {
+                        "••••••••".into()
+                    } else {
+                        String::new()
+                    },
+                    empty: "not set",
+                },
+            },
+        );
+        push(
+            "ListenBrainz",
+            Setting {
+                disabled: None,
+                key: Key::LbScrobble,
+                label: "Send listens".into(),
+                help: "Now Playing and listens, by the same rules as Last.fm: half a song or four minutes. Radio follows Scrobble radio under Last.fm.",
+                control: Control::Toggle(lb.scrobble),
+            },
+        );
+        push(
+            "ListenBrainz",
+            Setting {
+                disabled: None,
+                key: Key::LbUrl,
+                label: "Server".into(),
+                help: "Another server with the ListenBrainz API, like a self-hosted ListenBrainz, Maloja or Koito. Leave it empty for listenbrainz.org.",
+                control: Control::Text {
+                    value: lb.url.clone(),
+                    empty: "api.listenbrainz.org",
+                },
+            },
+        );
+    }
+
+    // iPod
+    push(
+        "iPod",
+        Setting {
+            disabled: None,
+            key: Key::IpodFormat,
+            label: "Songs it can't play".into(),
+            help: "An iPod plays MP3, AAC, ALAC, WAV and AIFF. FLAC, Opus, Vorbis and the rest are converted with ffmpeg on the way. ALAC keeps them lossless; AAC and MP3 fit more on.",
+            control: Control::Choice {
+                options: crate::ipod::Target::ALL
+                    .iter()
+                    .map(|t| (t.as_str().to_string(), t.label().to_string()))
+                    .collect(),
+                index: crate::ipod::Target::ALL
+                    .iter()
+                    .position(|t| *t == cfg.ipod.target)
+                    .unwrap_or(0),
+            },
+        },
+    );
 
     // Appearance
     push(

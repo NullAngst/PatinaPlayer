@@ -249,6 +249,91 @@ pub extern "system" fn Java_dev_patina_player_Native_promptEdited<'local>(
     );
 }
 
+// ----- Android Auto -----
+
+/// Its own connection to the library, for the car's browsing: Android asks
+/// from its own thread, and SQLite in WAL mode lets this read alongside
+/// the app's.
+static AUTO_LIB: Mutex<Option<patina_core::library::Library>> = Mutex::new(None);
+
+fn auto_children(parent: &str) -> Vec<patina_core::browse::auto::AutoItem> {
+    let mut guard = AUTO_LIB.lock().unwrap();
+    if guard.is_none() {
+        match patina_core::library::Library::open(&patina_core::config::library_db_path()) {
+            Ok(l) => *guard = Some(l),
+            Err(e) => {
+                log::warn!("car browsing can't open the library: {e}");
+                return Vec::new();
+            }
+        }
+    }
+    guard
+        .as_ref()
+        .map(|l| patina_core::browse::auto::children(l, parent))
+        .unwrap_or_default()
+}
+
+/// The rows under a browse id, four strings each: id, title, subtitle,
+/// and "b", "p" or "bp" for browsable, playable or both.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    parent: JString<'local>,
+) -> jni::sys::jobjectArray {
+    let parent = opt_string(&mut env, &parent).unwrap_or_else(|| "root".into());
+    let items = auto_children(&parent);
+    let build = |env: &mut JNIEnv<'local>| -> jni::errors::Result<JObjectArray<'local>> {
+        let arr = env.new_object_array(
+            (items.len() * 4) as i32,
+            "java/lang/String",
+            JObject::null(),
+        )?;
+        for (i, it) in items.iter().enumerate() {
+            let flags = match (it.browsable, it.playable) {
+                (true, true) => "bp",
+                (true, false) => "b",
+                _ => "p",
+            };
+            for (j, text) in [
+                it.id.as_str(),
+                it.title.as_str(),
+                it.subtitle.as_str(),
+                flags,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let js = env.new_string(text)?;
+                env.set_object_array_element(&arr, (i * 4 + j) as i32, &js)?;
+                // Two hundred rows are eight hundred strings: let each go
+                // rather than fill the local reference table.
+                env.delete_local_ref(js)?;
+            }
+        }
+        Ok(arr)
+    };
+    match build(&mut env) {
+        Ok(a) => a.into_raw(),
+        Err(e) => {
+            log::warn!("couldn't hand the car its list: {e}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Play what the car picked, by its browse id. The window's loop plays it.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_patina_player_Native_playMediaId<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    id: JString<'local>,
+) {
+    if let Some(id) = opt_string(&mut env, &id) {
+        platform::play_media_id(id);
+    }
+}
+
 // ----- To Java -----
 
 /// Ask Java to open the system's picker, and wait for what comes back.

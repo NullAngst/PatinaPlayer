@@ -4,14 +4,17 @@
 //! library, the queue or the config. That's how the two stay identical.
 
 pub mod amp;
+pub mod auto;
 mod downloads;
 pub mod eq;
+pub mod ipod;
 pub mod lastfm;
 mod leveling;
 pub mod marks;
 mod mixes;
 pub mod model;
 pub mod offline;
+mod select;
 mod servers;
 pub mod settings;
 
@@ -34,6 +37,7 @@ use crate::track::MediaKind;
 use crate::{Command, Event, Player, TrackInfo};
 
 pub use model::*;
+pub use select::{NowPlaying, SmartCheck};
 pub use settings::{Change, Control, Key, Setting, SettingsInfo};
 
 /// A message for the person, shown however the frontend shows them.
@@ -96,6 +100,8 @@ pub struct Startup {
     pub level: Option<crate::level::LevelService>,
     /// Last.fm. None without the library, which holds the scrobble queue.
     pub scrobble: Option<crate::scrobble::ScrobbleService>,
+    /// ListenBrainz. None without the library, which holds its queue.
+    pub listenbrainz: Option<crate::listenbrainz::ListenBrainz>,
     /// The config as loaded. Settings edits it, and the file, together.
     pub config: Config,
     pub settings_info: SettingsInfo,
@@ -181,6 +187,14 @@ pub struct Browser {
     playing_rating: Option<(PathBuf, Option<u8>)>,
     lyrics: Option<marks::LyricsView>,
     lyrics_job: Option<marks::LyricsJob>,
+    /// Queue entries picked for a multiple selection.
+    pub queue_marks: Vec<crate::queue::EntryId>,
+    /// Where a range selection in the queue starts.
+    queue_anchor: Option<usize>,
+    /// ListenBrainz. None without the library or a token.
+    pub listenbrainz: Option<crate::listenbrainz::ListenBrainz>,
+    /// A connected iPod, as last looked for.
+    pub ipod: crate::ipod::IpodState,
 }
 
 fn plural(n: usize) -> &'static str {
@@ -284,6 +298,10 @@ impl Browser {
             playing_rating: None,
             lyrics: None,
             lyrics_job: None,
+            queue_marks: Vec::new(),
+            queue_anchor: None,
+            listenbrainz: s.listenbrainz,
+            ipod: crate::ipod::IpodState::default(),
         };
         b.rebuild_sidebar();
         b
@@ -328,6 +346,7 @@ impl Browser {
         self.poll_lastfm();
         self.poll_mixes();
         if queue_moved {
+            self.prune_queue_marks();
             self.feed_prefetch();
             self.feed_level();
             self.mix_tick();
@@ -337,6 +356,7 @@ impl Browser {
         self.eq_tick();
         self.amp_tick();
         self.poll_lyrics();
+        self.poll_ipod();
         if events.iter().any(|e| matches!(e, Event::Played(_))) {
             for s in Section::STATS {
                 self.refresh_section(s);
@@ -491,6 +511,9 @@ impl Browser {
                 });
             }
         }
+        if self.ipod_connected() {
+            entries.push(SideEntry::Section(Section::Ipod));
+        }
         if !entries.is_empty() {
             s.push(SideEntry::Gap);
             s.push(SideEntry::Label("Sources"));
@@ -612,6 +635,7 @@ impl Browser {
                 podcast_trim: self.podcast_trim,
                 measuring: self.measuring_library(),
                 lastfm: self.scrobble.as_ref().map(|s| s.status()),
+                listenbrainz: self.listenbrainz.as_ref().map(|l| l.status()),
                 outputs: &self.outputs,
             },
             stations: &self.stations,
@@ -620,19 +644,14 @@ impl Browser {
             cache: self.cache.as_ref().map(|_| &self.cache_status),
             eq: &self.eq,
             amp: &self.amp,
+            ipod: self.ipod_view(),
         }
     }
 
     fn build(&mut self, src: &Source) -> Option<Level> {
         match build(&self.ctx(), src) {
             Ok((title, items)) => {
-                let mut l = Level {
-                    title,
-                    source: src.clone(),
-                    items,
-                    selected: 0,
-                    offset: 0,
-                };
+                let mut l = Level::new(title, src.clone(), items);
                 // Start on content, not on a button like "Pause downloads"
                 // that Enter would press by accident.
                 l.selected = l
@@ -764,6 +783,11 @@ impl Browser {
             Ok((title, items)) => {
                 level.title = title;
                 level.items = items;
+                if !level.marked.is_empty() {
+                    let keys: std::collections::HashSet<String> =
+                        level.items.iter().map(Item::key).collect();
+                    level.marked.retain(|k| keys.contains(k));
+                }
                 level.selected = key
                     .and_then(|k| level.items.iter().position(|i| i.key() == k))
                     .unwrap_or(old_sel);
@@ -842,10 +866,13 @@ impl Browser {
     }
 
     fn selection_tracks(&self) -> Vec<TrackRow> {
-        match (&self.lib, self.selected_item()) {
-            (Some(lib), Some(item)) => tracks_of(lib, &item, &self.prefs),
-            _ => Vec::new(),
-        }
+        let Some(lib) = &self.lib else {
+            return Vec::new();
+        };
+        self.selection_items()
+            .iter()
+            .flat_map(|item| tracks_of(lib, item, &self.prefs))
+            .collect()
     }
 
     /// Enter on the selected row: open it, or play it in context.
@@ -1008,6 +1035,9 @@ impl Browser {
     /// album, a folder, an artist). Songs, stations and episodes play the
     /// way Enter plays them.
     pub fn play_selection(&mut self) -> Activated {
+        if self.marked_count() > 0 {
+            return self.play_marked();
+        }
         let Some(item) = self.selected_item() else {
             return Activated::Nothing;
         };
@@ -1036,10 +1066,16 @@ impl Browser {
     /// Add the selection to the queue, at the end or right after the
     /// current track.
     pub fn add_selected_to_queue(&mut self, next: bool) {
-        let Some(item) = self.selected_item() else {
+        let items = self.selection_items();
+        if items.is_empty() {
             return;
-        };
-        let infos = self.playable(infos_of(self.lib.as_ref(), &item, &self.prefs));
+        }
+        let infos = self.playable(
+            items
+                .iter()
+                .flat_map(|item| infos_of(self.lib.as_ref(), item, &self.prefs))
+                .collect(),
+        );
         if infos.is_empty() {
             if self.avail.any_offline() {
                 self.note(UNREACHABLE);
@@ -1192,6 +1228,18 @@ impl Browser {
         if sel >= uris.len() {
             return;
         }
+        if remove && !level.marked.is_empty() {
+            let keep: Vec<Vec<u8>> = level
+                .items
+                .iter()
+                .filter(|i| matches!(i, Item::Track(_) | Item::Missing { .. }))
+                .zip(uris)
+                .filter(|(i, _)| !level.marked.contains(&i.key()))
+                .map(|(_, u)| u)
+                .collect();
+            let gone = level.items.len() - keep.len();
+            return self.store_playlist(id, keep, sel, Some(gone));
+        }
         let new_sel = if remove {
             uris.remove(sel);
             sel.min(uris.len().saturating_sub(1))
@@ -1204,6 +1252,18 @@ impl Browser {
             uris.insert(to, u);
             to
         };
+        self.store_playlist(id, uris, new_sel, None);
+    }
+
+    /// Save a playlist's new order (or what's left of it), on the server
+    /// too for a server playlist, and redraw it.
+    pub(super) fn store_playlist(
+        &mut self,
+        id: i64,
+        uris: Vec<Vec<u8>>,
+        new_sel: usize,
+        removed: Option<usize>,
+    ) {
         if let Some(lib) = self.lib.as_mut()
             && let Err(e) = lib.set_playlist_items(id, &uris)
         {
@@ -1212,7 +1272,14 @@ impl Browser {
         self.push_server_playlist(id, &uris);
         self.refresh_current();
         if let Some(l) = self.level_mut() {
-            l.selected = new_sel;
+            l.selected = l.snap(new_sel.min(l.items.len().saturating_sub(1)), 1);
+            if removed.is_some() {
+                l.marked.clear();
+                l.anchor = None;
+            }
+        }
+        if let Some(n) = removed {
+            self.note(format!("Took {} out of the playlist", count(n)));
         }
         // The Playlists list shows item counts.
         if self
@@ -1475,7 +1542,7 @@ impl Browser {
     /// one: turning bit-perfect on takes the sound card away from other
     /// apps.
     pub fn setting_warning(&self, key: &Key, change: &Change) -> Option<&'static str> {
-        if let Key::ServerScrobble(_) = key {
+        if let Key::ServerScrobble(_) | Key::ServerListenBrainz(_) = key {
             let s = self.settings_row(key)?;
             return match settings::stepped(&s.control, change)? {
                 Control::Choice { options, index } if options[index].0 == "both" => {
@@ -1505,6 +1572,7 @@ impl Browser {
             settings::Live {
                 measuring: self.measuring_library(),
                 lastfm: self.scrobble.as_ref().map(|s| s.status()),
+                listenbrainz: self.listenbrainz.as_ref().map(|l| l.status()),
                 outputs: self.outputs.clone(),
             },
         )
@@ -1709,9 +1777,14 @@ impl Browser {
                     | Key::Scrobble
                     | Key::ScrobbleRadio
                     | Key::LoveStars
-                    | Key::ServerScrobble(_),
+                    | Key::ServerScrobble(_)
+                    | Key::ServerListenBrainz(_)
+                    | Key::LbToken
+                    | Key::LbUrl
+                    | Key::LbScrobble,
                     _,
                 ) => self.change_lastfm_setting(key, &new)?,
+                (Key::IpodFormat, _) => self.change_ipod_setting(&new)?,
                 (Key::Limiter | Key::LimiterCeiling, _) => self.change_limiter(key, &new)?,
                 (
                     Key::ChannelOn

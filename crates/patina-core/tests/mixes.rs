@@ -316,6 +316,7 @@ fn saved_mixes_play_again_and_show_in_the_sidebar() {
         mixes: Some(MixService::start_with(&db, None).unwrap()),
         level: None,
         scrobble: None,
+        listenbrainz: None,
         config: Config::default(),
         settings_info: SettingsInfo {
             db_path: db.clone(),

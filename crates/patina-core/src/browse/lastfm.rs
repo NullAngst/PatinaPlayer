@@ -21,7 +21,7 @@ use crate::track::{MediaKind, TrackInfo};
 /// A radio title is scrobbled once it's been on this long.
 pub const RADIO_AFTER: Duration = Duration::from_secs(60);
 
-pub const BOTH_WARNING: &str = "If this server scrobbles to Last.fm too (Navidrome with its Last.fm agent does), every play will count twice. Only pick both if you know the server doesn't.";
+pub const BOTH_WARNING: &str = "If this server passes plays on itself too (Navidrome's Last.fm and ListenBrainz agents do), every play will count twice. Only pick both if you know the server doesn't.";
 
 /// The song a station is playing, for scrobbling it.
 #[derive(Debug, Clone)]
@@ -98,17 +98,44 @@ impl Browser {
         }
     }
 
-    /// Whether the song's server is told it played.
+    fn lb_live(&self) -> bool {
+        self.config.listenbrainz.scrobble && self.listenbrainz.as_ref().is_some_and(|l| l.live())
+    }
+
+    /// Whether the app sends this song to ListenBrainz.
+    fn app_listens(&self, info: &TrackInfo) -> bool {
+        if !self.lb_live() {
+            return false;
+        }
+        match &info.remote {
+            None => true,
+            Some(r) => matches!(
+                self.config.listenbrainz.mode(&r.server),
+                ScrobbleMode::App | ScrobbleMode::Both
+            ),
+        }
+    }
+
+    /// Whether the song's server is told it played. Last.fm decides as it
+    /// always has; ListenBrainz adds the server when it's set to have the
+    /// server pass plays on, so one service set to the server never stops
+    /// the other from getting them.
     fn server_reports(&self, info: &TrackInfo) -> bool {
         let Some(r) = &info.remote else { return false };
         if r.episode {
             return false;
         }
         let app_live = self.config.lastfm.scrobble && self.linked();
-        match self.config.lastfm.mode(&r.server) {
+        let lastfm = match self.config.lastfm.mode(&r.server) {
             ScrobbleMode::Server | ScrobbleMode::Both => true,
             ScrobbleMode::App => !app_live,
-        }
+        };
+        let lb = self.lb_live()
+            && matches!(
+                self.config.listenbrainz.mode(&r.server),
+                ScrobbleMode::Server | ScrobbleMode::Both
+            );
+        lastfm || lb
     }
 
     fn report_to_server(&self, info: &TrackInfo, at: i64, submission: bool) {
@@ -146,6 +173,11 @@ impl Browser {
                     {
                         svc.scrobble(p);
                     }
+                    if self.app_listens(info)
+                        && let (Some(lb), Some(p)) = (&self.listenbrainz, play_of(info, *started))
+                    {
+                        lb.listen(p);
+                    }
                     if self.server_reports(info) {
                         self.report_to_server(info, *started, true);
                     }
@@ -168,6 +200,11 @@ impl Browser {
         {
             svc.now_playing(p);
         }
+        if self.app_listens(info)
+            && let (Some(lb), Some(p)) = (&self.listenbrainz, play_of(info, now))
+        {
+            lb.now_playing(p);
+        }
         if self.server_reports(info) {
             self.report_to_server(info, now, false);
         }
@@ -188,7 +225,9 @@ impl Browser {
     /// once it's been on a minute.
     fn radio_title(&mut self, title: &str) {
         self.radio_song = None;
-        if !self.config.lastfm.scrobble_radio || !self.config.lastfm.scrobble {
+        if !self.config.lastfm.scrobble_radio
+            || !(self.config.lastfm.scrobble || self.config.listenbrainz.scrobble)
+        {
             return;
         }
         let playing_radio = self
@@ -204,6 +243,13 @@ impl Browser {
         };
         if let Some(svc) = self.scrobble.as_ref().filter(|_| self.linked()) {
             svc.now_playing(Play {
+                artist: artist.clone(),
+                track: track.clone(),
+                ..Default::default()
+            });
+        }
+        if let Some(lb) = self.listenbrainz.as_ref().filter(|_| self.lb_live()) {
+            lb.now_playing(Play {
                 artist: artist.clone(),
                 track: track.clone(),
                 ..Default::default()
@@ -234,10 +280,14 @@ impl Browser {
                 timestamp: r.started,
                 ..Default::default()
             };
+            if let Some(lb) = self.listenbrainz.as_ref().filter(|_| self.lb_live()) {
+                lb.listen(p.clone());
+            }
             if let Some(svc) = self.scrobble.as_ref().filter(|_| self.linked()) {
                 svc.scrobble(p);
             }
         }
+        self.poll_listenbrainz();
         let Some(svc) = &self.scrobble else { return };
         let events: Vec<ScrobbleEvent> = svc.events().try_iter().collect();
         for ev in events {
@@ -448,6 +498,44 @@ impl Browser {
                 w(config::set_scrobble_mode(&path, name, m))?;
                 self.config.lastfm.servers.insert(name.clone(), m);
             }
+            (Key::ServerListenBrainz(name), Control::Choice { options, index }) => {
+                let m: ScrobbleMode = options[*index].0.parse().unwrap_or_default();
+                w(config::set_listenbrainz_mode(&path, name, m))?;
+                self.config.listenbrainz.servers.insert(name.clone(), m);
+            }
+            (Key::LbToken, Control::Text { value, .. }) => {
+                let Some(lb) = &self.listenbrainz else {
+                    return Err("ListenBrainz needs the library (for the listen queue)".into());
+                };
+                // The row shows dots for a saved token; typing them back
+                // isn't a new token.
+                if value.chars().all(|c| c == '•') && !value.is_empty() {
+                    return Ok(());
+                }
+                lb.set_token(value);
+                if value.trim().is_empty() {
+                    w(config::set_value(&path, "listenbrainz", "user", ""))?;
+                    self.config.listenbrainz.user.clear();
+                } else {
+                    self.note("Checking the token with ListenBrainz…");
+                }
+            }
+            (Key::LbUrl, Control::Text { value, .. }) => {
+                w(config::set_value(
+                    &path,
+                    "listenbrainz",
+                    "url",
+                    value.trim(),
+                ))?;
+                self.config.listenbrainz.url = value.trim().to_string();
+                if let Some(lb) = &self.listenbrainz {
+                    lb.set_url(value);
+                }
+            }
+            (Key::LbScrobble, Control::Toggle(on)) => {
+                w(config::set_value(&path, "listenbrainz", "scrobble", *on))?;
+                self.config.listenbrainz.scrobble = *on;
+            }
             _ => return Ok(()),
         }
         if matches!(key, Key::LastFmKey | Key::LastFmSecret)
@@ -456,5 +544,39 @@ impl Browser {
             svc.setup(self.lastfm_setup());
         }
         Ok(())
+    }
+
+    /// What the ListenBrainz thread reports.
+    fn poll_listenbrainz(&mut self) {
+        let Some(lb) = &self.listenbrainz else { return };
+        let events: Vec<crate::listenbrainz::LbEvent> = lb.events().try_iter().collect();
+        for ev in events {
+            use crate::listenbrainz::LbEvent;
+            match ev {
+                LbEvent::Valid(user) => {
+                    let path = self.config_path.clone();
+                    let _ = config::set_value(&path, "listenbrainz", "user", user.as_str());
+                    let _ = config::set_value(&path, "listenbrainz", "scrobble", true);
+                    let fresh = self.config.listenbrainz.user != user;
+                    self.config.listenbrainz.user = user.clone();
+                    self.config.listenbrainz.scrobble = true;
+                    if fresh {
+                        self.note(format!("ListenBrainz takes the token, for {user}"));
+                    }
+                }
+                LbEvent::Invalid(why) => {
+                    let _ = config::set_value(&self.config_path, "listenbrainz", "user", "");
+                    self.config.listenbrainz.user.clear();
+                    if why.is_empty() {
+                        self.note("Forgot the ListenBrainz token");
+                    } else {
+                        self.error(why);
+                    }
+                }
+                LbEvent::Error(e) => self.error(e),
+            }
+            self.refresh_section(super::Section::Settings);
+            self.touch();
+        }
     }
 }

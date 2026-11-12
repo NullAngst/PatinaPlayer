@@ -15,6 +15,7 @@ import android.graphics.drawable.Icon;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.MediaDescription;
 import android.media.MediaMetadata;
 import android.media.browse.MediaBrowser;
 import android.media.session.MediaSession;
@@ -37,8 +38,10 @@ import java.util.List;
  * It's a MediaBrowserService so Android Auto takes it for a music app and
  * drives its session: next and previous on the car's screen and wheel
  * buttons, instead of the generic controls (seek back and forward) it
- * gives an app it doesn't know. The browse tree is empty: the car shows
- * what's playing and the controls; picking music is done on the phone.
+ * gives an app it doesn't know. The car browses Favorites, Playlists,
+ * Smart playlists, Recently played, saved Mixes and recently added
+ * albums; the tree comes from the Rust library (patina_core::browse::auto)
+ * and picking a song there plays its list from that song.
  */
 public class PlaybackService extends MediaBrowserService {
     private static final String CHANNEL = "playback";
@@ -84,6 +87,7 @@ public class PlaybackService extends MediaBrowserService {
         title = t; artist = ar; album = al; artPath = artFile;
         duration = durMs; position = posMs; positionAt = SystemClock.elapsedRealtime();
         state = st;
+        NowPlayingWidget.show(ctx, t, ar, artFile, st);
         if (running != null) {
             running.refresh();
         } else if (st == Native.PLAYING || (wasStopped && st == Native.PAUSED)) {
@@ -99,6 +103,7 @@ public class PlaybackService extends MediaBrowserService {
 
     static void stop(Context ctx) {
         state = Native.STOPPED;
+        NowPlayingWidget.show(ctx, title, artist, artPath, Native.STOPPED);
         if (running != null) {
             running.stopForeground(STOP_FOREGROUND_REMOVE);
             running.stopSelf();
@@ -128,6 +133,12 @@ public class PlaybackService extends MediaBrowserService {
             // skip buttons. The app has no seeking by steps, so they skip.
             @Override public void onFastForward() { Native.command(Native.NEXT, 0); }
             @Override public void onRewind() { Native.command(Native.BACK, 0); }
+            // Picked in the car's browse list.
+            @Override public void onPlayFromMediaId(String id, Bundle extras) {
+                if (Native.ready() && id != null) {
+                    Native.playMediaId(id);
+                }
+            }
         });
         Bundle extras = new Bundle();
         extras.putBoolean(RESERVE_NEXT, true);
@@ -210,6 +221,7 @@ public class PlaybackService extends MediaBrowserService {
             .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
                 | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_SKIP_TO_NEXT
                 | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_STOP
+                | PlaybackState.ACTION_PLAY_FROM_MEDIA_ID
                 | (duration > 0 ? PlaybackState.ACTION_SEEK_TO : 0))
             .setState(ps, position, state == Native.PLAYING ? 1f : 0f, positionAt)
             .build());
@@ -291,7 +303,50 @@ public class PlaybackService extends MediaBrowserService {
 
     @Override
     public void onLoadChildren(String parentId, Result<List<MediaBrowser.MediaItem>> result) {
-        // Nothing to browse in the car: music is picked on the phone.
-        result.sendResult(new ArrayList<>());
+        if (!Native.ready()) {
+            // The app hasn't been opened since the phone started: there's no
+            // player to browse yet.
+            List<MediaBrowser.MediaItem> none = new ArrayList<>();
+            if (ROOT.equals(parentId)) {
+                none.add(new MediaBrowser.MediaItem(new MediaDescription.Builder()
+                    .setMediaId("closed")
+                    .setTitle("Open PatinaPlayer on the phone")
+                    .setSubtitle("Its library shows here once it's running")
+                    .build(), 0));
+            }
+            result.sendResult(none);
+            return;
+        }
+        // The library is read off the main thread; a big smart playlist
+        // takes a moment.
+        result.detach();
+        new Thread(() -> {
+            List<MediaBrowser.MediaItem> items = new ArrayList<>();
+            String[] raw = null;
+            try {
+                raw = Native.browse(ROOT.equals(parentId) ? "root" : parentId);
+            } catch (Throwable t) {
+                raw = null;
+            }
+            if (raw != null) {
+                for (int i = 0; i + 3 < raw.length; i += 4) {
+                    MediaDescription.Builder d = new MediaDescription.Builder()
+                        .setMediaId(raw[i])
+                        .setTitle(raw[i + 1]);
+                    if (raw[i + 2] != null && !raw[i + 2].isEmpty()) {
+                        d.setSubtitle(raw[i + 2]);
+                    }
+                    int flags = 0;
+                    if (raw[i + 3] != null && raw[i + 3].contains("b")) {
+                        flags |= MediaBrowser.MediaItem.FLAG_BROWSABLE;
+                    }
+                    if (raw[i + 3] != null && raw[i + 3].contains("p")) {
+                        flags |= MediaBrowser.MediaItem.FLAG_PLAYABLE;
+                    }
+                    items.add(new MediaBrowser.MediaItem(d.build(), flags));
+                }
+            }
+            result.sendResult(items);
+        }, "patina-car-browse").start();
     }
 }

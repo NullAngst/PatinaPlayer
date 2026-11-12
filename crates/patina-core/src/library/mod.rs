@@ -5,14 +5,17 @@
 //! thread opens its own; SQLite in WAL mode lets readers run while the
 //! scanner writes. [`service::LibraryService`] owns scanning and watching.
 
+pub mod history;
 pub mod loudness;
 pub mod marks;
 pub mod mixes;
+pub mod playlist_io;
 pub mod podcasts;
 pub mod scan;
 mod schema;
 pub mod scrobbles;
 pub mod service;
+pub mod smart;
 pub mod tags;
 
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -318,18 +321,21 @@ pub enum AlbumSort {
     Year,
     RecentlyAdded,
     MostPlayed,
+    /// The album with a song played most lately first.
+    RecentlyPlayed,
     /// Your rating, highest first.
     Rating,
     Random,
 }
 
 impl AlbumSort {
-    pub const ALL: [AlbumSort; 7] = [
+    pub const ALL: [AlbumSort; 8] = [
         AlbumSort::Name,
         AlbumSort::Artist,
         AlbumSort::Year,
         AlbumSort::RecentlyAdded,
         AlbumSort::MostPlayed,
+        AlbumSort::RecentlyPlayed,
         AlbumSort::Rating,
         AlbumSort::Random,
     ];
@@ -340,6 +346,7 @@ impl AlbumSort {
             AlbumSort::Year => "year",
             AlbumSort::RecentlyAdded => "recently added",
             AlbumSort::MostPlayed => "most played",
+            AlbumSort::RecentlyPlayed => "recently played",
             AlbumSort::Rating => "rating",
             AlbumSort::Random => "random",
         }
@@ -357,6 +364,11 @@ impl AlbumSort {
             }
             AlbumSort::RecentlyAdded => "added_at DESC, name COLLATE NOCASE",
             AlbumSort::MostPlayed => "play_count DESC, name COLLATE NOCASE",
+            AlbumSort::RecentlyPlayed => {
+                "(SELECT MAX(last_played) FROM tracks t WHERE t.album_key = albums.key) IS NULL, \
+                 (SELECT MAX(last_played) FROM tracks t WHERE t.album_key = albums.key) DESC, \
+                 name COLLATE NOCASE"
+            }
             AlbumSort::Rating => {
                 "COALESCE((SELECT stars FROM album_ratings WHERE album_ratings.key = albums.key), 0) DESC, \
                  artist COLLATE NOCASE, name COLLATE NOCASE"
@@ -376,12 +388,13 @@ pub enum SongSort {
     Duration,
     RecentlyAdded,
     MostPlayed,
+    RecentlyPlayed,
     /// Your rating, highest first.
     Rating,
 }
 
 impl SongSort {
-    pub const ALL: [SongSort; 8] = [
+    pub const ALL: [SongSort; 9] = [
         SongSort::Title,
         SongSort::Artist,
         SongSort::Album,
@@ -389,6 +402,7 @@ impl SongSort {
         SongSort::Duration,
         SongSort::RecentlyAdded,
         SongSort::MostPlayed,
+        SongSort::RecentlyPlayed,
         SongSort::Rating,
     ];
     pub fn label(self) -> &'static str {
@@ -400,6 +414,7 @@ impl SongSort {
             SongSort::Duration => "length",
             SongSort::RecentlyAdded => "recently added",
             SongSort::MostPlayed => "most played",
+            SongSort::RecentlyPlayed => "recently played",
             SongSort::Rating => "rating",
         }
     }
@@ -426,6 +441,10 @@ impl SongSort {
             SongSort::MostPlayed => {
                 format!("play_count{}, {title}", if desc { "" } else { " DESC" })
             }
+            SongSort::RecentlyPlayed => format!(
+                "last_played IS NULL, last_played{}, {title}",
+                if desc { "" } else { " DESC" }
+            ),
             SongSort::Rating => format!(
                 "COALESCE((SELECT stars FROM song_ratings WHERE song_ratings.path = tracks.path), 0){}, \
                  artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no",
@@ -588,6 +607,29 @@ impl Library {
                     .optional()?)
             })
             .collect()
+    }
+
+    /// The file a server song is kept in here, cached or pinned, if it is.
+    pub fn cached_file(&self, server: &str, id: &str) -> Option<PathBuf> {
+        let file: Vec<u8> = self
+            .conn
+            .query_row(
+                "SELECT file FROM cached WHERE server = ?1 AND song_id = ?2",
+                params![server, id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        let p = bytes_path(file);
+        // Stored relative to its tier's folder, or whole.
+        if p.is_absolute() {
+            return Some(p);
+        }
+        [crate::cache::offline_root(), crate::cache::cache_root()]
+            .into_iter()
+            .map(|root| root.join(&p))
+            .find(|f| f.is_file())
     }
 
     /// The source row for a root, local or server.
@@ -893,11 +935,14 @@ impl Library {
     // ----- Play counts -----
 
     pub fn record_play(&self, path: &Path) -> Result<()> {
+        let at = now_secs();
         let n = self.conn.execute(
             "UPDATE tracks SET play_count = play_count + 1, last_played = ?2 WHERE path = ?1",
-            params![path_bytes(path), now_secs()],
+            params![path_bytes(path), at],
         )?;
         if n > 0 {
+            let uri = self.uri_for_path(path)?;
+            self.log_play(&uri, at)?;
             self.conn.execute(
                 "UPDATE albums SET play_count = play_count + 1 \
                  WHERE key = (SELECT album_key FROM tracks WHERE path = ?1)",

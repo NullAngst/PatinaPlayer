@@ -24,7 +24,9 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, Vec
 use crate::art::{ArtCache, LARGE, Req, THUMB};
 use crate::desktop::Action;
 use crate::platform::{self, Picked, Prompt, PromptEvent, PromptField};
-use crate::{AmpKnob, AmpUnit, AppWindow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem, Ui};
+use crate::{
+    AmpKnob, AmpUnit, AppWindow, ChainRow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem, Ui,
+};
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
 use patina_core::library::HEARTED;
@@ -53,6 +55,15 @@ enum Dlg {
     RenameServer(String),
     /// Picking one of the DLNA servers a search found.
     Dlna(Vec<patina_core::remote::dlna::Found>),
+    /// A new smart playlist: its name and its query.
+    SmartNew,
+    /// Changing one.
+    SmartEdit(i64),
+    /// Where to write a playlist file: the selection's (false) or the
+    /// queue's (true).
+    Export(bool),
+    /// The path of a playlist file to read, when there's no file picker.
+    ImportPath,
     /// The paths, the servers offering "New playlist on…", the playlists.
     Pick(Vec<PathBuf>, Vec<String>, Vec<PlaylistRow>),
     /// Naming a new playlist on a server.
@@ -72,6 +83,8 @@ enum Confirm {
     RemoveServer(String),
     ClearCache,
     DeleteMix(i64),
+    DeleteSmart(i64),
+    IpodRemove(patina_core::browse::ipod::IpodRow),
 }
 
 pub struct State {
@@ -147,6 +160,19 @@ pub struct State {
     /// Closing the window hides it (there's a tray icon to come back
     /// from, and the setting says so). Read by the close handler.
     hide_on_close: Rc<std::cell::Cell<bool>>,
+    /// Taps pick rows instead of opening them: a phone, after Select.
+    marking: bool,
+    queue_marking: bool,
+    /// A playlist row, or a queue entry, lifted to move by a tap on its
+    /// handle (a phone), waiting for a tap on where it goes.
+    lifted: Option<usize>,
+    queue_lifted: Option<usize>,
+    /// The Now Playing page's sound chain.
+    np_chain: Rc<VecModel<ChainRow>>,
+    /// A playlist file being picked to import.
+    import_pick: Option<(crossbeam_channel::Receiver<Picked>, Instant)>,
+    /// Rows were picked or let go of: their marks need redrawing.
+    marks_dirty: bool,
 }
 
 const HELP: &str = "Space        play / pause
@@ -216,6 +242,8 @@ fn jp_section(s: Section) -> &'static str {
         Section::MostListened => "いちばん",
         Section::TopAlbums => "ベスト",
         Section::TopArtists => "スター",
+        Section::History => "さいきん",
+        Section::Ipod => "アイポッド",
     }
 }
 
@@ -303,6 +331,13 @@ impl State {
             desktop,
             back_out: None,
             hide_on_close,
+            marking: false,
+            queue_marking: false,
+            lifted: None,
+            queue_lifted: None,
+            np_chain: Rc::new(VecModel::default()),
+            import_pick: None,
+            marks_dirty: false,
         }
     }
 
@@ -568,6 +603,19 @@ impl State {
                 r.right = ss(if m.kind == "genre" { "" } else { "endless" });
                 r.playing = self.b.mix.as_ref().and_then(|x| x.saved) == Some(m.id);
             }
+            Item::Smart(p) => {
+                r.kind = 17;
+                r.title = ss(&p.name);
+                r.sub = ss(&p.query);
+                r.dim = false;
+                r.right = ss(format!("{} track{}", p.items, s_(p.items)));
+            }
+            Item::Ipod(row) => {
+                r.kind = 18;
+                r.num = SharedString::new();
+                r.title = ss(&row.label);
+                r.sub = ss(&row.detail);
+            }
         }
         r.off = r.off || !self.b.plays(item);
         r.can_mix = self.b.can_mix(item) && !matches!(item, Item::Mix(_));
@@ -615,6 +663,9 @@ impl State {
                     "Keep offline".into()
                 },
             ));
+        }
+        if self.b.ipod_connected() && self.b.can_play_view() {
+            acts.push(("ipod", "Send to iPod".into()));
         }
         if self.b.can_play_view() && !acts.iter().any(|(a, _)| *a == "play") {
             acts.splice(
@@ -697,9 +748,22 @@ impl State {
             (Section::Playlists, Some(Source::Section(_))) => (
                 0,
                 vec!["", "Playlist", "", "", "Tracks"],
-                vec![("new", "New playlist".into())],
+                vec![
+                    ("new", "New playlist".into()),
+                    ("new-smart", "New smart playlist".into()),
+                    ("import", "Import…".into()),
+                ],
             ),
-            (_, Some(Source::Playlist { .. })) => (0, tracks_cols, vec![]),
+            (_, Some(Source::Playlist { .. })) => {
+                (0, tracks_cols, vec![("export", "Export…".into())])
+            }
+            (_, Some(Source::Smart { .. })) => (
+                0,
+                tracks_cols,
+                vec![("smart-edit", "Edit".into()), ("export", "Export…".into())],
+            ),
+            (Section::History, _) => (0, tracks_cols, vec![]),
+            (Section::Ipod, _) => (0, vec![], vec![]),
             (Section::Radio, _) => (
                 0,
                 vec!["", "Station", "Last test", "", ""],
@@ -741,6 +805,12 @@ impl State {
             Some(Source::Playlist { .. }) => "Empty. Right-click anything and choose Add to playlist.".into(),
             Some(Source::Section(Section::Radio)) => "No stations yet. Add one with New station: a name, then its stream or playlist URL.".into(),
             Some(Source::Section(Section::Podcasts)) => "No podcasts yet. Subscribe with a feed URL.".into(),
+            Some(Source::Section(Section::History)) => {
+                "Nothing played yet. Songs land here once they count as played: half of one, or four minutes of it.".into()
+            }
+            Some(Source::Smart { .. }) => {
+                "Nothing in the library matches this smart playlist right now. Edit changes what it looks for.".into()
+            }
             Some(Source::Section(Section::MostListened | Section::TopAlbums | Section::TopArtists)) => {
                 "Nothing played yet. A song counts once you've heard half of it, or four minutes of it, whichever comes first.".into()
             }
@@ -802,7 +872,9 @@ impl State {
         };
         let ctx = match self.b.level().map(|l| &l.source) {
             Some(Source::Album { .. }) => RowCtx::Album,
-            Some(Source::Section(s)) if Section::STATS.contains(s) => RowCtx::Ranked,
+            Some(Source::Section(s)) if Section::STATS.contains(s) && *s != Section::History => {
+                RowCtx::Ranked
+            }
             _ => RowCtx::Plain,
         };
         // Numbers count within each headed group, so search results read
@@ -816,6 +888,8 @@ impl State {
             .collect();
         self.fav_keys = fav_keys;
         let playing = self.playing_path();
+        let marked: std::collections::HashSet<String> =
+            self.b.level().map(|l| l.marked.clone()).unwrap_or_default();
         let rows: Vec<Row> = items
             .iter()
             .map(|it| {
@@ -824,9 +898,25 @@ impl State {
                 } else {
                     n += 1;
                 }
-                self.row(it, n.max(1) - 1, ctx, playing.as_deref())
+                let mut r = self.row(it, n.max(1) - 1, ctx, playing.as_deref());
+                r.marked = !marked.is_empty() && marked.contains(&it.key());
+                r
             })
             .collect();
+        ui.set_marked_count(self.b.marked_count() as i32);
+        if self.b.marked_count() == 0 && !is_touch(ui) {
+            self.marking = false;
+        }
+        ui.set_marking(self.marking);
+        let draggable = self.b.in_playlist().is_some_and(|id| {
+            id != HEARTED && !self.b.playlists().iter().any(|p| p.id == id && p.readonly)
+        });
+        ui.set_draggable(draggable);
+        if !draggable {
+            self.lifted = None;
+        }
+        ui.set_lifted(self.lifted.map(|i| i as i32).unwrap_or(-1));
+        ui.set_ipod(self.b.ipod_connected());
         // Songs in a list don't show covers; everything else that has one does.
         let row_art: Vec<Option<Req>> = items
             .iter()
@@ -952,7 +1042,10 @@ impl State {
             .map(|e| match e {
                 SideEntry::Section(s) => SideItem {
                     kind: 0,
-                    label: ss(s.label()),
+                    label: ss(match s {
+                        Section::Ipod => self.b.ipod_name().unwrap_or_else(|| "iPod".into()),
+                        _ => s.label().to_string(),
+                    }),
                     sub: ss(if kawaii { jp_section(*s) } else { "" }),
                     icon: match s {
                         Section::Folders => icons.get_folders(),
@@ -971,6 +1064,8 @@ impl State {
                         Section::MostListened => icons.get_most_listened(),
                         Section::TopAlbums => icons.get_top_albums(),
                         Section::TopArtists => icons.get_top_artists(),
+                        Section::History => icons.get_history(),
+                        Section::Ipod => icons.get_ipod(),
                     },
                     active: *s == self.b.section,
                     count: ss(if *s == Section::Queue {
@@ -1095,13 +1190,18 @@ impl State {
                 if cur == Some(id) {
                     current = pos as i32;
                 }
-                infos.push((e.info.clone(), cur == Some(id), e.failed));
+                infos.push((
+                    e.info.clone(),
+                    cur == Some(id),
+                    e.failed,
+                    self.b.queue_marks.contains(&id),
+                ));
             }
             (infos, current, total)
         };
         let rows_art: Vec<Option<Req>> = rows
             .iter()
-            .map(|(info, _, _)| {
+            .map(|(info, _, _, _)| {
                 (info.kind == MediaKind::File && !info.path.as_os_str().is_empty())
                     .then(|| Req::Track(info.path.clone()))
             })
@@ -1109,12 +1209,13 @@ impl State {
         let n = rows.len();
         let models: Vec<QueueRow> = rows
             .into_iter()
-            .map(|(info, playing, failed)| QueueRow {
+            .map(|(info, playing, failed, marked)| QueueRow {
                 off: !self.b.avail.info_plays(&info),
                 title: ss(info.display_title()),
                 sub: ss(sub_line(&info)),
                 playing,
                 failed,
+                marked,
                 ..Default::default()
             })
             .collect();
@@ -1147,6 +1248,15 @@ impl State {
         self.queue_sel = self.queue_sel.min(n.saturating_sub(1));
         ui.set_queue_sel(if n == 0 { -1 } else { self.queue_sel as i32 });
         ui.set_queue_current(current);
+        ui.set_queue_marked_count(self.b.queue_marks.len() as i32);
+        if self.b.queue_marks.is_empty() && !is_touch(ui) {
+            self.queue_marking = false;
+        }
+        ui.set_queue_marking(self.queue_marking);
+        if self.queue_lifted.is_some_and(|i| i >= n) {
+            self.queue_lifted = None;
+        }
+        ui.set_queue_lifted(self.queue_lifted.map(|i| i as i32).unwrap_or(-1));
         ui.set_queue_summary(ss(match (n, self.b.mix_title()) {
             (0, _) => String::new(),
             (_, Some(mix)) => format!("{mix} · {n} track{} so far", s_(n as i64)),
@@ -1159,6 +1269,9 @@ impl State {
         // position.
         ui.set_np_rating(self.b.playing_rating().map(i32::from).unwrap_or(-1));
         self.sync_lyrics(ui);
+        if ui.get_np_open() {
+            self.sync_now_playing(ui);
+        }
         let s = &self.snap;
         let track = s.track.clone();
         ui.set_has_track(track.is_some());
@@ -1325,6 +1438,11 @@ impl State {
         self.desktop_tick(ui);
         self.poll_folder_pick();
         self.poll_eq_pick(ui);
+        self.poll_import_pick(ui);
+        for id in platform::take_media_ids() {
+            self.b.auto_play(&id);
+            self.follow = true;
+        }
         if let Some(found) = self.b.take_dlna_found() {
             self.open_dlna(ui, found);
         }
@@ -1364,6 +1482,9 @@ impl State {
         if qv != self.last_queue_ver || gen_changed {
             self.last_queue_ver = qv;
             self.sync_queue(ui);
+        }
+        if std::mem::take(&mut self.marks_dirty) && !gen_changed {
+            self.refresh_marks(ui);
         }
         if gen_changed {
             let servers = self.b.queue_servers();
@@ -1674,7 +1795,7 @@ impl State {
         let message = if std::mem::take(&mut self.prompt_retry) && ui.get_toast_error() {
             ui.get_toast().to_string()
         } else {
-            String::new()
+            ui.get_dlg_note().to_string()
         };
         self.prompt_seq += 1;
         let id = self.prompt_seq;
@@ -1807,6 +1928,17 @@ impl State {
             "genre-mix" => self.b.play_genre_mix(),
             "clear-marks" => self.b.clear_genre_marks(),
             "mix" => self.mix_view(),
+            "new-smart" => self.open_smart(ui, None),
+            "smart-edit" => {
+                let t = self.b.smart_target();
+                if let Some(p) = t {
+                    self.open_smart(ui, Some(p));
+                }
+            }
+            "import" => self.import_playlist(),
+            "export" => self.open_export(ui, false),
+            "queue-export" => self.open_export(ui, true),
+            "ipod" => self.b.send_view_to_ipod(),
             _ => {}
         }
     }
@@ -2534,6 +2666,235 @@ impl State {
         }
     }
 
+    /// The Now Playing page, while it's open.
+    fn sync_now_playing(&mut self, ui: &AppWindow) {
+        let np = self.b.now_playing(&self.snap);
+        ui.set_np_artist(ss(&np.artist));
+        ui.set_np_album(ss(&np.album));
+        ui.set_np_format(ss(&np.format));
+        ui.set_np_path(ss(&np.path));
+        ui.set_np_output(ss(&np.output));
+        let rows: Vec<ChainRow> = np
+            .chain
+            .iter()
+            .map(|(name, state)| ChainRow {
+                name: ss(name),
+                state: ss(state),
+                on: !(state == "off"
+                    || state.starts_with("skipped")
+                    || state.contains("not touching")),
+            })
+            .collect();
+        if self.np_chain.row_count() != rows.len() {
+            self.np_chain.set_vec(rows);
+        } else {
+            for (i, r) in rows.into_iter().enumerate() {
+                if self.np_chain.row_data(i).as_ref() != Some(&r) {
+                    self.np_chain.set_row_data(i, r);
+                }
+            }
+        }
+    }
+
+    /// A row picked or let go of, or a range picked to it.
+    fn row_mark(&mut self, ui: &AppWindow, i: usize, range: bool) {
+        if range {
+            self.b.mark_range(i);
+        } else {
+            self.b.toggle_mark(i);
+        }
+        if let Some(sel) = self.selected_index() {
+            ui.set_selected(sel as i32);
+        }
+        self.marks_dirty = true;
+    }
+
+    /// Redraw which rows are picked, touching only the ones that changed.
+    fn refresh_marks(&mut self, ui: &AppWindow) {
+        let Some(l) = self.b.level() else { return };
+        for i in 0..self.rows.row_count() {
+            let want = l.is_marked(i);
+            if let Some(mut r) = self.rows.row_data(i)
+                && r.marked != want
+            {
+                r.marked = want;
+                self.rows.set_row_data(i, r);
+            }
+        }
+        let n = self.b.marked_count();
+        ui.set_marked_count(n as i32);
+        if n == 0 && !is_touch(ui) {
+            self.marking = false;
+        }
+        ui.set_marking(self.marking);
+    }
+
+    /// A button on the picked-rows bar.
+    fn sel_action(&mut self, ui: &AppWindow, a: &str) {
+        if let Some(q) = a.strip_prefix("q-") {
+            match q {
+                "remove" => self.b.remove_queue_selection(self.queue_sel),
+                "playlist" => {
+                    let paths = self.b.queue_selection_paths(self.queue_sel);
+                    self.open_pick(ui, "", paths);
+                }
+                "all" => {
+                    let n = self.b.player.queue().len();
+                    if n > 0 {
+                        self.b.clear_queue_marks();
+                        self.b.toggle_queue_mark(0);
+                        self.b.mark_queue_range(n - 1);
+                    }
+                }
+                "clear" => {
+                    self.b.clear_queue_marks();
+                    self.queue_marking = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+        match a {
+            "play" => self.play_selected(),
+            "next" => self.b.add_selected_to_queue(true),
+            "queue" => self.b.add_selected_to_queue(false),
+            "playlist" => {
+                let paths = self.b.playlist_paths_for_selection();
+                self.open_pick(ui, "", paths);
+            }
+            "ipod" => self.b.send_selection_to_ipod(),
+            "remove" => self.b.edit_playlist(true, 0),
+            "all" => self.b.mark_all(),
+            "clear" => {
+                self.b.clear_marks();
+                self.marking = false;
+            }
+            _ => {}
+        }
+        self.marks_dirty = true;
+    }
+
+    /// A playlist row dragged (or lifted and dropped) to `to`.
+    fn row_drag(&mut self, from: usize, to: usize) {
+        self.lifted = None;
+        self.b.move_playlist_item(from, to);
+    }
+
+    fn queue_drag(&mut self, ui: &AppWindow, from: usize, to: usize) {
+        self.queue_lifted = None;
+        let n = self.b.player.queue().len();
+        let to = to.min(n.saturating_sub(1));
+        self.b.move_queue_to(from, to);
+        self.queue_sel = to;
+        self.follow = false;
+        ui.set_queue_sel(to as i32);
+    }
+
+    /// The smart playlist form, new or to change one.
+    fn open_smart(&mut self, ui: &AppWindow, edit: Option<patina_core::library::smart::SmartRow>) {
+        let (title, name, query, ok) = match &edit {
+            Some(p) => (
+                "Edit smart playlist",
+                p.name.clone(),
+                p.query.clone(),
+                "Save",
+            ),
+            None => ("New smart playlist", String::new(), String::new(), "Create"),
+        };
+        self.dlg = match &edit {
+            Some(p) => Dlg::SmartEdit(p.id),
+            None => Dlg::SmartNew,
+        };
+        open_text(ui, title, "Name", &name, Some(("Songs where", &query)), ok);
+        self.smart_note(ui, &query);
+    }
+
+    /// Under the query: what it matches, or why it doesn't work.
+    fn smart_note(&self, ui: &AppWindow, query: &str) {
+        if query.trim().is_empty() {
+            ui.set_dlg_note(ss(format!(
+                "Like: {}. Empty matches every song. {}",
+                patina_core::library::smart::EXAMPLES[0].0,
+                patina_core::library::smart::HELP
+            )));
+            ui.set_dlg_note_warn(false);
+            return;
+        }
+        let c = self.b.check_smart(query);
+        ui.set_dlg_note(ss(c.message));
+        ui.set_dlg_note_warn(!c.ok);
+    }
+
+    /// Write the selected playlist, or the open list, as a file.
+    fn open_export(&mut self, ui: &AppWindow, queue: bool) {
+        let name = if queue {
+            Some("Queue".to_string())
+        } else {
+            self.b.export_subject().map(|(n, _)| n)
+        };
+        let Some(name) = name else {
+            return self
+                .b
+                .note("Pick a playlist, or open a list of songs, to export");
+        };
+        let path = self.b.default_export_path(&name);
+        self.dlg = Dlg::Export(queue);
+        open_text(
+            ui,
+            &format!("Export \"{name}\""),
+            "Save as (M3U8)",
+            &path.display().to_string(),
+            None,
+            "Export",
+        );
+        ui.set_dlg_note(ss(
+            "Local songs go in as their full paths. Songs on a server go in as server:// paths, which only PatinaPlayer reads back.",
+        ));
+    }
+
+    /// Read an M3U, M3U8 or PLS file into a new playlist: the desktop's
+    /// file picker, or a typed path where there isn't one.
+    fn import_playlist(&mut self) {
+        if self.import_pick.is_some() {
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(pick_playlist_dialog());
+        });
+        self.import_pick = Some((rx, Instant::now()));
+    }
+
+    fn import_path_dialog(&mut self, ui: &AppWindow) {
+        self.dlg = Dlg::ImportPath;
+        open_text(
+            ui,
+            "Import a playlist",
+            "Path to an .m3u, .m3u8 or .pls file",
+            "~/",
+            None,
+            "Import",
+        );
+    }
+
+    fn poll_import_pick(&mut self, ui: &AppWindow) {
+        let Some((rx, opened)) = &self.import_pick else {
+            return;
+        };
+        let Ok(picked) = rx.try_recv() else { return };
+        let quick = opened.elapsed() < Duration::from_millis(700);
+        self.import_pick = None;
+        match picked {
+            Picked::Path(p) => self.b.import_playlist_file(&p),
+            Picked::Unavailable(why) => {
+                self.b.note(why);
+                self.import_path_dialog(ui);
+            }
+            Picked::Cancelled if quick => self.import_path_dialog(ui),
+            Picked::Cancelled => {}
+        }
+    }
+
     fn row_act(&mut self, ui: &AppWindow, a: &str) {
         if self.b.selected_setting().is_some() {
             return self.setting_act(ui, a);
@@ -2556,6 +2917,56 @@ impl State {
             return self.b.rate_selected(n);
         }
         match a {
+            "select" => {
+                if let Some(i) = self.selected_index() {
+                    self.b.toggle_mark(i);
+                }
+                self.marking = is_touch(ui);
+                self.marks_dirty = true;
+            }
+            "ipod" => self.b.send_selection_to_ipod(),
+            "export" => self.open_export(ui, false),
+            "smart-edit" => {
+                if let Some(Item::Smart(p)) = item {
+                    self.open_smart(ui, Some(p));
+                }
+            }
+            "smart-delete" => {
+                if let Some(Item::Smart(p)) = item {
+                    self.confirm(
+                        ui,
+                        format!(
+                            "Delete the smart playlist \"{}\"? The songs stay in the library.",
+                            p.name
+                        ),
+                        "Delete",
+                        Confirm::DeleteSmart(p.id),
+                    );
+                }
+            }
+            "ipod-remove" => {
+                if let Some(Item::Ipod(row)) = item {
+                    use patina_core::browse::ipod::IpodKind;
+                    let what = match &row.kind {
+                        IpodKind::Playlist(n) => {
+                            format!("Take the playlist \"{n}\" off the iPod? Its songs stay on it.")
+                        }
+                        IpodKind::Album { album, .. } => {
+                            format!(
+                                "Take {album} off the iPod? Its songs are deleted from the iPod."
+                            )
+                        }
+                    };
+                    self.confirm(ui, what, "Remove", Confirm::IpodRemove(row));
+                }
+            }
+            "lift" => self.lifted = self.selected_index(),
+            "lift-cancel" => self.lifted = None,
+            "drop" => {
+                if let (Some(from), Some(to)) = (self.lifted, self.selected_index()) {
+                    self.row_drag(from, to);
+                }
+            }
             "fav" => self.b.toggle_favorite_selected(),
             "play" => self.play_selected(),
             "next" => self.b.add_selected_to_queue(true),
@@ -2687,15 +3098,26 @@ impl State {
         self.queue_sel = i;
         self.follow = false;
         match a {
+            "select" => {
+                self.b.toggle_queue_mark(i);
+                self.queue_marking = is_touch(ui);
+            }
+            "lift" => self.queue_lifted = Some(i),
+            "lift-cancel" => self.queue_lifted = None,
+            "drop" => {
+                if let Some(from) = self.queue_lifted {
+                    self.queue_drag(ui, from, i);
+                }
+            }
             "play" => {
                 self.b.play_queue_position(i);
                 self.follow = true;
             }
             "up" => self.queue_sel = self.b.move_queue_position(i, -1),
             "down" => self.queue_sel = self.b.move_queue_position(i, 1),
-            "remove" => self.b.remove_queue_position(i),
+            "remove" => self.b.remove_queue_selection(i),
             "playlist" => {
-                let paths = self.b.queue_paths_at(i);
+                let paths = self.b.queue_selection_paths(i);
                 self.open_pick(ui, "", paths);
             }
             "go-album" | "go-artist" => {
@@ -2762,6 +3184,29 @@ impl State {
                 }
             }
             Dlg::RenameServer(old) => self.b.edit_server(&old, &t1, "", "", None),
+            Dlg::SmartNew => {
+                if !self.b.create_smart(&t1, &t2) {
+                    self.dlg = Dlg::SmartNew;
+                    self.smart_note(ui, &t2);
+                    return;
+                }
+            }
+            Dlg::SmartEdit(id) => {
+                if !self.b.update_smart(id, &t1, &t2) {
+                    self.dlg = Dlg::SmartEdit(id);
+                    self.smart_note(ui, &t2);
+                    return;
+                }
+            }
+            Dlg::Export(queue) => {
+                let path = std::path::PathBuf::from(&t1);
+                if queue {
+                    self.b.export_queue_to(&path);
+                } else {
+                    self.b.export_to(&path);
+                }
+            }
+            Dlg::ImportPath => self.b.import_playlist_file(std::path::Path::new(&t1)),
             Dlg::ServerPlaylist(server, paths) => {
                 self.b.create_server_playlist(&server, &t1, &paths)
             }
@@ -2775,9 +3220,12 @@ impl State {
                 Confirm::RemoveServer(n) => self.b.remove_server(&n),
                 Confirm::ClearCache => self.b.list_action(ListAction::ClearCache),
                 Confirm::DeleteMix(id) => self.b.delete_mix(id),
+                Confirm::DeleteSmart(id) => self.b.delete_smart(id),
+                Confirm::IpodRemove(row) => self.b.remove_from_ipod(&row),
             },
             Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Dlna(_) | Dlg::Help | Dlg::None => {}
         }
+        ui.set_dlg_note(SharedString::new());
         ui.set_dialog(0);
         ui.invoke_focus_root();
     }
@@ -2854,6 +3302,44 @@ impl State {
             return true;
         }
         let queue = self.b.section == Section::Queue;
+        if is(Key::Escape) {
+            // Picked rows, or a lifted one, let go first.
+            if self.lifted.take().is_some() || self.queue_lifted.take().is_some() {
+                self.last_gen = u64::MAX;
+                return true;
+            }
+            let had = if queue {
+                self.b.clear_queue_marks()
+            } else {
+                self.b.clear_marks()
+            };
+            self.marking = false;
+            self.queue_marking = false;
+            self.marks_dirty = true;
+            return had;
+        }
+        if shift && (is(Key::UpArrow) || is(Key::DownArrow)) {
+            // Shift and the arrows pick rows as the selection moves.
+            let d = if is(Key::UpArrow) { -1 } else { 1 };
+            if queue {
+                let from = self.queue_sel;
+                if self.b.queue_marks.is_empty() {
+                    self.b.toggle_queue_mark(from);
+                }
+                self.move_sel(ui, d);
+                self.b.mark_queue_range(self.queue_sel);
+            } else if let Some(from) = self.selected_index() {
+                if self.b.marked_count() == 0 {
+                    self.b.toggle_mark(from);
+                }
+                self.move_sel(ui, d);
+                if let Some(to) = self.selected_index() {
+                    self.b.mark_range(to);
+                }
+                self.marks_dirty = true;
+            }
+            return true;
+        }
         if is(Key::UpArrow) {
             self.move_sel(ui, -1);
         } else if is(Key::DownArrow) {
@@ -2895,7 +3381,7 @@ impl State {
             ) {
                 self.setting_act(ui, "remove");
             } else if queue {
-                self.b.remove_queue_position(self.queue_sel);
+                self.b.remove_queue_selection(self.queue_sel);
             } else if self.b.in_playlist().is_some() {
                 self.b.edit_playlist(true, 0);
             } else {
@@ -2969,6 +3455,10 @@ impl State {
     }
 }
 
+fn is_touch(ui: &AppWindow) -> bool {
+    ui.global::<Ui>().get_touch()
+}
+
 fn sub_line(t: &TrackInfo) -> String {
     let parts: Vec<&str> = [t.artist.as_deref(), t.album.as_deref()]
         .into_iter()
@@ -3038,6 +3528,8 @@ fn open_text(
     ui.set_dlg_label2(ss(l2));
     ui.set_dlg_text2(ss(t2));
     ui.set_dlg_ok(ss(ok));
+    ui.set_dlg_note(SharedString::new());
+    ui.set_dlg_note_warn(false);
     ui.set_dialog(1);
 }
 
@@ -3103,6 +3595,7 @@ pub fn install(
         ui.set_action_labels(ModelRc::from(s.action_labels.clone()));
         ui.set_dlg_items(ModelRc::from(s.dlg_items.clone()));
         ui.set_queue_servers(ModelRc::from(s.queue_servers.clone()));
+        ui.set_np_chain(ModelRc::from(s.np_chain.clone()));
     }
 
     // Wire a callback to a closure that gets the state and the window.
@@ -3191,6 +3684,28 @@ pub fn install(
         s.row_act(&u, a.as_str());
     });
     on!(on_view_action, |s, u, a| s.view_action(&u, a.as_str()));
+    on!(on_row_mark, |s, u, i, range| s
+        .row_mark(&u, i as usize, range));
+    on!(on_row_drag, |s, _u, from, to| s
+        .row_drag(from as usize, to.max(0) as usize));
+    on!(on_sel_action, |s, u, a| s.sel_action(&u, a.as_str()));
+    on!(on_queue_mark, |s, _u, i, range| {
+        if range {
+            s.b.mark_queue_range(i as usize);
+        } else {
+            s.b.toggle_queue_mark(i as usize);
+        }
+    });
+    on!(on_queue_drag, |s, u, from, to| s.queue_drag(
+        &u,
+        from as usize,
+        to.max(0) as usize
+    ));
+    on!(on_dlg_edited, |s, u, field, text| {
+        if field == 2 && matches!(s.dlg, Dlg::SmartNew | Dlg::SmartEdit(_)) {
+            s.smart_note(&u, text.as_str());
+        }
+    });
     on!(on_queue_select, |s, u, i| {
         s.queue_sel = i as usize;
         s.follow = false;
@@ -3316,6 +3831,11 @@ fn count_label(items: &[Item]) -> String {
             Item::Pinned(_) => "pin",
             Item::Job(_) => "download",
             Item::Mix(_) => "mix",
+            Item::Smart(_) => "smart playlist",
+            Item::Ipod(r) => match r.kind {
+                patina_core::browse::ipod::IpodKind::Playlist(_) => "playlist",
+                patina_core::browse::ipod::IpodKind::Album { .. } => "album",
+            },
             Item::Header(_) | Item::Info { .. } | Item::Setting(_) | Item::Action { .. } => {
                 continue;
             }
@@ -3385,6 +3905,23 @@ fn pick_eq_dialog() -> Picked {
 #[cfg(target_os = "android")]
 fn pick_eq_dialog() -> Picked {
     Picked::Unavailable("No file picker is available here.".into())
+}
+
+#[cfg(not(target_os = "android"))]
+fn pick_playlist_dialog() -> Picked {
+    match rfd::FileDialog::new()
+        .set_title("Import a playlist")
+        .add_filter("Playlists", &["m3u", "m3u8", "pls"])
+        .pick_file()
+    {
+        Some(p) => Picked::Path(p),
+        None => Picked::Cancelled,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn pick_playlist_dialog() -> Picked {
+    Picked::Unavailable("Type the playlist file's path.".into())
 }
 
 /// Bring the window back from the tray, or forward from behind others.

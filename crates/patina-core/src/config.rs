@@ -94,6 +94,7 @@ pub struct Config {
     pub cache: CacheConfig,
     pub mixes: MixConfig,
     pub lastfm: LastFmConfig,
+    pub listenbrainz: ListenBrainzConfig,
     pub leveling: crate::level::LevelConfig,
     /// The EQ, and which output device gets which preset.
     pub eq: crate::eq::EqConfig,
@@ -103,6 +104,14 @@ pub struct Config {
     pub lyrics: LyricsConfig,
     pub channel: ChannelConfig,
     pub desktop: DesktopConfig,
+    pub ipod: IpodConfig,
+}
+
+/// Sending songs to an iPod.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IpodConfig {
+    /// What songs the iPod can't play are converted to.
+    pub target: crate::ipod::Target,
 }
 
 /// Channel tools: mono, width, crossfeed, balance. Off until turned on.
@@ -225,6 +234,37 @@ impl Default for LastFmConfig {
 }
 
 impl LastFmConfig {
+    pub fn mode(&self, server: &str) -> ScrobbleMode {
+        self.servers.get(server).copied().unwrap_or_default()
+    }
+}
+
+/// ListenBrainz. The token is in the keyring; this is the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenBrainzConfig {
+    /// Send listens at all. Saving a token turns it on.
+    pub scrobble: bool,
+    /// The account the token belongs to. Settings fills it in.
+    pub user: String,
+    /// Another server with the same API, like a self-hosted ListenBrainz
+    /// or Maloja. Empty is the public api.listenbrainz.org.
+    pub url: String,
+    /// Per server: who tells ListenBrainz about its songs.
+    pub servers: std::collections::BTreeMap<String, ScrobbleMode>,
+}
+
+impl Default for ListenBrainzConfig {
+    fn default() -> Self {
+        Self {
+            scrobble: true,
+            user: String::new(),
+            url: String::new(),
+            servers: Default::default(),
+        }
+    }
+}
+
+impl ListenBrainzConfig {
     pub fn mode(&self, server: &str) -> ScrobbleMode {
         self.servers.get(server).copied().unwrap_or_default()
     }
@@ -491,6 +531,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             mixes: MixConfig::default(),
             lastfm: LastFmConfig::default(),
+            listenbrainz: ListenBrainzConfig::default(),
             leveling: crate::level::LevelConfig::default(),
             eq: crate::eq::EqConfig::default(),
             amp: crate::amp::AmpConfig::default(),
@@ -498,6 +539,7 @@ impl Default for Config {
             lyrics: LyricsConfig::default(),
             channel: ChannelConfig::default(),
             desktop: DesktopConfig::default(),
+            ipod: IpodConfig::default(),
         }
     }
 }
@@ -517,6 +559,7 @@ struct RawConfig {
     cache: Option<RawCache>,
     mixes: Option<RawMixes>,
     lastfm: Option<RawLastFm>,
+    listenbrainz: Option<RawListenBrainz>,
     leveling: Option<RawLeveling>,
     eq: Option<toml::Value>,
     amp: Option<toml::Value>,
@@ -524,6 +567,13 @@ struct RawConfig {
     lyrics: Option<RawLyrics>,
     channel: Option<RawChannel>,
     desktop: Option<RawDesktop>,
+    ipod: Option<RawIpod>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawIpod {
+    target: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -582,6 +632,15 @@ struct RawLastFm {
     scrobble: Option<bool>,
     scrobble_radio: Option<bool>,
     love_stars: Option<bool>,
+    servers: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawListenBrainz {
+    scrobble: Option<bool>,
+    user: Option<String>,
+    url: Option<String>,
     servers: Option<std::collections::BTreeMap<String, String>>,
 }
 
@@ -802,6 +861,20 @@ impl Config {
             love_stars: rlf.love_stars.unwrap_or(false),
             servers: modes,
         };
+        let rlb = raw.listenbrainz.unwrap_or_default();
+        let mut lb_modes = std::collections::BTreeMap::new();
+        for (name, m) in rlb.servers.unwrap_or_default() {
+            let mode = m
+                .parse::<ScrobbleMode>()
+                .map_err(|e| parse_err(format!("listenbrainz.servers.{name}: {e}")))?;
+            lb_modes.insert(name, mode);
+        }
+        let listenbrainz = ListenBrainzConfig {
+            scrobble: rlb.scrobble.unwrap_or(true),
+            user: t(rlb.user),
+            url: t(rlb.url),
+            servers: lb_modes,
+        };
         let rl = raw.leveling.unwrap_or_default();
         let dl = crate::level::LevelConfig::default();
         let leveling = crate::level::LevelConfig {
@@ -991,6 +1064,7 @@ impl Config {
             cache,
             mixes,
             lastfm,
+            listenbrainz,
             leveling,
             eq,
             amp,
@@ -1000,6 +1074,14 @@ impl Config {
             },
             channel,
             desktop,
+            ipod: IpodConfig {
+                target: match raw.ipod.unwrap_or_default().target {
+                    Some(t) => t
+                        .parse()
+                        .map_err(|e| parse_err(format!("ipod.target: {e}")))?,
+                    None => crate::ipod::Target::default(),
+                },
+            },
         })
     }
 
@@ -1086,6 +1168,12 @@ width = 100
 crossfeed = "off"
 # Balance: -100 (left only) to 100 (right only).
 balance = 0
+
+[ipod]
+# What songs an iPod can't play (FLAC, Opus, Vorbis, hi-res) are converted
+# to on the way: alac (Apple Lossless at 16 bits; lossy ones go to AAC),
+# aac (AAC 256 kbps) or mp3 (MP3 320 kbps). Needs the ffmpeg command.
+target = "alac"
 
 [desktop]
 # The desktop app's icon in the system tray.
@@ -1201,6 +1289,22 @@ love_stars = false
 # (if the server scrobbles for you, like Navidrome with its Last.fm agent),
 # or both, which counts every play twice if the server scrobbles too.
 # [lastfm.servers]
+# Home = "server"
+
+[listenbrainz]
+# Listens and Now Playing for ListenBrainz. Paste your user token (from
+# listenbrainz.org/settings) in Settings, ListenBrainz: it's checked and
+# kept in your keyring, never here.
+scrobble = true
+# The account the token belongs to. Settings fills this in.
+user = ""
+# Another server with the same API (a self-hosted ListenBrainz, Maloja,
+# Koito). Empty is the public api.listenbrainz.org.
+url = ""
+
+# Per server, who tells ListenBrainz about its songs, the same way as
+# [lastfm.servers]: app, server or both.
+# [listenbrainz.servers]
 # Home = "server"
 
 # Music servers: Subsonic (Navidrome, Gonic and the like) or Ampache. Add
@@ -1362,13 +1466,31 @@ pub fn set_scrobble_mode(
     server: &str,
     mode: ScrobbleMode,
 ) -> Result<bool, ConfigError> {
+    set_mode_in(path, "lastfm", server, mode)
+}
+
+/// Who tells ListenBrainz: `[listenbrainz.servers] name = "mode"`.
+pub fn set_listenbrainz_mode(
+    path: &Path,
+    server: &str,
+    mode: ScrobbleMode,
+) -> Result<bool, ConfigError> {
+    set_mode_in(path, "listenbrainz", server, mode)
+}
+
+fn set_mode_in(
+    path: &Path,
+    section: &'static str,
+    server: &str,
+    mode: ScrobbleMode,
+) -> Result<bool, ConfigError> {
     edit(path, |doc| {
-        let lf = table(doc, "lastfm")?;
+        let lf = table(doc, section)?;
         let servers = lf
             .entry("servers")
             .or_insert(toml_edit::table())
             .as_table_mut()
-            .ok_or("[lastfm.servers] is not a table")?;
+            .ok_or("the servers table there is not a table")?;
         let old = servers
             .get(server)
             .and_then(|v| v.as_str())

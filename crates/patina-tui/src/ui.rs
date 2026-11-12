@@ -89,6 +89,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::EqPresetName => "Save the EQ as a preset called",
                 InputPurpose::AmpPresetName => "Save the amp stack as a preset called",
                 InputPurpose::EqImport => "AutoEq or APO file (ParametricEQ.txt, GraphicEQ.txt)",
+                InputPurpose::SmartName { edit: None, .. } => "New smart playlist: a name",
+                InputPurpose::SmartName { .. } => "Rename smart playlist",
+                InputPurpose::SmartQuery { .. } => "Songs where (Enter saves, Esc cancels)",
+                InputPurpose::Export { queue: true } => "Export the queue as M3U8 to",
+                InputPurpose::Export { .. } => "Export as M3U8 to",
+                InputPurpose::Import => "Import an .m3u, .m3u8 or .pls file",
             };
             // Passwords show as dots.
             let shown = if matches!(purpose, InputPurpose::ServerSecret(_)) {
@@ -96,8 +102,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             } else {
                 buf.clone()
             };
-            draw_input_box(f, app, area, title, &shown);
+            match purpose {
+                // The query is checked as it's typed: what it matches, or
+                // why it doesn't work.
+                InputPurpose::SmartQuery { .. } => {
+                    let (note, warn) = if buf.trim().is_empty() {
+                        (
+                            format!(
+                                "Empty matches every song. {}",
+                                patina_core::library::smart::HELP
+                            ),
+                            false,
+                        )
+                    } else {
+                        let c = app.b.check_smart(buf);
+                        (c.message, !c.ok)
+                    };
+                    draw_input_note(f, app, area, title, &shown, &note, warn);
+                }
+                _ => draw_input_box(f, app, area, title, &shown),
+            }
         }
+        Modal::NowPlaying => draw_now_playing(f, app, area),
         Modal::PickPlaylist {
             title,
             servers,
@@ -391,9 +417,16 @@ fn hints(app: &App) -> &'static str {
         (_, Some(Source::Genre { .. })) => "t albums/songs · a add · X genre mix · Esc back",
         (Section::Genres, _) => "Enter open · M mark for a mix · X play the mix of marked genres",
         (_, Some(Source::Playlist { .. })) => {
-            "v play all · e queue all · d remove · J/K move · Esc back"
+            "Space pick · d remove · J/K move · > export · Esc back"
         }
-        (Section::Playlists, _) => "N new · R rename · D delete · Enter on a mix plays it",
+        (_, Some(Source::Smart { .. })) => "v play all · E edit the query · > export · Esc back",
+        (Section::Playlists, _) => {
+            "N new · S smart · R rename · E edit smart · D delete · < import · > export"
+        }
+        (Section::History, _) => "Enter play from here · Space pick · a add · v play all",
+        (Section::Ipod, _) => {
+            "Enter on a button · d take off the iPod · E eject · Ctrl+P sends from any list"
+        }
         (Section::Radio, _) => "Enter play · N new · E edit · T test · D delete · J/K move",
         (_, Some(Source::Podcast { .. })) => {
             "Enter play · w download · x delete file · P played · [ ] speed · z trim"
@@ -412,7 +445,7 @@ fn hints(app: &App) -> &'static str {
         (Section::MostListened | Section::TopAlbums | Section::TopArtists, _) => {
             "Enter open · v play all · V shuffle · e queue all · P playlist all"
         }
-        _ => "v play all · V shuffle · e queue all · a add · p playlist · f keep offline · X mix",
+        _ => "Space pick · v play all · e queue all · a add · p playlist · f offline · X mix",
     }
 }
 
@@ -462,7 +495,18 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
             title_a,
         );
     } else {
-        let line = title_line(app, title_a.width, hints(app));
+        // Rows picked: what can be done with them, in place of the hints.
+        let n = app.b.marked_count();
+        let picked = format!(
+            "{n} picked · Enter play · a add · A next · p playlist{} · Esc let go",
+            if app.b.ipod_connected() {
+                " · Ctrl+P iPod"
+            } else {
+                ""
+            }
+        );
+        let right = if n > 0 { picked.as_str() } else { hints(app) };
+        let line = title_line(app, title_a.width, right);
         f.render_widget(Paragraph::new(line), title_a);
     }
 
@@ -497,9 +541,13 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
             Source::Section(Section::Podcasts) => {
                 "No podcasts yet. Press N and paste a feed URL.".to_string()
             }
-            Source::Section(Section::MostListened | Section::TopAlbums | Section::TopArtists) => {
+            Source::Section(Section::MostListened | Section::TopAlbums | Section::TopArtists | Section::History) => {
                 "Nothing played yet. A song counts once you've heard half of it, \
                  or four minutes of it, whichever comes first."
+                    .to_string()
+            }
+            Source::Smart { .. } => {
+                "Nothing in the library matches this smart playlist right now. E edits what it looks for."
                     .to_string()
             }
             Source::Podcast { .. } => {
@@ -531,7 +579,9 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
     let kind = level_kind(&level.items);
     let ctx = match &level.source {
         Source::Album { .. } => RowCtx::Album,
-        Source::Section(s) if Section::STATS.contains(s) => RowCtx::Ranked,
+        Source::Section(s) if Section::STATS.contains(s) && *s != Section::History => {
+            RowCtx::Ranked
+        }
         _ => RowCtx::Plain,
     };
     let ranked = ctx == RowCtx::Ranked;
@@ -592,9 +642,12 @@ fn draw_level(f: &mut Frame, app: &mut App, area: Rect) {
         .skip(offset)
         .take(rows_h)
         .map(|(i, item)| {
-            let mut row = item_row(app, item, i, ctx, playing.as_deref());
+            let marked = level.is_marked(i);
+            let mut row = item_row(app, item, i, ctx, playing.as_deref(), marked);
             if i == sel && item.selectable() {
                 row = row.style(Style::default().bg(if focused { t.raised } else { t.surface }));
+            } else if marked {
+                row = row.style(Style::default().bg(t.surface));
             }
             row
         })
@@ -679,6 +732,7 @@ fn item_row<'a>(
     i: usize,
     ctx: RowCtx,
     playing: Option<&std::path::Path>,
+    marked: bool,
 ) -> Row<'a> {
     let t = &app.theme;
     let dim = Style::default().fg(t.wave_raw);
@@ -963,7 +1017,7 @@ fn item_row<'a>(
             Cell::from(""),
             Cell::from(""),
             Cell::from(Span::styled(
-                *h,
+                h.clone(),
                 Style::default()
                     .fg(t.verdigris)
                     .add_modifier(Modifier::BOLD),
@@ -982,6 +1036,31 @@ fn item_row<'a>(
                 if m.kind == "genre" { "" } else { "endless" },
                 muted,
             )),
+        ],
+        Item::Smart(p) => vec![
+            mark("⚙"),
+            Cell::from(""),
+            Cell::from(Span::styled(p.name.clone(), text)),
+            Cell::from(Span::styled(p.query.clone(), muted)),
+            Cell::from(""),
+            Cell::from(Span::styled(
+                format!("{} track{}", p.items, s(p.items)),
+                muted,
+            )),
+        ],
+        Item::Ipod(r) => vec![
+            Cell::from(Span::styled(
+                match r.kind {
+                    patina_core::browse::ipod::IpodKind::Playlist(_) => "≡",
+                    patina_core::browse::ipod::IpodKind::Album { .. } => "◎",
+                },
+                Style::default().fg(t.verdigris),
+            )),
+            Cell::from(""),
+            Cell::from(Span::styled(r.label.clone(), text)),
+            Cell::from(Span::styled(r.detail.clone(), muted)),
+            Cell::from(""),
+            Cell::from(""),
         ],
         Item::Pinned(p) => {
             let all = p.stored >= p.songs;
@@ -1143,6 +1222,16 @@ fn item_row<'a>(
             ]
         }
     };
+    // Picked: a check where the play arrow goes.
+    let mut cells = cells;
+    if marked && !cells.is_empty() {
+        cells[0] = Cell::from(Span::styled(
+            "✓",
+            Style::default()
+                .fg(t.verdigris)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     Row::new(cells)
 }
 
@@ -1279,10 +1368,13 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             fmt_length(total)
         ),
     };
-    let hint = if app.b.mix.as_ref().is_some_and(|m| m.saved.is_none()) {
-        "Enter play · d remove · J/K move · S add to playlist · M save the mix · C clear"
+    let picked = app.b.queue_marks.len();
+    let hint = if picked > 0 {
+        "Space pick · d remove picked · S add picked to a playlist · Esc let go"
+    } else if app.b.mix.as_ref().is_some_and(|m| m.saved.is_none()) {
+        "Enter play · Space pick · d remove · J/K move · S add to playlist · M save the mix"
     } else {
-        "Enter play · d remove · J/K move · S add to playlist · C clear"
+        "Enter play · Space pick · d remove · J/K move · S add to playlist · > export · C clear"
     };
     let mut spans = vec![Span::styled(
         format!(" {title}"),
@@ -1330,7 +1422,9 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(pos, e)| {
             let info = &e.info;
             let is_cur = current == Some(e.id);
+            let picked = app.b.queue_marks.contains(&e.id);
             let marker = match (is_cur, state) {
+                _ if picked => "✓",
                 (true, PlayState::Playing) => "▶",
                 (true, PlayState::Paused) => "‖",
                 (true, PlayState::Stopped) => "■",
@@ -1364,6 +1458,8 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             ]);
             if pos == sel {
                 row = row.style(Style::default().bg(if focused { t.raised } else { t.surface }));
+            } else if picked {
+                row = row.style(Style::default().bg(t.surface));
             }
             row
         })
@@ -1832,6 +1928,174 @@ fn frame_block<'a>(app: &App, title: &'a str) -> Block<'a> {
         .style(Style::default().bg(t.surface))
 }
 
+/// An input box with a line of help or a live check under it.
+fn draw_input_note(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    title: &str,
+    buf: &str,
+    note: &str,
+    warn: bool,
+) {
+    let t = &app.theme;
+    let w = 76u16.min(area.width);
+    let inner_w = w.saturating_sub(4) as usize;
+    let note_lines = textwrap_lines(note, inner_w);
+    let r = popup(area, w, 3 + note_lines.len() as u16);
+    f.render_widget(Clear, r);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!(" {buf}"), Style::default().fg(t.text)),
+        Span::styled("▏", Style::default().fg(t.verdigris)),
+    ])];
+    let style = Style::default().fg(if warn { t.copper } else { t.muted });
+    lines.extend(
+        note_lines
+            .into_iter()
+            .map(|l| Line::from(Span::styled(format!(" {l}"), style))),
+    );
+    f.render_widget(Paragraph::new(lines).block(frame_block(app, title)), r);
+}
+
+/// Words wrapped to `w` columns.
+fn textwrap_lines(s: &str, w: usize) -> Vec<String> {
+    let w = w.max(10);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > w {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// Ctrl+N: the cover as big as fits, what's playing, how it reaches the
+/// speakers and the sound chain it goes through.
+fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
+    let r = Rect::new(
+        area.x + 1,
+        area.y,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    f.render_widget(Clear, r);
+    let block = frame_block(app, "Now playing  (Esc closes)");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let np = app.b.now_playing(&app.snap);
+    // The cover on the left, about square, when there's room for it.
+    let art_w = if app.art.enabled() && inner.width >= 70 {
+        (inner.height.saturating_sub(1) * 2).min(inner.width / 2)
+    } else {
+        0
+    };
+    let [art_a, text_a] =
+        Layout::horizontal([Constraint::Length(art_w), Constraint::Min(20)]).areas(inner);
+    if art_w > 0
+        && let Some(img) = app.art.image.as_mut()
+    {
+        f.render_stateful_widget(crate::art::ArtView::widget(), art_a, img);
+    }
+    let t = &app.theme;
+    let has = app.snap.track.is_some();
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                " {}",
+                if has {
+                    np.title.as_str()
+                } else {
+                    "Nothing playing"
+                }
+            ),
+            Style::default()
+                .fg(if has { t.text } else { t.muted })
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if !np.artist.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", np.artist),
+            Style::default().fg(t.text),
+        )));
+    }
+    if !np.album.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", np.album),
+            Style::default().fg(t.muted),
+        )));
+    }
+    if let Some(r) = app.b.playing_rating().filter(|r| *r > 0) {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", patina_core::browse::marks::stars_text(r)),
+            Style::default().fg(t.copper),
+        )));
+    }
+    lines.push(Line::from(""));
+    if !np.format.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", np.format),
+            Style::default()
+                .fg(t.verdigris)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    let w = text_a.width.saturating_sub(2) as usize;
+    for l in [&np.path, &np.output] {
+        if l.is_empty() {
+            continue;
+        }
+        let l = if std::ptr::eq(l, &np.output) {
+            format!("Output: {l}")
+        } else {
+            l.clone()
+        };
+        for part in textwrap_lines(&l, w) {
+            lines.push(Line::from(Span::styled(
+                format!(" {part}"),
+                Style::default().fg(t.muted),
+            )));
+        }
+    }
+    if has {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Sound chain",
+            Style::default().fg(t.muted).add_modifier(Modifier::BOLD),
+        )));
+        for (name, state) in &np.chain {
+            let on =
+                !(state == "off" || state.starts_with("skipped") || state.contains("not touching"));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if on { " ● " } else { " ○ " },
+                    Style::default().fg(if on { t.verdigris } else { t.wave_raw }),
+                ),
+                Span::styled(pad(name, 15), Style::default().fg(t.text)),
+                Span::styled(
+                    state.clone(),
+                    Style::default().fg(if on { t.verdigris } else { t.muted }),
+                ),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Space or c pause · n next · b back · ←/→ seek · Ctrl+L lyrics · Esc close",
+        Style::default().fg(t.wave_raw),
+    )));
+    f.render_widget(Paragraph::new(lines), text_a);
+}
+
 fn draw_input_box(f: &mut Frame, app: &App, area: Rect, title: &str, buf: &str) {
     let t = &app.theme;
     let r = popup(area, 50, 3);
@@ -1897,7 +2161,11 @@ fn draw_confirm(f: &mut Frame, app: &App, area: Rect, msg: &str) {
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     const KEYS: &[(&str, &str)] = &[
-        ("Space", "Play / pause"),
+        ("c   Ctrl+Space", "Play / pause (Space too, outside lists)"),
+        (
+            "Space   U   Esc",
+            "Pick the row and move down; pick every row or none; let them go",
+        ),
         ("n / b", "Next / back"),
         ("Left / Right", "Seek 5 s (Shift: 30 s)"),
         ("+ / -   m", "Volume, mute"),
@@ -1938,9 +2206,25 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (".", "Go to the playing track in Queue"),
         (
             "Queue",
-            "d remove, J/K move, S add the queue to a playlist, L load the queue saved on your server, C clear",
+            "d remove (the picked ones, if any), J/K move, S add to a playlist, > export, L load the server's queue, C clear",
         ),
-        ("Playlists", "N new, R rename, D delete; inside: d, J/K"),
+        (
+            "Playlists",
+            "N new, S new smart, R rename, E edit smart, D delete; inside: d, J/K",
+        ),
+        (
+            "< / >",
+            "Import an .m3u/.m3u8/.pls file / export the playlist, the view or the queue",
+        ),
+        ("H", "Recently played"),
+        (
+            "Ctrl+N",
+            "Now Playing: the cover, the format and the sound chain",
+        ),
+        (
+            "Ctrl+P",
+            "Send the picked rows, or the selection, to the iPod",
+        ),
         ("Radio", "N new, E edit, T test, D delete, J/K move"),
         (
             "Settings",
