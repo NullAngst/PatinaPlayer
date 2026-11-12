@@ -195,7 +195,7 @@ On another distro the names differ but the list is the same. Fedora calls them `
 1. Clone it and go in: `git clone https://github.com/NullAngst/PatinaPlayer && cd PatinaPlayer`
 2. Build both apps: `cargo build --release`. The first build takes a while, since Slint compiles a lot.
 3. Copy them onto your PATH: `cp target/release/patinaplayer target/release/patinaplayer-tui ~/.local/bin/`, since that's where user binaries usually live.
-4. For a menu entry, copy `assets/patinaplayer.desktop` to `~/.local/share/applications/` and `assets/patinaplayer.png` to `~/.local/share/icons/hicolor/256x256/apps/`.
+4. For a menu entry, copy `assets/patinaplayer.desktop` to `~/.local/share/applications/` and `assets/patinaplayer.svg` to `~/.local/share/icons/hicolor/scalable/apps/`, since that's where the desktop file looks for its icon. KEEP THE DESKTOP FILE NAMED `patinaplayer.desktop`: on Wayland, the taskbar finds the icon by matching that name to the name the window gives.
 5. Optionally, run the tests: `cargo test --workspace`
 
 ### The AppImage, locally
@@ -441,7 +441,7 @@ crates/
   patina-tui/       the terminal app (ratatui)
   patina-android/   the Android app's native library and its JNI glue
 android/            manifest, icons and the Java side (permissions, media session, Android Auto, devices)
-assets/             app icon and desktop file
+assets/             app icon (SVG sources and their PNGs) and desktop file
 packaging/          AppImage and APK builds, FFmpeg for each
 .github/workflows/  tests on every push, real servers in containers, releases when you run them on a tag
 ```

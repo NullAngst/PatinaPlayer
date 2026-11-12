@@ -55,6 +55,13 @@ curl -fsSL -o "$TOOLS/linuxdeploy" \
     https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
 chmod +x "$TOOLS/linuxdeploy"
 
+# Every size in assets/icons/, so the hicolor theme inside has the simple
+# drawing at 16 to 32 px instead of a shrunk copy of the big one.
+SIZED_ICONS=()
+for f in "$ROOT"/assets/icons/*/patinaplayer.png; do
+    [ -e "$f" ] && SIZED_ICONS+=(--icon-file "$f")
+done
+
 # 4. AppDir and AppImage. Extract-and-run, so it works without FUSE (CI
 #    runners, containers).
 rm -rf "$APPDIR"
@@ -69,6 +76,7 @@ fi
 (
     cd "$OUT"
     rm -f PatinaPlayer-*.AppImage PatinaPlayer-*.AppImage.zsync
+    # First the AppDir, without packing it.
     "$TOOLS/linuxdeploy" \
         --appdir "$APPDIR" \
         --executable "$BUILD/release/patinaplayer" \
@@ -76,13 +84,29 @@ fi
         --desktop-file "$ROOT/assets/patinaplayer.desktop" \
         --icon-file "$ROOT/assets/patinaplayer.png" \
         --icon-file "$ROOT/assets/patinaplayer.svg" \
+        "${SIZED_ICONS[@]}" \
         --custom-apprun "$TOOLS/AppRun" \
         --exclude-library 'libpipewire-0.3.so*' \
         --exclude-library 'libgnutls.so*' \
         --exclude-library 'libnettle.so*' --exclude-library 'libhogweed.so*' \
         --exclude-library 'libp11-kit.so*' --exclude-library 'libtasn1.so*' \
         --exclude-library 'libidn2.so*' --exclude-library 'libunistring.so*' \
-        --exclude-library 'libgmp.so*' --exclude-library 'libffi.so*' \
-        --output appimage
+        --exclude-library 'libgmp.so*' --exclude-library 'libffi.so*'
+
+    # linuxdeploy puts the SVG at the top of the AppDir, and appimagetool
+    # only makes .DirIcon from a PNG there. Without .DirIcon the AppImage
+    # has no icon in file managers, Gear Lever or AppImageLauncher, so the
+    # 256 px PNG goes on top instead.
+    rm -f "$APPDIR/patinaplayer.svg"
+    ln -sf usr/share/icons/hicolor/256x256/apps/patinaplayer.png "$APPDIR/patinaplayer.png"
+    ln -sf patinaplayer.png "$APPDIR/.DirIcon"
+
+    # Then pack it.
+    "$TOOLS/linuxdeploy" --appdir "$APPDIR" --output appimage
 )
+# Fail here rather than ship an AppImage without its icon again.
+if [ ! -f "$APPDIR/.DirIcon" ]; then
+    printf '%s\n' "error: .DirIcon is missing from the AppDir" >&2
+    exit 1
+fi
 ls -l "$OUT"

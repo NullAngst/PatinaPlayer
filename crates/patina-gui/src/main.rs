@@ -106,6 +106,14 @@ fn main() -> Result<()> {
     let playing_files = session.playing_files;
 
     let ui = AppWindow::new().context("can't open the window")?;
+    // The name the window gives the desktop. On Wayland that's how Plasma
+    // and GNOME find patinaplayer.desktop, and from it the icon, for the
+    // taskbar and the window switcher; without it they show a generic
+    // icon. Has to match the desktop file's name and its StartupWMClass,
+    // and has to be set before the window is first shown.
+    if let Err(e) = slint::set_xdg_app_id("patinaplayer") {
+        log::info!("couldn't set the app id: {e}");
+    }
     // Closing the window either quits, or hides it to the tray while the
     // music keeps going. The bridge keeps this flag current.
     let hide_on_close = std::rc::Rc::new(std::cell::Cell::new(false));

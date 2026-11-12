@@ -80,6 +80,16 @@ The iPod test in `tests/picking.rs` builds a fake iPod in a folder, sends songs 
 
 With a real iPod, every few months is enough: plug it in, send an album, eject, and play it on the iPod.
 
+## 7.5. The icon
+
+The SVGs in `assets/` are the source of every icon; the PNGs are rendered from them. After changing an SVG, run `bash packaging/make-icons.sh` and commit the PNGs it writes. It needs `rsvg-convert`.
+
+Once in a while, after a release:
+
+1. Check the AppImage still has its icon: `./PatinaPlayer-*.AppImage --appimage-extract .DirIcon` and open `squashfs-root/.DirIcon`. It should be the 256 px PNG. The build fails if it's missing, but a linuxdeploy update could change what it puts there.
+2. Start the AppImage and look at the taskbar and the Alt+Tab switcher. A generic icon there means the window's name no longer matches the desktop file: check `slint::set_xdg_app_id` in `crates/patina-gui/src/main.rs` is still called before the window is shown, and that it matches `StartupWMClass` in `assets/patinaplayer.desktop`.
+3. On the phone, the launcher icon should fill the launcher's shape, and turn one colour with themed icons on.
+
 ## 8. Things that age on their own
 
 - The bundled fonts in `crates/patina-gui/ui/fonts/`. Check Inter and JetBrains Mono for new releases once a year. They're drop-in replacements.

@@ -272,14 +272,21 @@ mod linux {
 
     impl Icons {
         fn new() -> Self {
-            let src = image::load_from_memory(include_bytes!("../../../assets/patinaplayer.png"))
-                .map(|i| i.to_rgba8())
-                .unwrap_or_else(|_| image::RgbaImage::new(1, 1));
+            let load = |bytes: &[u8]| {
+                image::load_from_memory(bytes)
+                    .map(|i| i.to_rgba8())
+                    .unwrap_or_else(|_| image::RgbaImage::new(1, 1))
+            };
+            let big = load(include_bytes!("../../../assets/patinaplayer.png"));
+            // The simple drawing for tray sizes: the full one's buttons and
+            // stripes turn to mush at 22 px.
+            let small = load(include_bytes!("../../../assets/patinaplayer-small.png"));
             Self {
                 base: SIZES
                     .iter()
                     .map(|&s| {
-                        image::imageops::resize(&src, s, s, image::imageops::FilterType::Lanczos3)
+                        let src = if s <= 32 { &small } else { &big };
+                        image::imageops::resize(src, s, s, image::imageops::FilterType::Lanczos3)
                     })
                     .collect(),
             }
@@ -306,9 +313,9 @@ mod linux {
         let s = img.width() as f64;
         let r = s * 0.24;
         let (cx, cy) = (s - r - 0.5, s - r - 0.5);
-        // Copper disc, the app's accent for "something's happening".
-        let disc = image::Rgba([0xC8, 0x7F, 0x4A, 0xFF]);
-        let ink = image::Rgba([0x10, 0x16, 0x14, 0xFF]);
+        // The icon's orange, on its dark brown, for "something's happening".
+        let disc = image::Rgba([0xE0, 0x7A, 0x2E, 0xFF]);
+        let ink = image::Rgba([0x2B, 0x24, 0x20, 0xFF]);
         for y in 0..img.height() {
             for x in 0..img.width() {
                 let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
