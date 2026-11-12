@@ -17,6 +17,10 @@ What to check every couple of months to keep PatinaPlayer building and working. 
 
 THE TESTS NEED A FEW GIGABYTES FREE FOR THE BUILD DIRECTORY. With debug info the test binaries add up fast; if you're short on space, `CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace` builds them a lot smaller.
 
+## 2.5. Smart playlists stay injection-proof
+
+`cargo test -p patina-core --test picking cannot_inject` throws SQL injection payloads and random rule strings at the smart playlist code. If you or anyone changes `crates/patina-core/src/library/smart.rs`, run it. The rule for that file: a value from the user only ever reaches SQL through `self.arg(...)`, which makes it a bound `?N` parameter. NEVER PUT A USER'S VALUE INTO THE SQL TEXT WITH `format!`. The only things `format!` may put into that SQL are the fixed strings in the code and numbers the code produced itself.
+
 ## 3. The Servers workflow
 
 Actions, Servers, Run workflow. It runs the clients against real Navidrome, Gonic, Ampache, MiniDLNA and Gerbera containers, pulled at their latest. A failure here usually means one of those servers changed its API or its container's setup. The log says which.

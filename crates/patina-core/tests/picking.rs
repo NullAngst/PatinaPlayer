@@ -376,6 +376,223 @@ fn smart_playlists_follow_the_library() {
     );
 }
 
+/// Smart playlist rules look a little like SQL, so they get attacked like
+/// SQL here. Every value typed in has to reach SQLite as a bound
+/// parameter, never as part of the statement, so none of these can change
+/// what the query does, and the library is the same after all of them.
+#[test]
+fn smart_playlists_cannot_inject_sql() {
+    let fx = fixture();
+    // A song whose tags are themselves an attack, so "is" has something
+    // to match only if the value is taken as plain text.
+    make(
+        &fx.root.join("Evil/Tags/01.flac"),
+        &[
+            ("title", "Robert'); DROP TABLE tracks;--"),
+            ("artist", "100% \"Pure\" O'Brien_"),
+            ("album", "Tags"),
+        ],
+    );
+    let b = browser(&fx);
+    let lib = b.lib.as_ref().unwrap();
+    let before = lib.track_count().unwrap();
+    assert_eq!(before, 5);
+
+    let run = |q: &str| -> Option<Vec<String>> {
+        let q = patina_core::library::smart::parse(q).ok()?;
+        let rows = lib
+            .query_tracks(&q, 0)
+            .unwrap_or_else(|e| panic!("valid rules made bad SQL: {e}"));
+        Some(rows.into_iter().map(|t| t.title).collect())
+    };
+
+    // The attack strings match the song that has them, and only it.
+    let evil = vec!["Robert'); DROP TABLE tracks;--".to_string()];
+    assert_eq!(
+        run("title is \"Robert'); DROP TABLE tracks;--\"").unwrap(),
+        evil
+    );
+    assert_eq!(run("title contains \"DROP TABLE\"").unwrap(), evil);
+    assert_eq!(run("artist contains \"O'Brien\"").unwrap(), evil);
+    assert_eq!(run("artist contains '\"Pure\"'").unwrap(), evil);
+
+    // LIKE's wildcards are taken literally: "%" and "_" only match songs
+    // that have them, not every song.
+    assert_eq!(run("artist contains \"%\"").unwrap(), evil);
+    assert_eq!(run("artist ends \"_\"").unwrap(), evil);
+    assert_eq!(run("title contains \"%%\"").unwrap().len(), 0);
+    assert_eq!(run("title starts \"_\"").unwrap().len(), 0);
+
+    // Classic payloads as values: they run, match nothing, change nothing.
+    for q in [
+        "title is \"x' OR '1'='1\"",
+        "title is 'x\" OR \"1\"=\"1'",
+        "title is \"x'; DELETE FROM tracks; --\"",
+        "album contains \"') UNION SELECT * FROM smart_playlists --\"",
+        "genre is \"a' OR 1=1 --\"",
+        "genre contains \"%' OR '%'='\"",
+        "folder is \"/'; DROP TABLE tracks; --\"",
+        "folder contains \"'; DELETE FROM tracks; --\"",
+        "source is \"x' OR '1'='1\"",
+        "format is \"flac' OR 1=1 --\"",
+    ] {
+        assert_eq!(run(q).as_deref(), Some(&[][..]), "{q}");
+    }
+
+    // SQL in the places that aren't values isn't understood at all: the
+    // fields, operators, sort keys and limit are from fixed lists.
+    for q in [
+        "title is x; DROP TABLE tracks",
+        "year = 1 OR 1=1",
+        "\"title) OR 1=1 --\" is x",
+        "tracks.path is x",
+        "title = x UNION SELECT 1",
+        "sort by title; DROP TABLE tracks",
+        "sort by (SELECT 1)",
+        "limit 1; DROP TABLE tracks",
+        "limit -1",
+        "limit 1 OFFSET 0",
+        "rating >= 4 --",
+        "year >= (SELECT MAX(year) FROM tracks)",
+        "length is 99999999999999999:00",
+        "rate > 999999999999999999999k",
+    ] {
+        if let Some(rows) = run(q) {
+            // A few of these are harmless rules once read as words; what
+            // matters is they ran as rules and nothing else.
+            assert!(rows.len() <= before as usize, "{q}");
+        }
+    }
+
+    // Saving and reading back keeps the text exactly, attack and all.
+    let id = lib
+        .create_smart(
+            "'); DROP TABLE smart_playlists;--",
+            "title contains \"DROP TABLE\"",
+        )
+        .unwrap();
+    let row = lib.smart_playlist(id).unwrap().unwrap();
+    assert_eq!(row.name, "'); DROP TABLE smart_playlists;--");
+    assert_eq!(row.items, 1);
+    assert_eq!(
+        lib.smart_tracks(id).unwrap().len(),
+        1,
+        "the saved rules run the same way"
+    );
+
+    // Nested past the limit, too long, or too many rules: a message, not
+    // a stack overflow or a crash.
+    let deep = format!("{}title is x{}", "(".repeat(200), ")".repeat(200));
+    assert!(patina_core::library::smart::parse(&deep).is_err());
+    let nots = format!("{}title is x", "not ".repeat(500));
+    assert!(patina_core::library::smart::parse(&nots).is_err());
+    let huge = "(".repeat(1_000_000);
+    assert!(patina_core::library::smart::parse(&huge).is_err());
+    let many = vec!["year > 1"; 300].join(" or ");
+    assert!(patina_core::library::smart::parse(&many).is_err());
+    let ok = format!("{}title is x{}", "(".repeat(30), ")".repeat(30));
+    assert!(run(&ok).is_some(), "30 deep is fine");
+
+    // Random rules from every piece of the language and some junk: every
+    // one either parses and runs as valid SQL, or is turned away with a
+    // message. None panics, none makes SQLite reject the statement.
+    let words = [
+        "title",
+        "artist",
+        "albumartist",
+        "album",
+        "genre",
+        "year",
+        "rating",
+        "albumrating",
+        "plays",
+        "played",
+        "added",
+        "length",
+        "format",
+        "rate",
+        "bits",
+        "lossless",
+        "lossy",
+        "unrated",
+        "folder",
+        "source",
+        "is",
+        "isnt",
+        "contains",
+        "starts",
+        "ends",
+        "=",
+        "!=",
+        "<",
+        "<=",
+        ">",
+        ">=",
+        "~",
+        "and",
+        "or",
+        "not",
+        "(",
+        ")",
+        "never",
+        "sort",
+        "by",
+        "limit",
+        "random",
+        "desc",
+        "asc",
+        "4",
+        "1990-1999",
+        "30d",
+        "2024-01",
+        "4:30",
+        "44.1k",
+        "yes",
+        "\"a b\"",
+        "'it''s'",
+        "\"%_\\\"",
+        "local",
+        "--",
+        ";",
+        "'",
+        "\"",
+        "DROP",
+        "TABLE",
+        "tracks",
+        "SELECT",
+        "*",
+        "NULL",
+        "0x41",
+        "1e999",
+        "-5",
+    ];
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    for _ in 0..4000 {
+        let mut q = String::new();
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let n = 1 + (seed % 12) as usize;
+        for _ in 0..n {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            q.push_str(words[(seed % words.len() as u64) as usize]);
+            q.push(' ');
+        }
+        if let Ok(parsed) = patina_core::library::smart::parse(&q) {
+            lib.query_tracks(&parsed, 0)
+                .unwrap_or_else(|e| panic!("{q:?} parsed but made bad SQL: {e}"));
+            lib.query_count(&parsed)
+                .unwrap_or_else(|e| panic!("{q:?} parsed but its count failed: {e}"));
+        }
+    }
+
+    // And after all of it, the library is untouched.
+    assert_eq!(lib.track_count().unwrap(), before);
+    assert!(lib.smart_playlists().unwrap().iter().any(|s| s.id == id));
+}
+
 #[test]
 fn playlists_go_out_as_m3u8_and_come_back() {
     let fx = fixture();

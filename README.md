@@ -48,6 +48,8 @@ rating >= 4 and genre is "blues rock" and played > 180d sort by random limit 100
 - Shortcuts: `played never`, `lossless`, `lossy`, `unrated`.
 - At the end, `sort by <field> [asc|desc]` (or `sort by random`) and `limit N`.
 
+The rules look a bit like SQL, but what you type never becomes part of a database statement. The app reads the rules into its own list of conditions first, then builds the query from fixed pieces: field names, operators and sort orders come from lists in the code, and every value you type goes to SQLite as a bound parameter, so it's only ever compared against, never run. `%` and `_` in a value match those characters literally. Anything outside the language is turned away with a message, before the database sees it. Rules are capped at 4000 characters, 200 conditions and 32 levels of nesting, far past anything you'd type, so a pasted wall of text gets a message instead of hanging the app.
+
 ### Playlists in and out
 
 - Import M3U, M3U8 and PLS files from Playlists (Import, or `<` in the terminal app). Each entry matches your library by its path, then by its last folders and file name, so a playlist made on another computer with the music somewhere else still lines up. Entries that match nothing are kept as missing songs if they're local paths, so they turn up when the files do. Web addresses are left out, and the import says how many of each there were.

@@ -383,9 +383,20 @@ fn lex(s: &str) -> std::result::Result<Vec<Tok>, ParseError> {
     Ok(out)
 }
 
+/// Limits on a query, so a pasted wall of text or ten thousand nested
+/// parentheses gets a plain message instead of a stack overflow in the
+/// parser or a query SQLite refuses. Far above anything a person types.
+const MAX_CHARS: usize = 4000;
+const MAX_DEPTH: usize = 32;
+const MAX_CONDITIONS: usize = 200;
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// How many "(" and "not" deep the parser is right now.
+    depth: usize,
+    /// Conditions read so far.
+    conds: usize,
 }
 
 impl Parser {
@@ -456,20 +467,41 @@ impl Parser {
         })
     }
 
+    fn deeper(&mut self) -> std::result::Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return err(format!(
+                "That's nested more than {MAX_DEPTH} deep. Take out some parentheses or nots"
+            ));
+        }
+        Ok(())
+    }
+
     fn unary(&mut self) -> std::result::Result<Expr, ParseError> {
         if self.eat_word("not") || matches!(self.peek(), Some(Tok::Sym("!"))) {
             if matches!(self.peek(), Some(Tok::Sym("!"))) {
                 self.pos += 1;
             }
-            return Ok(Expr::Not(Box::new(self.unary()?)));
+            self.deeper()?;
+            let e = Expr::Not(Box::new(self.unary()?));
+            self.depth -= 1;
+            return Ok(e);
         }
         if matches!(self.peek(), Some(Tok::Open)) {
             self.pos += 1;
+            self.deeper()?;
             let e = self.expr()?;
             if !matches!(self.next(), Some(Tok::Close)) {
                 return err("A \"(\" isn't closed");
             }
+            self.depth -= 1;
             return Ok(e);
+        }
+        self.conds += 1;
+        if self.conds > MAX_CONDITIONS {
+            return err(format!(
+                "That's more than {MAX_CONDITIONS} rules. Split it into two smart playlists"
+            ));
         }
         self.cond()
     }
@@ -739,8 +771,18 @@ fn check(e: &Expr) -> std::result::Result<(), ParseError> {
 
 /// Parse a query. An empty one matches everything.
 pub fn parse(text: &str) -> std::result::Result<Query, ParseError> {
+    if text.chars().count() > MAX_CHARS {
+        return err(format!(
+            "That's longer than {MAX_CHARS} characters. Shorten it, or split it into two smart playlists"
+        ));
+    }
     let toks = lex(text)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+        conds: 0,
+    };
     let mut q = Query {
         expr: None,
         sort: None,
@@ -760,7 +802,8 @@ fn number(field: Field, v: &str) -> Option<i64> {
     match field {
         Field::Length => {
             if let Some((m, s)) = v.split_once(':') {
-                return Some(m.parse::<i64>().ok()? * 60 + s.parse::<i64>().ok()?);
+                let (m, s) = (m.parse::<i64>().ok()?, s.parse::<i64>().ok()?);
+                return m.checked_mul(60)?.checked_add(s);
             }
             let (n, unit) = split_unit(&v);
             let n: f64 = n.parse().ok()?;
