@@ -311,30 +311,51 @@ impl Browser {
 
     // ----- Smart playlists -----
 
-    /// What a query would match, for the box it's being typed in.
-    pub fn check_smart(&self, query: &str) -> SmartCheck {
-        match smart::parse(query) {
+    /// What both boxes would match, as they're typed: the songs, and how
+    /// many the leave-out box takes away, so a leave-out rule that misses
+    /// (a misspelled artist) shows as 0 left out.
+    pub fn check_smart(&self, query: &str, exclude: &str) -> SmartCheck {
+        match smart::parse_with(query, exclude) {
             Err(e) => SmartCheck {
                 ok: false,
                 message: e.0,
             },
             Ok(q) => {
-                let n = self
-                    .lib
-                    .as_ref()
-                    .and_then(|l| l.query_count(&q).ok())
-                    .unwrap_or(0);
-                SmartCheck {
-                    ok: true,
-                    message: format!("Matches {}", count(n as usize)),
+                let lib = self.lib.as_ref();
+                let n = lib.and_then(|l| l.query_count(&q).ok()).unwrap_or(0);
+                let mut message = format!("Matches {}", count(n as usize));
+                if q.exclude.is_some() {
+                    // Counted without the limit, or a limit would hide them.
+                    let unlimited = smart::Query {
+                        limit: None,
+                        ..q.clone()
+                    };
+                    let without = smart::Query {
+                        exclude: None,
+                        ..unlimited.clone()
+                    };
+                    let all = lib.and_then(|l| l.query_count(&without).ok()).unwrap_or(0);
+                    let kept = lib
+                        .and_then(|l| l.query_count(&unlimited).ok())
+                        .unwrap_or(0);
+                    message.push_str(&format!(", {} left out", (all - kept).max(0)));
                 }
+                // Nothing at all, from rules that say "and" where "or" was
+                // likely meant: say so, rather than just "no songs".
+                if n == 0
+                    && let Some(hint) = q.both_hint()
+                {
+                    message.push_str(". ");
+                    message.push_str(&hint);
+                }
+                SmartCheck { ok: true, message }
             }
         }
     }
 
     /// Save a new smart playlist. False if the query didn't work, with a
     /// note saying why, so the frontend keeps the box open.
-    pub fn create_smart(&mut self, name: &str, query: &str) -> bool {
+    pub fn create_smart(&mut self, name: &str, query: &str, exclude: &str) -> bool {
         let name = name.trim();
         if name.is_empty() {
             self.note("A smart playlist needs a name");
@@ -344,9 +365,9 @@ impl Browser {
             self.error("Smart playlists need the library");
             return false;
         };
-        match lib.create_smart(name, query) {
+        match lib.create_smart(name, query, exclude) {
             Ok(_) => {
-                let c = self.check_smart(query);
+                let c = self.check_smart(query, exclude);
                 self.note(format!("Made the smart playlist \"{name}\". {}", c.message));
                 self.refresh_section(Section::Playlists);
                 true
@@ -358,15 +379,15 @@ impl Browser {
         }
     }
 
-    /// Change a smart playlist's name and query.
-    pub fn update_smart(&mut self, id: i64, name: &str, query: &str) -> bool {
+    /// Change a smart playlist's name and both sets of rules.
+    pub fn update_smart(&mut self, id: i64, name: &str, query: &str, exclude: &str) -> bool {
         let name = name.trim();
         if name.is_empty() {
             self.note("A smart playlist needs a name");
             return false;
         }
         let Some(lib) = &self.lib else { return false };
-        match lib.update_smart(id, name, query) {
+        match lib.update_smart(id, name, query, exclude) {
             Ok(()) => {
                 // An open copy of it has the old name in its source.
                 if let Some(stack) = self.stacks.get_mut(&Section::Playlists) {

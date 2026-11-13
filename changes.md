@@ -1,5 +1,17 @@
 # Changes
 
+2026.11.13 - Feature addition (smart playlist leave-out box)
+
+* Smart playlists have a second box, "Leave out songs where": any song its rules are true for is left out, whatever the first box says. Saved with the playlist, shown on its row as "… · leaving out …", and kept through renames and edits. In the terminal app it's the step after the first box.
+* The live check says how many songs the second box left out ("Matches 1 track, 1 left out"), counted without the limit, so a leave-out rule that misses shows as 0.
+* Mistakes in the second box start with "Leave out:", and sort or limit there is refused with a pointer to the first box.
+* Fixed: `isnt` on a text field and `not ( … )` dropped songs that didn't have the tag at all, since SQL treats a missing tag as neither true nor false. A missing tag now counts as not matching, so `artist isnt "the beatles"` keeps songs with no artist. The leave-out box works the same way.
+* Library database version 10 adds the second box's column. Existing smart playlists carry on with it empty.
+* README: the second box, `=` for text and for year ranges (`year = 1960-1969`), and how songs without a tag are treated.
+* Tests: the request's own rules (60s pop leaving out The Beatles written either way), a song without an artist kept on both sides, the left-out count with and without a limit, errors from the second box, saving, renaming, and SQL injection through the second box.
+
+Reasons for changes: asked for a box of rules for songs to leave out, with year ranges usable alongside other rules. The tag fix came from making sure the second box couldn't lose untagged songs.
+
 2026.11.13 - Feature addition (sleep timer)
 
 * Sleep timer, from a moon button in the bottom bar and on Now Playing, or `Z` in the terminal app. Presets of 15, 30, 45, 60 and 90 minutes, the end of this song, or a time of your own: minutes, a length like 1h30, or a time of day like 23:30 or 11:30pm, with a live line saying when it will pause or what's wrong with what was typed.

@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 9;
+pub const VERSION: i64 = 10;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -317,6 +317,11 @@ CREATE TABLE lb_listens (
 );
 "#;
 
+/// Smart playlists get a second set of rules: songs to leave out.
+const V10: &str = r#"
+ALTER TABLE smart_playlists ADD COLUMN exclude TEXT NOT NULL DEFAULT '';
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -357,6 +362,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 9 {
         tx.execute_batch(V9)?;
+    }
+    if current < 10 {
+        tx.execute_batch(V10)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

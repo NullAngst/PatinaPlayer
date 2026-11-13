@@ -87,10 +87,19 @@ pub enum InputPurpose {
     SmartName {
         edit: Option<i64>,
         query: String,
+        exclude: String,
     },
+    /// The songs to take. Enter goes on to the songs to leave out.
     SmartQuery {
         name: String,
         edit: Option<i64>,
+        exclude: String,
+    },
+    /// The songs to leave out, empty for none. Enter saves.
+    SmartExclude {
+        name: String,
+        edit: Option<i64>,
+        query: String,
     },
     /// Where to write a playlist file: the selection's, or the queue's.
     Export {
@@ -899,6 +908,7 @@ impl App {
                     purpose: InputPurpose::SmartName {
                         edit: None,
                         query: String::new(),
+                        exclude: String::new(),
                     },
                     buf: String::new(),
                 }
@@ -909,6 +919,7 @@ impl App {
                         purpose: InputPurpose::SmartQuery {
                             name: p.name,
                             edit: Some(p.id),
+                            exclude: p.exclude,
                         },
                         buf: p.query,
                     }
@@ -922,6 +933,7 @@ impl App {
                         purpose: InputPurpose::SmartName {
                             edit: Some(p.id),
                             query: p.query,
+                            exclude: p.exclude,
                         },
                         buf: p.name,
                     }
@@ -1448,35 +1460,68 @@ impl App {
             },
             InputPurpose::RenamePlaylist { id } => self.b.rename_playlist(id, &text),
             InputPurpose::RenameMix { id } => self.b.rename_mix(id, &text),
-            InputPurpose::SmartName { edit, query } => {
+            InputPurpose::SmartName {
+                edit,
+                query,
+                exclude,
+            } => {
                 if text.is_empty() {
                     return;
                 }
-                // Renaming keeps the query; a new one goes on to ask for it.
+                // Renaming keeps both sets of rules; a new one goes on to
+                // ask for them.
                 match edit {
                     Some(id) => {
-                        self.b.update_smart(id, &text, &query);
+                        self.b.update_smart(id, &text, &query, &exclude);
                     }
                     None => {
                         self.modal = Modal::Input {
                             purpose: InputPurpose::SmartQuery {
                                 name: text,
                                 edit: None,
+                                exclude,
                             },
                             buf: query,
                         }
                     }
                 }
             }
-            InputPurpose::SmartQuery { name, edit } => {
+            InputPurpose::SmartQuery {
+                name,
+                edit,
+                exclude,
+            } => {
+                if let Err(e) = patina_core::library::smart::parse(&text) {
+                    // Keep the box up to fix it.
+                    self.b.error(e.0);
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::SmartQuery {
+                            name,
+                            edit,
+                            exclude,
+                        },
+                        buf: text,
+                    };
+                    return;
+                }
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::SmartExclude {
+                        name,
+                        edit,
+                        query: text,
+                    },
+                    buf: exclude,
+                };
+            }
+            InputPurpose::SmartExclude { name, edit, query } => {
                 let ok = match edit {
-                    Some(id) => self.b.update_smart(id, &name, &text),
-                    None => self.b.create_smart(&name, &text),
+                    Some(id) => self.b.update_smart(id, &name, &query, &text),
+                    None => self.b.create_smart(&name, &query, &text),
                 };
                 if !ok {
-                    // Keep the box up to fix the query.
+                    // Keep the box up to fix it.
                     self.modal = Modal::Input {
-                        purpose: InputPurpose::SmartQuery { name, edit },
+                        purpose: InputPurpose::SmartExclude { name, edit, query },
                         buf: text,
                     };
                 }

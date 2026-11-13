@@ -619,7 +619,7 @@ impl State {
             Item::Smart(p) => {
                 r.kind = 17;
                 r.title = ss(&p.name);
-                r.sub = ss(&p.query);
+                r.sub = ss(p.rules());
                 r.dim = false;
                 r.right = ss(format!("{} track{}", p.items, s_(p.items)));
             }
@@ -2844,26 +2844,38 @@ impl State {
 
     /// The smart playlist form, new or to change one.
     fn open_smart(&mut self, ui: &AppWindow, edit: Option<patina_core::library::smart::SmartRow>) {
-        let (title, name, query, ok) = match &edit {
+        let (title, name, query, exclude, ok) = match &edit {
             Some(p) => (
                 "Edit smart playlist",
                 p.name.clone(),
                 p.query.clone(),
+                p.exclude.clone(),
                 "Save",
             ),
-            None => ("New smart playlist", String::new(), String::new(), "Create"),
+            None => (
+                "New smart playlist",
+                String::new(),
+                String::new(),
+                String::new(),
+                "Create",
+            ),
         };
         self.dlg = match &edit {
             Some(p) => Dlg::SmartEdit(p.id),
             None => Dlg::SmartNew,
         };
         open_text(ui, title, "Name", &name, Some(("Songs where", &query)), ok);
-        self.smart_note(ui, &query);
+        // The songs to leave out, under the songs to take.
+        ui.set_dlg_label3(ss("Leave out songs where (optional)"));
+        ui.set_dlg_text3(ss(&exclude));
+        ui.set_dlg_three_fields(true);
+        self.smart_note(ui, &query, &exclude);
     }
 
-    /// Under the query: what it matches, or why it doesn't work.
-    fn smart_note(&self, ui: &AppWindow, query: &str) {
-        if query.trim().is_empty() {
+    /// Under the rules: what they match and how many the second box
+    /// leaves out, or why they don't work.
+    fn smart_note(&self, ui: &AppWindow, query: &str, exclude: &str) {
+        if query.trim().is_empty() && exclude.trim().is_empty() {
             ui.set_dlg_note(ss(format!(
                 "Like: {}. Empty matches every song. {}",
                 patina_core::library::smart::EXAMPLES[0].0,
@@ -2872,7 +2884,7 @@ impl State {
             ui.set_dlg_note_warn(false);
             return;
         }
-        let c = self.b.check_smart(query);
+        let c = self.b.check_smart(query, exclude);
         ui.set_dlg_note(ss(c.message));
         ui.set_dlg_note_warn(!c.ok);
     }
@@ -3278,16 +3290,18 @@ impl State {
             }
             Dlg::RenameServer(old) => self.b.edit_server(&old, &t1, "", "", None),
             Dlg::SmartNew => {
-                if !self.b.create_smart(&t1, &t2) {
+                let t3 = ui.get_dlg_text3().trim().to_string();
+                if !self.b.create_smart(&t1, &t2, &t3) {
                     self.dlg = Dlg::SmartNew;
-                    self.smart_note(ui, &t2);
+                    self.smart_note(ui, &t2, &t3);
                     return;
                 }
             }
             Dlg::SmartEdit(id) => {
-                if !self.b.update_smart(id, &t1, &t2) {
+                let t3 = ui.get_dlg_text3().trim().to_string();
+                if !self.b.update_smart(id, &t1, &t2, &t3) {
                     self.dlg = Dlg::SmartEdit(id);
-                    self.smart_note(ui, &t2);
+                    self.smart_note(ui, &t2, &t3);
                     return;
                 }
             }
@@ -3626,6 +3640,7 @@ fn open_text(
     ui.set_dlg_text1(ss(text1));
     ui.set_dlg_two_fields(second.is_some());
     ui.set_dlg_four_fields(false);
+    ui.set_dlg_three_fields(false);
     let (l2, t2) = second.unwrap_or(("", ""));
     ui.set_dlg_label2(ss(l2));
     ui.set_dlg_text2(ss(t2));
@@ -3812,8 +3827,14 @@ pub fn install(
         to.max(0) as usize
     ));
     on!(on_dlg_edited, |s, u, field, text| {
-        if field == 2 && matches!(s.dlg, Dlg::SmartNew | Dlg::SmartEdit(_)) {
-            s.smart_note(&u, text.as_str());
+        // Either box changes what the rules match.
+        if matches!(field, 2 | 3) && matches!(s.dlg, Dlg::SmartNew | Dlg::SmartEdit(_)) {
+            let (q, x) = if field == 2 {
+                (text.to_string(), u.get_dlg_text3().to_string())
+            } else {
+                (u.get_dlg_text2().to_string(), text.to_string())
+            };
+            s.smart_note(&u, &q, &x);
         }
         if field == 1 && matches!(s.dlg, Dlg::Sleep) {
             s.sleep_note(&u, text.as_str());

@@ -39,12 +39,22 @@ A smart playlist is a saved search that keeps itself up to date. Make one from P
 rating >= 4 and genre is "blues rock" and played > 180d sort by random limit 100
 ```
 
+A second box takes songs back out: anything its rules are true for is left out, whatever the first box says. It's often easier than fitting a `not` into the first box. For 60s pop without The Beatles:
+
+```
+Songs where:            year = 1960-1969 and genre = pop
+Leave out songs where:  artist = "the beatles" or artist = beatles
+```
+
+The check under the boxes says how many songs match and how many the second box left out, so a leave-out rule that misses (a misspelled artist) shows as `0 left out`. In the terminal app the second box comes after the first, when you press Enter. Sort and limit go in the first box.
+
 - Fields: `title`, `artist`, `albumartist`, `album`, `genre`, `year`, `rating`, `albumrating`, `plays`, `played`, `added`, `length`, `format`, `rate`, `bits`, `lossless`, `folder`, `source`.
-- Text: `is`, `isnt`, `contains`, `starts`, `ends`, and `~` for contains. Quote anything with a space in it.
-- Numbers: `=`, `!=`, `<`, `<=`, `>`, `>=`, and ranges like `year 1990-1999`.
+- Text: `is` (or `=`), `isnt` (or `!=`), `contains`, `starts`, `ends`, and `~` for contains. Case doesn't matter. Quote anything with a space in it.
+- Numbers: `=`, `!=`, `<`, `<=`, `>`, `>=`, and ranges like `year = 1960-1969` (or just `year 1960-1969`).
 - Times are ages: `played > 180d` is not played in six months (or never), `added < 2w` is added in the last two weeks. `h`, `d`, `w`, `mo` and `y` all work, and so do dates like `added > 2024-06`.
 - Lengths as `4:30` or `5m`, sample rates as `44.1k`.
 - `and`, `or`, `not` and parentheses. Two rules side by side mean `and`.
+- A song without a tag is never caught by a rule about that tag, either way: `artist isnt "the beatles"`, `not (artist is "the beatles")` and the leave-out box all keep songs with no artist at all.
 - Shortcuts: `played never`, `lossless`, `lossy`, `unrated`.
 - At the end, `sort by <field> [asc|desc]` (or `sort by random`) and `limit N`.
 

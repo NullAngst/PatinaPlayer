@@ -268,8 +268,69 @@ impl SortKey {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     pub expr: Option<Expr>,
+    /// Songs to leave out, from the second box: any song these rules are
+    /// true for goes, whatever the first box says.
+    pub exclude: Option<Expr>,
     pub sort: Option<(SortKey, bool)>,
     pub limit: Option<u32>,
+}
+
+impl Query {
+    /// Why rules that match nothing might be asking for the wrong thing:
+    /// two `is` rules on one field joined by `and`, like `genre is grunge
+    /// and genre is post-grunge`. That asks for songs that are both at
+    /// once, which reads like "either" but isn't. Says so, with the `or`
+    /// that was likely meant. None when there's no such pair.
+    pub fn both_hint(&self) -> Option<String> {
+        fn find(e: &Expr) -> Option<(Field, String, String)> {
+            match e {
+                Expr::And(xs) => {
+                    let is: Vec<(Field, &String)> = xs
+                        .iter()
+                        .filter_map(|x| match x {
+                            Expr::Cond {
+                                field,
+                                op: Op::Is,
+                                value,
+                            } => Some((*field, value)),
+                            _ => None,
+                        })
+                        .collect();
+                    for (i, (f, a)) in is.iter().enumerate() {
+                        if let Some((_, b)) = is[i + 1..]
+                            .iter()
+                            .find(|(g, b)| g == f && !b.eq_ignore_ascii_case(a))
+                        {
+                            return Some((*f, (*a).clone(), (*b).clone()));
+                        }
+                    }
+                    xs.iter().find_map(find)
+                }
+                Expr::Or(xs) => xs.iter().find_map(find),
+                Expr::Not(x) => find(x),
+                _ => None,
+            }
+        }
+        let (field, a, b) = find(self.expr.as_ref()?)?;
+        let q = |v: &str| {
+            if v.contains(char::is_whitespace) {
+                format!("\"{v}\"")
+            } else {
+                v.to_string()
+            }
+        };
+        let name = field.name();
+        let either = format!("{name} is {} or {name} is {}", q(&a), q(&b));
+        Some(if field == Field::Genre {
+            format!(
+                "\"and\" means a song tagged with both genres, and none are. For songs in either, use or: {either}"
+            )
+        } else {
+            format!(
+                "\"and\" means a song whose {name} is both at once, which can't be. For either, use or: {either}"
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -785,6 +846,7 @@ pub fn parse(text: &str) -> std::result::Result<Query, ParseError> {
     };
     let mut q = Query {
         expr: None,
+        exclude: None,
         sort: None,
         limit: None,
     };
@@ -792,6 +854,21 @@ pub fn parse(text: &str) -> std::result::Result<Query, ParseError> {
         q.expr = Some(p.expr()?);
     }
     p.tail(&mut q)?;
+    Ok(q)
+}
+
+/// Both boxes: the songs to take (`include`, with any sort and limit), and
+/// the songs to leave out (`exclude`, rules only). Either can be empty;
+/// an empty first box takes every song.
+pub fn parse_with(include: &str, exclude: &str) -> std::result::Result<Query, ParseError> {
+    let mut q = parse(include)?;
+    if !exclude.trim().is_empty() {
+        let x = parse(exclude).map_err(|e| ParseError(format!("Leave out: {e}")))?;
+        if x.sort.is_some() || x.limit.is_some() {
+            return err("Leave out: sort by and limit go in the first box");
+        }
+        q.exclude = x.expr;
+    }
     Ok(q)
 }
 
@@ -932,7 +1009,11 @@ impl Sql {
                     .collect::<Vec<_>>()
                     .join(" OR ")
             ),
-            Expr::Not(x) => format!("NOT {}", self.expr(x)),
+            // A rule on a tag a song doesn't have is unknown to SQL, and
+            // NOT unknown is still unknown, so the song would drop out of
+            // both a rule and its opposite. Unknown counts as false here,
+            // so "not (artist is x)" keeps songs with no artist.
+            Expr::Not(x) => format!("NOT COALESCE({}, 0)", self.expr(x)),
             Expr::Never(_) => "(last_played IS NULL)".into(),
             Expr::Cond { field, op, value } => self.cond(*field, *op, value),
         }
@@ -956,7 +1037,8 @@ impl Sql {
                     format!("{col} LIKE {a} ESCAPE '\\'")
                 };
                 if op == Op::IsNot {
-                    format!("NOT ({test})")
+                    // No tag at all isn't the value either.
+                    format!("NOT COALESCE(({test}), 0)")
                 } else {
                     format!("({test})")
                 }
@@ -1083,6 +1165,8 @@ pub struct SmartRow {
     pub id: i64,
     pub name: String,
     pub query: String,
+    /// The songs-to-leave-out rules, empty when there are none.
+    pub exclude: String,
     /// Songs it matches right now.
     pub items: i64,
 }
@@ -1110,16 +1194,45 @@ fn shuffle<T>(v: &mut [T], mut s: u64) {
     }
 }
 
+/// The WHERE for both boxes: the first box's rules, and none of the
+/// second's. A song the second box's rules are unknown for (a tag it
+/// doesn't have) isn't left out.
+fn where_clause(sql: &mut Sql, q: &Query) -> String {
+    let mut parts = Vec::new();
+    if let Some(e) = &q.expr {
+        parts.push(sql.expr(e));
+    }
+    if let Some(x) = &q.exclude {
+        parts.push(format!("NOT COALESCE({}, 0)", sql.expr(x)));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", parts.join(" AND "))
+    }
+}
+
+impl SmartRow {
+    /// Both boxes on one line, for a list: "genre is pop · leaving out
+    /// artist is beatles".
+    pub fn rules(&self) -> String {
+        if self.exclude.trim().is_empty() {
+            self.query.clone()
+        } else if self.query.trim().is_empty() {
+            format!("everything · leaving out {}", self.exclude)
+        } else {
+            format!("{} · leaving out {}", self.query, self.exclude)
+        }
+    }
+}
+
 impl Library {
     fn smart_sql(&self, q: &Query) -> (String, Vec<Value>) {
         let mut sql = Sql {
             args: Vec::new(),
             now: now_secs(),
         };
-        let mut clause = match &q.expr {
-            Some(e) => format!("WHERE {}", sql.expr(e)),
-            None => String::new(),
-        };
+        let mut clause = where_clause(&mut sql, q);
         let (key, desc) = q.sort.unwrap_or((SortKey::Album, false));
         clause.push_str(&format!(" ORDER BY {}", key.order_by(desc)));
         if key != SortKey::Random
@@ -1152,10 +1265,7 @@ impl Library {
             args: Vec::new(),
             now: now_secs(),
         };
-        let clause = match &q.expr {
-            Some(e) => format!("WHERE {}", sql.expr(e)),
-            None => String::new(),
-        };
+        let clause = where_clause(&mut sql, q);
         let n: i64 = self.conn.query_row(
             &format!("SELECT COUNT(*) FROM tracks {clause}"),
             rusqlite::params_from_iter(sql.args),
@@ -1169,14 +1279,14 @@ impl Library {
 
     pub fn smart_playlists(&self) -> Result<Vec<SmartRow>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT id, name, query FROM smart_playlists ORDER BY name COLLATE NOCASE, id",
+            "SELECT id, name, query, exclude FROM smart_playlists ORDER BY name COLLATE NOCASE, id",
         )?;
-        let rows: Vec<(i64, String, String)> = st
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        let rows: Vec<(i64, String, String, String)> = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::with_capacity(rows.len());
-        for (id, name, query) in rows {
-            let items = match parse(&query) {
+        for (id, name, query, exclude) in rows {
+            let items = match parse_with(&query, &exclude) {
                 Ok(q) => self.query_count(&q)?,
                 Err(_) => 0,
             };
@@ -1184,6 +1294,7 @@ impl Library {
                 id,
                 name,
                 query,
+                exclude,
                 items,
             });
         }
@@ -1196,31 +1307,38 @@ impl Library {
 
     /// The songs a saved smart playlist matches right now.
     pub fn smart_tracks(&self, id: i64) -> Result<Vec<TrackRow>> {
-        let Some(text) = self
+        let Some((text, exclude)) = self
             .conn
             .query_row(
-                "SELECT query FROM smart_playlists WHERE id = ?1",
+                "SELECT query, exclude FROM smart_playlists WHERE id = ?1",
                 [id],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .ok()
         else {
             return Ok(Vec::new());
         };
-        match parse(&text) {
+        match parse_with(&text, &exclude) {
             Ok(q) => self.query_tracks(&q, id),
             Err(_) => Ok(Vec::new()),
         }
     }
 
-    /// Save a new smart playlist. The query is checked first; a bad one
-    /// comes back as the error, and nothing is saved.
-    pub fn create_smart(&self, name: &str, query: &str) -> std::result::Result<i64, SmartError> {
-        parse(query)?;
+    /// Save a new smart playlist: its rules, and the rules for songs to
+    /// leave out (empty for none). Both are checked first; a bad one comes
+    /// back as the error, and nothing is saved.
+    pub fn create_smart(
+        &self,
+        name: &str,
+        query: &str,
+        exclude: &str,
+    ) -> std::result::Result<i64, SmartError> {
+        parse_with(query, exclude)?;
         let now = now_secs();
         self.conn.execute(
-            "INSERT INTO smart_playlists (name, query, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-            params![name, query.trim(), now],
+            "INSERT INTO smart_playlists (name, query, exclude, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![name, query.trim(), exclude.trim(), now],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -1230,11 +1348,13 @@ impl Library {
         id: i64,
         name: &str,
         query: &str,
+        exclude: &str,
     ) -> std::result::Result<(), SmartError> {
-        parse(query)?;
+        parse_with(query, exclude)?;
         self.conn.execute(
-            "UPDATE smart_playlists SET name = ?2, query = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, name, query.trim(), now_secs()],
+            "UPDATE smart_playlists SET name = ?2, query = ?3, exclude = ?4, updated_at = ?5 \
+             WHERE id = ?1",
+            params![id, name, query.trim(), exclude.trim(), now_secs()],
         )?;
         Ok(())
     }

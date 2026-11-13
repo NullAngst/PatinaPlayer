@@ -2801,6 +2801,9 @@ export component AppWindow inherits Window {
     in property <bool> dlg-two-fields;
     // The server form: two more fields, the last one a password.
     in property <bool> dlg-four-fields;
+    // Three: the third field without the fourth (a smart playlist's songs
+    // to leave out).
+    in property <bool> dlg-three-fields;
     in property <string> dlg-label3;
     in property <string> dlg-label4;
     in-out property <string> dlg-text3;
@@ -4555,16 +4558,19 @@ export component AppWindow inherits Window {
                             text <=> root.dlg-text2;
                             edited(t) => { root.dlg-edited(2, t); }
                             accepted => {
-                                if root.dlg-four-fields { f3.focus-field(); } else { root.dlg-accept(); }
+                                if root.dlg-four-fields || root.dlg-three-fields { f3.focus-field(); } else { root.dlg-accept(); }
                             }
                         }
-                        Rectangle { height: root.dlg-four-fields ? 12px : 0px; }
+                        Rectangle { height: root.dlg-four-fields || root.dlg-three-fields ? 12px : 0px; }
                         f3 := Field {
-                            visible: root.dlg-four-fields;
-                            height: root.dlg-four-fields ? 58px : 0px;
+                            visible: root.dlg-four-fields || root.dlg-three-fields;
+                            height: root.dlg-four-fields || root.dlg-three-fields ? 58px : 0px;
                             label: root.dlg-label3;
                             text <=> root.dlg-text3;
-                            accepted => { f4.focus-field(); }
+                            edited(t) => { root.dlg-edited(3, t); }
+                            accepted => {
+                                if root.dlg-four-fields { f4.focus-field(); } else { root.dlg-accept(); }
+                            }
                         }
                         Rectangle { height: root.dlg-four-fields ? 12px : 0px; }
                         f4 := Field {

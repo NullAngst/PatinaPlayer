@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use patina_core::browse::{Browser, Item, ListAction, Section, SettingsInfo, Startup};
 use patina_core::config::Config;
 use patina_core::library::Library;
+use patina_core::library::smart;
 use patina_core::{Backend, OutputConfig, Player, PlayerConfig};
 
 fn make(path: &Path, tags: &[(&str, &str)]) {
@@ -284,20 +285,20 @@ fn recently_played_lists_plays_newest_first_by_day() {
 fn smart_playlists_follow_the_library() {
     let fx = fixture();
     let mut b = browser(&fx);
-    let check = b.check_smart("genre is grunge");
+    let check = b.check_smart("genre is grunge", "");
     assert!(check.ok, "{check:?}");
     assert_eq!(check.message, "Matches 3 tracks");
-    let bad = b.check_smart("genre > 3");
+    let bad = b.check_smart("genre > 3", "");
     assert!(!bad.ok);
     assert!(
-        !b.create_smart("Bad", "genre > 3"),
+        !b.create_smart("Bad", "genre > 3", ""),
         "a bad query isn't saved"
     );
 
-    assert!(b.create_smart("Grunge", "genre is grunge sort by title desc"));
-    assert!(b.create_smart("Blues", "genre is \"blues rock\""));
-    assert!(b.create_smart("Old", "year < 1980"));
-    assert!(b.create_smart("Rated", "rating >= 4"));
+    assert!(b.create_smart("Grunge", "genre is grunge sort by title desc", ""));
+    assert!(b.create_smart("Blues", "genre is \"blues rock\"", ""));
+    assert!(b.create_smart("Old", "year < 1980", ""));
+    assert!(b.create_smart("Rated", "rating >= 4", ""));
     b.switch(Section::Playlists);
     let g = index_of(&b, |i| matches!(i, Item::Smart(s) if s.name == "Grunge"));
     match &items(&b)[g] {
@@ -362,7 +363,7 @@ fn smart_playlists_follow_the_library() {
         Item::Smart(s) => s.clone(),
         _ => unreachable!(),
     };
-    assert!(b.update_smart(row.id, "Five stars", "rating = 5"));
+    assert!(b.update_smart(row.id, "Five stars", "rating = 5", ""));
     assert!(
         items(&b)
             .iter()
@@ -395,7 +396,7 @@ fn smart_genres_and_or() {
     assert_eq!(n("genre = grunge and genre = folk"), 0);
     assert_eq!(n("genre = grunge or genre = folk"), 4);
 
-    let c = b.check_smart("genre = grunge and genre = folk");
+    let c = b.check_smart("genre = grunge and genre = folk", "");
     assert!(c.ok);
     assert!(
         c.message
@@ -404,17 +405,17 @@ fn smart_genres_and_or() {
         c.message
     );
     // Found something: no hint.
-    let c = b.check_smart("genre is \"blues rock\" and genre is folk");
+    let c = b.check_smart("genre is \"blues rock\" and genre is folk", "");
     assert_eq!(c.message, "Matches 1 track");
     // One-value fields get the hint too.
-    let c = b.check_smart("artist is nirvana and artist is someone");
+    let c = b.check_smart("artist is nirvana and artist is someone", "");
     assert!(
         c.message.contains("artist is nirvana or artist is someone"),
         "{}",
         c.message
     );
     // Different fields, nothing found: no hint, since that's a real "and".
-    let c = b.check_smart("genre is folk and year < 1900");
+    let c = b.check_smart("genre is folk and year < 1900", "");
     assert!(!c.message.contains("use or"), "{}", c.message);
 }
 
@@ -511,10 +512,12 @@ fn smart_playlists_cannot_inject_sql() {
         .create_smart(
             "'); DROP TABLE smart_playlists;--",
             "title contains \"DROP TABLE\"",
+            "artist is \"x'); DROP TABLE tracks;--\"",
         )
         .unwrap();
     let row = lib.smart_playlist(id).unwrap().unwrap();
     assert_eq!(row.name, "'); DROP TABLE smart_playlists;--");
+    assert_eq!(row.exclude, "artist is \"x'); DROP TABLE tracks;--\"");
     assert_eq!(row.items, 1);
     assert_eq!(
         lib.smart_tracks(id).unwrap().len(),
@@ -949,7 +952,7 @@ fn the_car_browses_playlists_and_plays_from_a_song() {
     b.select(bleach);
     let paths = b.playlist_paths_for_selection();
     b.create_playlist("Drive", &paths);
-    assert!(b.create_smart("Grunge", "genre is grunge"));
+    assert!(b.create_smart("Grunge", "genre is grunge", ""));
     b.toggle_favorite_selected();
     let lib = b.lib.as_ref().unwrap();
 
@@ -999,4 +1002,118 @@ fn the_car_browses_playlists_and_plays_from_a_song() {
     wait_queue(&b, "the playlist, from the third song", |q| {
         q.len() == 3 && q.current().and_then(|c| q.position(c)) == Some(2)
     });
+}
+
+/// The second box: songs to leave out. With the rules from the request:
+/// the 60s pop songs, but not The Beatles, written either way.
+#[test]
+fn smart_playlists_leave_songs_out() {
+    let fx = fixture();
+    make(
+        &fx.root.join("Beatles/Help/01.flac"),
+        &[
+            ("title", "Help!"),
+            ("artist", "The Beatles"),
+            ("album", "Help"),
+            ("genre", "Pop"),
+            ("date", "1965"),
+        ],
+    );
+    // No artist tag at all: rules about the artist are unknown for it,
+    // and that mustn't drop it from either side.
+    make(
+        &fx.root.join("Unknown/Tape/01.flac"),
+        &[
+            ("title", "Untagged Pop"),
+            ("album", "Tape"),
+            ("genre", "Pop"),
+            ("date", "1965"),
+        ],
+    );
+    let mut b = browser(&fx);
+    let titles = |b: &Browser, q: &str, x: &str| -> Vec<String> {
+        let lib = b.lib.as_ref().unwrap();
+        let q = smart::parse_with(q, x).unwrap();
+        let mut t: Vec<String> = lib
+            .query_tracks(&q, 0)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        t.sort();
+        t
+    };
+
+    // A range of years with "=".
+    assert_eq!(
+        titles(&b, "year = 1960-1969 and genre = pop", ""),
+        ["Help!", "Untagged Pop"]
+    );
+    // The same, leaving out The Beatles however they're tagged. The song
+    // with no artist stays.
+    let leave_out = "artist = \"the beatles\" or artist = beatles";
+    assert_eq!(
+        titles(&b, "year = 1960-1969 and genre = pop", leave_out),
+        ["Untagged Pop"]
+    );
+    // Added in the last 60 days, pop.
+    assert_eq!(
+        titles(&b, "added < 60d and genre = pop", leave_out),
+        ["Untagged Pop"]
+    );
+    // An empty first box is every song, less the left out.
+    assert_eq!(titles(&b, "", leave_out).len(), 5);
+
+    // isnt and not keep songs without the tag, as the second box does.
+    assert_eq!(titles(&b, "artist isnt \"the beatles\"", "").len(), 5);
+    assert_eq!(titles(&b, "not (artist is \"the beatles\")", "").len(), 5);
+    assert!(titles(&b, "artist isnt \"the beatles\"", "").contains(&"Untagged Pop".to_string()));
+
+    // The check counts what the second box takes out, so a rule that
+    // misses shows as 0.
+    let c = b.check_smart("genre = pop", leave_out);
+    assert!(c.ok);
+    assert_eq!(c.message, "Matches 1 track, 1 left out");
+    let c = b.check_smart("genre = pop", "artist = beetles");
+    assert_eq!(c.message, "Matches 2 tracks, 0 left out");
+    // A limit doesn't hide what was left out.
+    let c = b.check_smart("genre = pop limit 1", leave_out);
+    assert_eq!(c.message, "Matches 1 track, 1 left out");
+
+    // Mistakes say which box they're in.
+    let c = b.check_smart("genre = pop", "artist >");
+    assert!(
+        !c.ok && c.message.starts_with("Leave out: "),
+        "{}",
+        c.message
+    );
+    let c = b.check_smart("genre = pop", "artist = x sort by title");
+    assert!(!c.ok && c.message.contains("first box"), "{}", c.message);
+    assert!(!b.create_smart("Bad", "genre = pop", "limit 3"));
+
+    // Saved, it keeps both boxes and plays what they match.
+    assert!(b.create_smart("60s pop", "year = 1960-1969 and genre = pop", leave_out));
+    let lib = b.lib.as_ref().unwrap();
+    let row = lib
+        .smart_playlists()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "60s pop")
+        .unwrap();
+    assert_eq!(row.exclude, leave_out);
+    assert_eq!(row.items, 1);
+    let songs: Vec<String> = lib
+        .smart_tracks(row.id)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.title)
+        .collect();
+    assert_eq!(songs, ["Untagged Pop"]);
+    // Renaming keeps the second box.
+    assert!(b.update_smart(row.id, "Sixties pop", &row.query, &row.exclude));
+    let lib = b.lib.as_ref().unwrap();
+    assert_eq!(
+        lib.smart_playlist(row.id).unwrap().unwrap().exclude,
+        leave_out
+    );
 }

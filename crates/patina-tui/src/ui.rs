@@ -91,7 +91,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::EqImport => "AutoEq or APO file (ParametricEQ.txt, GraphicEQ.txt)",
                 InputPurpose::SmartName { edit: None, .. } => "New smart playlist: a name",
                 InputPurpose::SmartName { .. } => "Rename smart playlist",
-                InputPurpose::SmartQuery { .. } => "Songs where (Enter saves, Esc cancels)",
+                InputPurpose::SmartQuery { .. } => {
+                    "Songs where (Enter goes on to songs to leave out, Esc cancels)"
+                }
+                InputPurpose::SmartExclude { .. } => {
+                    "Leave out songs where (empty for none; Enter saves, Esc cancels)"
+                }
                 InputPurpose::Export { queue: true } => "Export the queue as M3U8 to",
                 InputPurpose::Export { .. } => "Export as M3U8 to",
                 InputPurpose::Import => "Import an .m3u, .m3u8 or .pls file",
@@ -109,8 +114,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             match purpose {
                 // The query is checked as it's typed: what it matches, or
                 // why it doesn't work.
-                InputPurpose::SmartQuery { .. } => {
-                    let (note, warn) = if buf.trim().is_empty() {
+                InputPurpose::SmartQuery { exclude, .. } => {
+                    let (note, warn) = if buf.trim().is_empty() && exclude.trim().is_empty() {
                         (
                             format!(
                                 "Empty matches every song. {}",
@@ -119,10 +124,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                             false,
                         )
                     } else {
-                        let c = app.b.check_smart(buf);
+                        let c = app.b.check_smart(buf, exclude);
                         (c.message, !c.ok)
                     };
                     draw_input_note(f, app, area, title, &shown, &note, warn);
+                }
+                // The same check, with this box as the songs to leave out.
+                InputPurpose::SmartExclude { query, .. } => {
+                    let c = app.b.check_smart(query, buf);
+                    let note = if buf.trim().is_empty() {
+                        format!(
+                            "{}. Rules here take songs out, like: artist is \"the beatles\"",
+                            c.message
+                        )
+                    } else {
+                        c.message
+                    };
+                    draw_input_note(f, app, area, title, &shown, &note, !c.ok);
                 }
                 // When it would pause, as it's typed, or what's wrong.
                 InputPurpose::Sleep => {
@@ -1066,7 +1084,7 @@ fn item_row<'a>(
             mark("⚙"),
             Cell::from(""),
             Cell::from(Span::styled(p.name.clone(), text)),
-            Cell::from(Span::styled(p.query.clone(), muted)),
+            Cell::from(Span::styled(p.rules(), muted)),
             Cell::from(""),
             Cell::from(Span::styled(
                 format!("{} track{}", p.items, s(p.items)),
