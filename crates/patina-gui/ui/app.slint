@@ -257,6 +257,14 @@ export struct Row {
     marked: bool,
 }
 
+// A cover found online, in the picker.
+export struct CoverPick {
+    art: image,
+    has-art: bool,
+    title: string,
+    source: string,
+}
+
 export struct QueueRow {
     title: string,
     sub: string,
@@ -396,6 +404,10 @@ export global Icons {
     // Six dots: drag to move.
     out property <string> grip: "M7 8h10M7 12h10M7 16h10";
     out property <string> check: "M5 12l5 5 9-10";
+    out property <string> chevron-down: "M6 9l6 6 6-6";
+    // Three dots, filled: more.
+    out property <string> more: "M10.4 5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0M10.4 12a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0M10.4 19a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0";
+    out property <string> volume-low: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6";
 }
 
 // A tooltip with the window's own look, for buttons that only show an
@@ -622,6 +634,65 @@ component Cover inherits Rectangle {
         size: min(parent.width, parent.height) * 0.35;
         stroke: P.wave;
         stroke-width: 1.2px;
+    }
+}
+
+// The playing song's cover, blurred, washed over the theme: the blur is
+// done in Rust on a small copy, and drawn stretched, which softens it
+// further. A gradient down to the theme's own ground keeps text readable
+// over a bright cover.
+component Wash inherits Rectangle {
+    in property <image> art;
+    // 0.1 to 1.
+    in property <float> strength: 0.6;
+    clip: true;
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.art;
+        image-fit: cover;
+        image-rendering: smooth;
+        opacity: root.strength;
+    }
+    Rectangle {
+        background: @linear-gradient(180deg,
+            P.bg.with-alpha(0.2 * (1 - root.strength)) 0%,
+            P.bg.with-alpha(0.9 - 0.3 * root.strength) 100%);
+    }
+}
+
+// Right-click a cover, or press and hold it on a touch screen: find one
+// online, or use an image file. Laid over the cover.
+component CoverMenu inherits Rectangle {
+    callback act(string);
+    cma := ContextMenuArea {
+        Menu {
+            MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
+            MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
+        }
+        hold := Timer {
+            interval: LongPress.after;
+            running: false;
+            triggered => {
+                self.running = false;
+                if ta.pressed { cma.show({ x: ta.mouse-x, y: ta.mouse-y }); }
+            }
+        }
+        ta := TouchArea {
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    if e.button == PointerEventButton.right {
+                        cma.show({ x: self.mouse-x, y: self.mouse-y });
+                    } else if e.button == PointerEventButton.left && Ui.touch {
+                        hold.running = false;
+                        hold.running = true;
+                    }
+                }
+                if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                    hold.running = false;
+                }
+            }
+        }
     }
 }
 
@@ -1116,6 +1187,10 @@ component ListRow inherits Rectangle {
             if item.kind == 0: MenuSeparator {}
             if item.kind == 0: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
             if item.kind == 0: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
+            // Cover art: an album's, a folder's, or a song's album's.
+            if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuSeparator {}
+            if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
+            if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
             if item.rating >= 0: Menu {
@@ -1595,6 +1670,9 @@ component AlbumTile inherits Rectangle {
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
             if root.ipod: MenuItem { title: "Send to iPod"; activated => { root.act("ipod"); } }
             if item.can-mix: MenuItem { title: "Artist mix"; activated => { root.act("mix"); } }
+            MenuSeparator {}
+            MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
+            MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
             if item.rating >= 0: Menu {
@@ -2006,16 +2084,28 @@ component NowPlayingPage inherits Rectangle {
     in property <bool> sleep-on;
     in property <string> sleep-label;
     in property <bool> live;
+    // The blurred cover behind it, and how strong.
+    in property <image> blur;
+    in property <bool> show-wash;
+    in property <float> wash;
     callback close;
     callback rate(int);
     callback love;
     callback lyrics;
     callback queue;
     callback sleep(string);
+    // The cover's menu: "cover-find", "cover-file".
+    callback act(string);
     property <bool> wide: self.width >= 760px;
     property <length> pad: tight ? 16px : 32px;
     background: P.bg;
     TouchArea {}
+    if root.show-wash: Wash {
+        width: parent.width;
+        height: parent.height;
+        art: root.blur;
+        strength: root.wash;
+    }
     fl := Flickable {
         content-height: max(self.height, body.preferred-height);
         body := VerticalLayout {
@@ -2051,6 +2141,11 @@ component NowPlayingPage inherits Rectangle {
                     art: root.art;
                     has-art: root.has-art;
                     radius: 10px;
+                    if root.has-track: CoverMenu {
+                        width: parent.width;
+                        height: parent.height;
+                        act(a) => { root.act(a); }
+                    }
                 }
                 if root.wide: NpInfo {
                     horizontal-stretch: 1;
@@ -2081,6 +2176,423 @@ component NowPlayingPage inherits Rectangle {
                 love-state: root.love-state;
                 rate(n) => { root.rate(n); }
                 love => { root.love(); }
+            }
+        }
+    }
+}
+
+// Now Playing on a phone: the whole screen, simple. The cover big, what's
+// playing under it, the seek bar with the format between the times, the
+// transport, volume, and lyrics and the queue at the foot. Everything
+// else (rating, going to the album or artist, the cover, the sound chain)
+// is in the menu at the top.
+component NowPlayingPhone inherits Rectangle {
+    in property <bool> has-track;
+    in property <string> title;
+    in property <string> artist;
+    in property <string> format;
+    in property <image> art;
+    in property <bool> has-art;
+    in property <image> blur;
+    in property <bool> show-wash;
+    in property <float> wash;
+    in property <int> rating: -1;
+    in property <int> love-state;
+    in property <bool> playing;
+    in property <bool> live;
+    in property <float> position;
+    in property <string> elapsed;
+    in property <string> remaining;
+    in property <bool> shuffle;
+    in property <int> repeat;
+    in property <float> volume;
+    in property <bool> volume-locked;
+    in property <bool> muted;
+    in property <bool> sleep-on;
+    in property <string> sleep-label;
+    in property <bool> lyrics-open;
+    in property <bool> queue-open;
+    callback close;
+    callback act(string);
+    callback play-pause;
+    callback prev;
+    callback next;
+    callback toggle-shuffle;
+    callback cycle-repeat;
+    callback seek(float);
+    callback set-volume(float);
+    callback toggle-mute;
+    callback lyrics;
+    callback queue;
+    callback love;
+    callback rate(int);
+    callback sleep(string);
+    // The room everything but the cover takes, so the cover gets the rest.
+    property <length> rest: 438px;
+    property <length> side: max(120px, min(self.width - 48px, self.height - self.rest, 560px));
+    background: P.bg;
+    // Nothing under it takes a tap.
+    TouchArea {}
+    if root.show-wash: Wash {
+        width: parent.width;
+        height: parent.height;
+        art: root.blur;
+        strength: root.wash;
+    }
+    VerticalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-top: 6px;
+        padding-bottom: 14px;
+        spacing: 0px;
+        // Top: close, the name, the sleep timer and the menu.
+        HorizontalLayout {
+            height: 52px;
+            IconButton {
+                y: (parent.height - self.height) / 2;
+                width: 44px;
+                height: 44px;
+                icon: Icons.chevron-down;
+                icon-size: 24px;
+                tip: "Close";
+                clicked => { root.close(); }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: P.kawaii ? "いま きいてる" : "Now Playing";
+                font-size: 14px;
+                font-weight: 600;
+                color: P.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            SleepButton {
+                y: (parent.height - self.height) / 2;
+                active: root.sleep-on;
+                label: root.sleep-label;
+                live: root.live;
+                act(a) => { root.sleep(a); }
+            }
+            Rectangle {
+                width: 44px;
+                more := ContextMenuArea {
+                    Menu {
+                        if root.has-track && root.rating >= 0: Menu {
+                            title: root.rating > 0 ? "Rated " + root.rating + " of 5" : "Rate";
+                            MenuItem { title: "★★★★★"; activated => { root.rate(5); } }
+                            MenuItem { title: "★★★★"; activated => { root.rate(4); } }
+                            MenuItem { title: "★★★"; activated => { root.rate(3); } }
+                            MenuItem { title: "★★"; activated => { root.rate(2); } }
+                            MenuItem { title: "★"; activated => { root.rate(1); } }
+                            MenuItem { title: "No rating"; activated => { root.rate(0); } }
+                        }
+                        if root.has-track && !root.live: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
+                        if root.has-track && !root.live: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
+                        if root.has-track && !root.live: MenuSeparator {}
+                        if root.has-track && !root.live: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
+                        if root.has-track && !root.live: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
+                        if root.has-track: MenuSeparator {}
+                        if root.has-track: MenuItem { title: "Sound chain…"; activated => { root.act("chain"); } }
+                    }
+                    IconButton {
+                        y: (parent.height - self.height) / 2;
+                        width: 44px;
+                        height: 44px;
+                        icon: Icons.more;
+                        filled: true;
+                        icon-size: 20px;
+                        tip: "More";
+                        clicked => { more.show({ x: 0px, y: 0px }); }
+                    }
+                }
+            }
+        }
+        Rectangle { vertical-stretch: 1; min-height: 6px; }
+        // The cover.
+        HorizontalLayout {
+            alignment: center;
+            Cover {
+                width: root.side;
+                height: root.side;
+                art: root.art;
+                has-art: root.has-art;
+                radius: 14px;
+                drop-shadow-blur: 24px;
+                drop-shadow-offset-y: 6px;
+                drop-shadow-color: P.shadow;
+                CoverMenu {
+                    width: parent.width;
+                    height: parent.height;
+                    act(a) => { root.act(a); }
+                }
+            }
+        }
+        Rectangle { vertical-stretch: 1; min-height: 14px; }
+        // Title and artist, with the heart.
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle { width: 40px; }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 3px;
+                Text {
+                    text: root.has-track ? root.title : "Nothing playing";
+                    font-family: P.serif;
+                    font-weight: P.kawaii ? 900 : 700;
+                    font-size: 22px;
+                    color: root.has-track ? P.text : P.muted;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                    PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
+                }
+                Text {
+                    text: root.artist;
+                    font-size: 15px;
+                    color: P.muted;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                    PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
+                }
+            }
+            Rectangle {
+                width: 40px;
+                if root.love-state > 0: IconButton {
+                    y: (parent.height - self.height) / 2;
+                    width: 40px;
+                    height: 40px;
+                    icon: Icons.heart;
+                    icon-size: 22px;
+                    tip: root.love-state == 2 ? "Hearted" : "Heart";
+                    filled: root.love-state == 2;
+                    active: root.love-state == 2;
+                    clicked => { root.love(); }
+                }
+            }
+        }
+        // Stars, small, for a song that's been rated.
+        HorizontalLayout {
+            height: 22px;
+            alignment: center;
+            if root.has-track && root.rating > 0: HorizontalLayout {
+                for n in [1, 2, 3, 4, 5]: Text {
+                    width: 18px;
+                    text: n <= root.rating ? "★" : "☆";
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    color: n <= root.rating ? P.copper : P.wave;
+                    TouchArea { clicked => { root.rate(n == root.rating ? 0 : n); } }
+                }
+            }
+        }
+        // Seek, with the times at its ends and the format between them.
+        VerticalLayout {
+            spacing: 2px;
+            if !root.live: Bar {
+                height: 28px;
+                label: "Seek";
+                value: root.position;
+                enabled: root.has-track;
+                show-knob: true;
+                knob: 16px;
+                changed(v) => { root.seek(v); }
+            }
+            if root.live: Text {
+                height: 28px;
+                text: "live";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 13px;
+                color: P.verdigris;
+            }
+            HorizontalLayout {
+                height: 26px;
+                Text { width: 60px; text: root.elapsed; font-family: P.mono; font-size: 12px; color: P.muted; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                if root.format != "": Rectangle {
+                    width: fmt.preferred-width + 20px;
+                    height: 24px;
+                    y: 1px;
+                    border-radius: 12px;
+                    background: P.raised;
+                    fmt := Text {
+                        text: root.format;
+                        font-family: P.mono;
+                        font-size: 11px;
+                        color: P.accent-text;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text { width: 60px; text: root.remaining; font-family: P.mono; font-size: 12px; color: P.muted; horizontal-alignment: right; vertical-alignment: center; }
+            }
+        }
+        Rectangle { height: 10px; }
+        // Transport.
+        HorizontalLayout {
+            height: 64px;
+            alignment: space-between;
+            Rectangle {
+                width: 44px;
+                IconButton {
+                    y: (parent.height - self.height) / 2;
+                    width: 44px;
+                    height: 44px;
+                    icon: Icons.shuffle;
+                    icon-size: 22px;
+                    tip: "Shuffle";
+                    active: root.shuffle;
+                    clicked => { root.toggle-shuffle(); }
+                }
+            }
+            Rectangle {
+                width: 64px;
+                height: 52px;
+                y: 6px;
+                border-radius: 16px * P.round;
+                background: pv.pressed ? P.chip-hover : P.raised;
+                FilledIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    d: Icons.prev;
+                    size: 22px;
+                    fill: P.text;
+                }
+                pv := TouchArea { clicked => { root.prev(); } }
+                accessible-role: button;
+                accessible-label: "Back";
+            }
+            Rectangle {
+                width: 96px;
+                height: 64px;
+                border-radius: 32px;
+                background: pp.pressed ? P.accent-hover : P.verdigris;
+                drop-shadow-offset-y: P.kawaii ? 3px : 0px;
+                drop-shadow-color: P.kawaii ? P.accent-edge : transparent;
+                accessible-role: button;
+                accessible-label: root.playing ? "Pause" : "Play";
+                if root.playing: Rectangle {
+                    x: parent.width / 2 - 10px;
+                    y: (parent.height - 22px) / 2;
+                    width: 7px;
+                    height: 22px;
+                    border-radius: 1.5px;
+                    background: P.on-accent;
+                }
+                if root.playing: Rectangle {
+                    x: parent.width / 2 + 3px;
+                    y: (parent.height - 22px) / 2;
+                    width: 7px;
+                    height: 22px;
+                    border-radius: 1.5px;
+                    background: P.on-accent;
+                }
+                if !root.playing: FilledIcon {
+                    x: (parent.width - self.width) / 2 + 2px;
+                    y: (parent.height - self.height) / 2;
+                    d: Icons.play;
+                    size: 24px;
+                    fill: P.on-accent;
+                }
+                pp := TouchArea { clicked => { root.play-pause(); } }
+            }
+            Rectangle {
+                width: 64px;
+                height: 52px;
+                y: 6px;
+                border-radius: 16px * P.round;
+                background: nx.pressed ? P.chip-hover : P.raised;
+                FilledIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    d: Icons.next;
+                    size: 22px;
+                    fill: P.text;
+                }
+                nx := TouchArea { clicked => { root.next(); } }
+                accessible-role: button;
+                accessible-label: "Next";
+            }
+            Rectangle {
+                width: 44px;
+                IconButton {
+                    y: (parent.height - self.height) / 2;
+                    width: 44px;
+                    height: 44px;
+                    icon: Icons.repeat;
+                    icon-size: 22px;
+                    tip: root.repeat == 0 ? "Repeat off" : (root.repeat == 1 ? "Repeat all" : "Repeat one");
+                    active: root.repeat != 0;
+                    clicked => { root.cycle-repeat(); }
+                }
+                if root.repeat == 2: Text {
+                    x: 29px;
+                    y: 12px;
+                    text: "1";
+                    font-size: 10px;
+                    font-weight: 700;
+                    color: P.verdigris;
+                }
+            }
+        }
+        Rectangle { height: 10px; }
+        // Volume.
+        HorizontalLayout {
+            height: 40px;
+            spacing: 10px;
+            IconButton {
+                y: (parent.height - self.height) / 2;
+                icon: root.muted ? Icons.muted : Icons.volume-low;
+                tip: root.muted ? "Unmute" : "Mute";
+                active: root.muted;
+                enabled: !root.volume-locked;
+                clicked => { root.toggle-mute(); }
+            }
+            Bar {
+                horizontal-stretch: 1;
+                label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
+                value: root.volume-locked ? 1.0 : root.volume;
+                enabled: !root.volume-locked;
+                fill: root.muted ? P.wave : (P.kawaii ? P.mint : P.verdigris);
+                show-knob: true;
+                knob: 14px;
+                live: true;
+                changed(v) => { root.set-volume(v); }
+            }
+            Rectangle {
+                width: 36px;
+                Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    d: Icons.volume;
+                    size: 18px;
+                }
+            }
+        }
+        Rectangle { height: 6px; }
+        // Lyrics and the queue.
+        HorizontalLayout {
+            height: 44px;
+            IconButton {
+                width: 44px;
+                height: 44px;
+                icon: Icons.lyrics;
+                icon-size: 20px;
+                tip: "Lyrics";
+                active: root.lyrics-open;
+                clicked => { root.lyrics(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            IconButton {
+                width: 44px;
+                height: 44px;
+                icon: Icons.queue-panel;
+                icon-size: 20px;
+                tip: "Queue";
+                active: root.queue-open;
+                clicked => { root.queue(); }
             }
         }
     }
@@ -2616,6 +3128,9 @@ export component AppWindow inherits Window {
     // 0 list, 1 album grid, 2 queue
     in property <int> layout;
     in property <[Row]> rows;
+    // The album grid's tiles near the screen: rows from grid-base on.
+    in property <[Row]> grid-rows;
+    in property <int> grid-base;
     // Every row's height added up (ListRow's heights, from Rust).
     in property <length> rows-height;
     in property <[string]> columns;
@@ -2694,6 +3209,8 @@ export component AppWindow inherits Window {
     // Album headers: stars and the favorite toggle.
     callback hero-rate(int);
     callback hero-fav;
+    // The album header's cover: "cover-find" or "cover-file".
+    callback hero-cover(string);
     // Sidebar favorites: move up, move down, remove.
     callback side-act(int, string);
     // Lyrics, shown in a panel on the right.
@@ -2713,6 +3230,23 @@ export component AppWindow inherits Window {
     in property <bool> np-has-art;
     // The Now Playing page.
     in-out property <bool> np-open;
+    // The playing song's cover, blurred, and where it shows: 0 nowhere,
+    // 1 behind Now Playing, 2 behind the views too. Strength 0.1 to 1.
+    in property <image> np-blur;
+    in property <bool> np-has-blur;
+    in property <int> backdrop: 0;
+    in property <float> backdrop-strength: 0.6;
+    property <bool> wash-np: root.backdrop >= 1 && root.np-has-blur;
+    property <bool> wash-all: root.backdrop == 2 && root.np-has-blur;
+    // Now Playing on a phone takes the whole screen.
+    property <bool> np-phone: root.np-open && root.tiny;
+    // Now Playing's own buttons: cover, go to, sound chain.
+    callback np-act(string);
+    // The cover picker (dialog 5): what was found, and a line about it.
+    in property <[CoverPick]> covers-found;
+    in property <string> covers-note;
+    callback cover-pick(int);
+    callback cover-file;
     in property <string> np-artist;
     in property <string> np-album;
     in property <string> np-format;
@@ -2791,7 +3325,8 @@ export component AppWindow inherits Window {
     in property <string> toast;
     in property <bool> toast-error;
 
-    // Dialogs: 0 none, 1 text form, 2 pick playlist, 3 confirm, 4 help
+    // Dialogs: 0 none, 1 text form, 2 pick playlist, 3 confirm, 4 help,
+    // 5 cover art found online
     in-out property <int> dialog;
     in property <string> dlg-title;
     in property <string> dlg-label1;
@@ -2857,6 +3392,14 @@ export component AppWindow inherits Window {
         horizontal-tiling: ImageTiling.repeat;
         vertical-tiling: ImageTiling.repeat;
         colorize: P.dots;
+    }
+
+    // The blurred cover behind the views, when it's set to show everywhere.
+    if root.wash-all: Wash {
+        width: parent.width;
+        height: parent.height;
+        art: root.np-blur;
+        strength: root.backdrop-strength;
     }
 
     // Phones draw under the status and navigation bars: keep everything
@@ -3088,6 +3631,11 @@ export component AppWindow inherits Window {
                                         art: root.hero.art;
                                         has-art: root.hero.has-art;
                                         radius: 8px;
+                                        CoverMenu {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            act(a) => { root.hero-cover(a); keys.focus(); }
+                                        }
                                     }
                                     VerticalLayout {
                                         alignment: end;
@@ -3431,7 +3979,12 @@ export component AppWindow inherits Window {
                                 property <int> cols: max(root.tiny ? 2 : 1, floor(self.width / 188px));
                                 property <length> cell: self.width / cols;
                                 content-height: ceil(root.rows.length / cols) * (cell + 44px);
-                                for r[i] in root.layout == 1 ? root.rows : []: AlbumTile {
+                                // Only the tiles near the screen exist: Rust
+                                // hands over that slice of the rows, starting
+                                // at grid-base. A grid of thousands of albums
+                                // built every tile at once and took seconds.
+                                for r[j] in root.layout == 1 ? root.grid-rows : []: AlbumTile {
+                                    property <int> i: root.grid-base + j;
                                     x: mod(i, grid.cols) * grid.cell;
                                     y: floor(i / grid.cols) * (grid.cell + 44px);
                                     width: grid.cell;
@@ -3532,7 +4085,11 @@ export component AppWindow inherits Window {
                         }
 
                         // The Now Playing page, over the view.
-                        if root.np-open: NowPlayingPage {
+                        if root.np-open && !root.tiny: NowPlayingPage {
+                            blur: root.np-blur;
+                            show-wash: root.wash-np;
+                            wash: root.backdrop-strength;
+                            act(a) => { root.np-act(a); keys.focus(); }
                             has-track: root.has-track;
                             title: root.np-title;
                             artist: root.np-artist;
@@ -3572,7 +4129,8 @@ export component AppWindow inherits Window {
             // room first leaves out the badges, then goes to two rows.
             bar := Rectangle {
                 height: root.bar-h;
-                background: P.surface;
+                // Over the cover backdrop, it lets a little of it through.
+                background: root.wash-all ? P.surface.with-alpha(0.78) : P.surface;
                 property <length> bp: root.tight ? 12px : 20px;
                 property <length> gap: root.tight ? 10px : 20px;
                 // The least the now-playing side and the transport get.
@@ -3993,7 +4551,7 @@ export component AppWindow inherits Window {
             width: root.drawer ? 228px : root.side-w;
             height: keys.height - root.bar-h;
             visible: !root.drawer || root.drawer-open;
-            background: P.surface;
+            background: root.wash-all && !root.drawer ? P.surface.with-alpha(0.78) : P.surface;
             drop-shadow-blur: root.drawer ? 18px : 0px;
             drop-shadow-color: P.shadow;
             Rectangle {
@@ -4288,12 +4846,60 @@ export component AppWindow inherits Window {
             stt := Text { text: root.side-tip; font-size: 12px; color: P.text; }
         }
 
+        // ----- Now Playing on a phone -----
+        // The whole screen, over the bar too. Lyrics and the queue open
+        // over it, full height.
+        if root.np-phone: NowPlayingPhone {
+            width: keys.width;
+            height: keys.height;
+            has-track: root.has-track;
+            title: root.np-title;
+            artist: root.np-artist;
+            format: root.np-format;
+            art: root.np-art;
+            has-art: root.np-has-art;
+            blur: root.np-blur;
+            show-wash: root.wash-np;
+            wash: root.backdrop-strength;
+            rating: root.np-rating;
+            love-state: root.love-state;
+            playing: root.playing;
+            live: root.live;
+            position: root.position;
+            elapsed: root.elapsed;
+            remaining: root.remaining;
+            shuffle: root.shuffle;
+            repeat: root.repeat;
+            volume: root.volume;
+            volume-locked: root.volume-locked;
+            muted: root.muted;
+            sleep-on: root.sleep-label != "";
+            sleep-label: root.sleep-label;
+            lyrics-open: root.lyrics-open;
+            queue-open: root.queue-panel;
+            close => { root.np-open = false; keys.focus(); }
+            act(a) => { root.np-act(a); keys.focus(); }
+            play-pause => { root.play-pause(); keys.focus(); }
+            prev => { root.prev(); keys.focus(); }
+            next => { root.next(); keys.focus(); }
+            toggle-shuffle => { root.toggle-shuffle(); keys.focus(); }
+            cycle-repeat => { root.cycle-repeat(); keys.focus(); }
+            seek(v) => { root.seek(v); keys.focus(); }
+            set-volume(v) => { root.set-volume(v); }
+            toggle-mute => { root.toggle-mute(); keys.focus(); }
+            lyrics => { root.lyrics-clicked(); keys.focus(); }
+            queue => { root.toggle-queue(); keys.focus(); }
+            love => { root.love-clicked(); keys.focus(); }
+            rate(n) => { root.np-rate(n); keys.focus(); }
+            sleep(a) => { root.sleep-act(a); keys.focus(); }
+        }
+
         // ----- Lyrics panel -----
         if root.lyrics-open: Rectangle {
             x: root.tiny ? 0px : keys.width - root.lyrics-w - (root.queue-panel ? root.queue-w : 0px);
             y: 0;
             width: root.tiny ? keys.width : root.lyrics-w;
-            height: keys.height - root.bar-h;
+            height: keys.height - (root.np-phone ? 0px : root.bar-h);
             background: P.surface;
             // Nothing inside draws past the panel, however long the song.
             clip: true;
@@ -4355,7 +4961,7 @@ export component AppWindow inherits Window {
             x: root.tiny ? 0px : keys.width - root.queue-w;
             y: 0;
             width: root.tiny ? keys.width : root.queue-w;
-            height: keys.height - root.bar-h;
+            height: keys.height - (root.np-phone ? 0px : root.bar-h);
             background: P.surface;
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
@@ -4515,7 +5121,7 @@ export component AppWindow inherits Window {
             background: P.scrim;
             TouchArea { clicked => { root.dlg-cancel(); } }
             Rectangle {
-                width: min(root.dialog == 4 ? 620px : 460px, keys.width - 24px);
+                width: min(root.dialog == 4 || root.dialog == 5 ? 620px : 460px, keys.width - 24px);
                 height: min(dlg.preferred-height, parent.kb-top - 24px);
                 y: (parent.kb-top - self.height) / 2;
                 clip: true;
@@ -4623,6 +5229,46 @@ export component AppWindow inherits Window {
                         color: P.text;
                     }
 
+                    // Covers found online: tap one to use it.
+                    if root.dialog == 5: Text {
+                        text: root.covers-note;
+                        wrap: word-wrap;
+                        font-size: 12.5px;
+                        color: P.muted;
+                    }
+                    if root.dialog == 5 && root.covers-found.length > 0: Flickable {
+                        property <int> cols: self.width < 420px ? 2 : 3;
+                        property <length> cell: self.width / self.cols;
+                        height: min(ceil(root.covers-found.length / self.cols) * (self.cell + 40px), keys.height - 220px);
+                        content-height: ceil(root.covers-found.length / self.cols) * (self.cell + 40px);
+                        for c[i] in root.covers-found: Rectangle {
+                            x: mod(i, parent.cols) * parent.cell;
+                            y: floor(i / parent.cols) * (parent.cell + 40px);
+                            width: parent.cell;
+                            height: parent.cell + 40px;
+                            border-radius: 8px * P.round;
+                            background: cpa.has-hover ? P.raised : transparent;
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 3px;
+                                Cover {
+                                    height: self.width;
+                                    art: c.art;
+                                    has-art: c.has-art;
+                                    radius: 6px;
+                                }
+                                Text { text: c.title; overflow: elide; font-size: 11.5px; color: P.text; }
+                                Text { text: c.source; overflow: elide; font-size: 10.5px; color: P.muted; }
+                            }
+                            cpa := PeekArea {
+                                mouse-cursor: pointer;
+                                full: c.title + " (" + c.source + ")";
+                                cut: true;
+                                tapped => { root.cover-pick(i); }
+                            }
+                        }
+                    }
+
                     // The help is long; on a short window it scrolls.
                     if root.dialog == 4: Flickable {
                         height: min(ht.preferred-height, keys.height - 160px);
@@ -4645,6 +5291,11 @@ export component AppWindow inherits Window {
                             text: root.dialog == 4 ? "Close" : "Cancel";
                             h: 36px;
                             clicked => { root.dlg-cancel(); }
+                        }
+                        if root.dialog == 5: Chip {
+                            text: "Use an image file…";
+                            h: 36px;
+                            clicked => { root.cover-file(); }
                         }
                         if root.dialog == 1 || root.dialog == 3: Chip {
                             text: root.dlg-ok;

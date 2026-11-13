@@ -1,5 +1,28 @@
 # Changes
 
+2026.11.13 - UX overhaul (phone Now Playing, cover backdrop, chosen covers) / Backend overhaul (Android Auto, speed on big libraries)
+
+* Now Playing on a phone takes the whole screen and keeps to what matters: the cover big, the song and artist with the heart, the seek bar with the format between the times, shuffle, back, a wide play button, next and repeat, a volume slider, and lyrics and the queue at the foot. Rating, Go to album, Go to artist, the cover and the sound chain are in the menu at the top. The wide window's Now Playing is as it was.
+* Cover backdrop: the playing song's cover, blurred and faded down into the theme's own ground, behind Now Playing or behind every view. It goes over whichever theme is on. Settings, Appearance: Off (the default), Now Playing or Everywhere, and a strength from 10 to 100%. Everywhere lets a little of it through the sidebar and the bottom bar too.
+* Find cover art and Cover from an image file, on albums, folders and songs (right-click, or long press on a phone), on the album header's cover and on Now Playing's cover. Find asks iTunes, Deezer and MusicBrainz (Cover Art Archive) and shows what they have as tiles to tap; the picture is fetched at its biggest. Either way it's saved as `album_art.jpg` or `album_art.png` in the album's folder, and the rows, the header, Now Playing and the backdrop show it straight away.
+* A cover you chose wins over art embedded in the files. A server album's folder, or a local one the app can't write to (most folders on Android, where it can only read music), keeps the cover in the app's own folder, filed under the album's folder path.
+* Android Auto starts without the app: connecting the car with the app closed starts the player in the background, with the last queue where it was. Before, the car could only say "Open PatinaPlayer on the phone". Opening the app afterwards takes over the same player, song and all, rather than starting a second one.
+* Android Auto has a heart for the song playing and a shuffle button beside the transport, each drawn as it is now.
+* Android Auto's tabs: Home (Shuffle everything, Favorites, Recently played, Recently added, Mixes), Artists, Albums, Playlists (smart playlists with the rest) and Folders. More than 200 artists or albums come as one folder per first letter. Albums and an artist's albums show as a grid. A car with room for four tabs gets Home at the top of Playlists, under its own heading. With one library folder, Folders opens straight into it.
+* Android Auto takes voice requests: "play Nirvana on PatinaPlayer" plays an artist or album named exactly, else the songs that match. Nothing said shuffles everything.
+* The album grid builds only the tiles near the screen. With 8,500 albums it built all of them, menus and all, on every visit: opening Albums went from 1.9 s to 0.2 s in a debug build on an 85,000 song library, and opening it again from 1.6 s to 0.08 s.
+* A new song no longer rebuilds every row of the open list, only moves the playing mark. The queue keeps each entry's row until its tags change, so a shuffled library in the queue doesn't rebuild 85,000 rows per song either.
+* The last two big lists keep their built rows: going back to Songs went from 0.64 s to 0.14 s on 85,000 songs.
+* A scan's or a sync's progress only redraws the sidebar's count. It used to rebuild the open view and the queue every time, which is what made the app crawl for the first minutes after opening while the library and the servers were checked.
+* A sync, a scan or a song played to the end refreshes only the view on screen; the others refresh when you open them. A sync also waits longer between refreshes when reading the open view is slow, so it never takes more than about a tenth of the time. A song played to the end changes the play count in place in a list of more than 2,000, rather than reading all of it again.
+* Settings opens at once: the sound cards and output devices are looked up on a thread of their own, and the rows fill in when the answer's in. Asking PipeWire took a round trip on the window's thread every time Settings opened.
+* Covers load newest request first, and requests from rows scrolled past long ago are dropped, so the covers on screen when scrolling stops come first.
+* The library database keeps 32 MB in memory instead of SQLite's 2 MB, with sorts in memory, and a folder's subfolders are told apart with a hash set rather than a list search.
+* `cargo run --release -p patina-core --example bigbench` times every view's query on a made-up 85,000 song library.
+* Tests: the cover search parsers, saving and replacing a chosen cover, a chosen cover winning over others, the backdrop settings, the car's tabs, letters and voice requests.
+
+Reasons for changes: asked for a simpler phone Now Playing in the style of a screenshot, a cover backdrop over any theme, a way to find or upload missing covers, a heart and shuffle in Android Auto, buttons for artists, albums, playlists and folders there, Android Auto playback with the app closed, and a faster app on an 85,000 song library.
+
 2026.11.13 - Feature addition (smart playlist leave-out box)
 
 * Smart playlists have a second box, "Leave out songs where": any song its rules are true for is left out, whatever the first box says. Saved with the playlist, shown on its row as "… · leaving out …", and kept through renames and edits. In the terminal app it's the step after the first box.

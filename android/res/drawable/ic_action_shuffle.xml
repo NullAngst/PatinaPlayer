@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The car's shuffle button, off: faint, so it reads as off. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path android:fillColor="#FFFFFFFF" android:fillAlpha="0.45" android:pathData="M10.59,9.17L5.41,4L4,5.41l5.17,5.17L10.59,9.17zM14.5,4l2.04,2.04L4,18.59L5.41,20L17.96,7.46L20,9.5L20,4L14.5,4zM14.83,13.41l-1.41,1.41 3.13,3.13L14.5,20L20,20l0,-5.5 -2.04,2.04 -3.13,-3.13z" />
+</vector>

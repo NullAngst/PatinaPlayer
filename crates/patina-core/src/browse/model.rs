@@ -337,6 +337,15 @@ pub struct Level {
     pub marked: std::collections::HashSet<String>,
     /// Where a range selection starts: the row last picked on its own.
     pub anchor: Option<usize>,
+    /// Changes whenever `items` does, so a frontend that keeps rows built
+    /// from them (the GUI) can tell when to build them again.
+    pub rev: u64,
+}
+
+/// A new value for [`Level::rev`], different from every one before.
+pub fn next_rev() -> u64 {
+    static REV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Level {
@@ -349,6 +358,7 @@ impl Level {
             offset: 0,
             marked: Default::default(),
             anchor: None,
+            rev: next_rev(),
         }
     }
 

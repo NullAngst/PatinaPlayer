@@ -5,6 +5,7 @@
 
 pub mod amp;
 pub mod auto;
+pub mod covers;
 mod downloads;
 pub mod eq;
 pub mod ipod;
@@ -18,7 +19,7 @@ mod select;
 mod servers;
 pub mod settings;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -181,6 +182,17 @@ pub struct Browser {
     /// Bumped whenever anything a view draws changes, so a frontend that
     /// keeps its own models (the GUI) knows when to rebuild them.
     generation: u64,
+    /// Bumped when only the sidebar's status changes (a scan's or a
+    /// sync's progress), which needs no view rebuilt.
+    side_generation: u64,
+    /// Sections whose levels are out of date, refreshed when next opened.
+    /// Background changes (a sync, a scan) refresh only what's on screen.
+    stale: HashSet<Section>,
+    /// How long refreshing the open views took last time, so a long sync
+    /// doesn't keep the window busy re-reading a huge list.
+    pub(crate) refresh_cost: Duration,
+    /// Devices being looked up for Settings, off the window's thread.
+    devices_job: Option<Receiver<(Vec<HwDevice>, Vec<crate::audio::output::OutDevice>)>>,
     /// When the library roots were last checked for being there.
     roots_checked: Instant,
     /// The playing song's rating as last read, by its path.
@@ -219,6 +231,10 @@ pub fn added_note(added: usize, asked: usize, name: &str) -> String {
 /// Said when you try to play something whose server is away and that
 /// isn't kept here.
 const UNREACHABLE: &str = "Its server can't be reached right now, and it isn't kept here. Keep offline saves it for times like this.";
+
+/// A list longer than this gets play counts changed in place rather than
+/// read again after every song.
+const BIG_LIST: usize = 2000;
 
 pub fn count(n: usize) -> String {
     format!("{n} track{}", plural(n))
@@ -294,6 +310,10 @@ impl Browser {
             check_rx,
             notes: Vec::new(),
             generation: 0,
+            side_generation: 0,
+            stale: HashSet::new(),
+            refresh_cost: Duration::ZERO,
+            devices_job: None,
             roots_checked: Instant::now(),
             playing_rating: None,
             lyrics: None,
@@ -313,6 +333,18 @@ impl Browser {
 
     fn touch(&mut self) {
         self.generation += 1;
+        self.side_generation += 1;
+    }
+
+    /// Bumped when the sidebar changes. Every [`Self::generation`] bump
+    /// counts as one too; this one also moves on its own when only the
+    /// sidebar's status lines changed.
+    pub fn side_generation(&self) -> u64 {
+        self.side_generation
+    }
+
+    fn touch_side(&mut self) {
+        self.side_generation += 1;
     }
 
     /// Start the sleep timer, or with `None`, turn it off, and say so.
@@ -378,23 +410,9 @@ impl Browser {
         self.amp_tick();
         self.poll_lyrics();
         self.poll_ipod();
-        if events.iter().any(|e| matches!(e, Event::Played(_))) {
-            for s in Section::STATS {
-                self.refresh_section(s);
-            }
-            // The open list shows play counts too (an album's songs, the
-            // Albums and Songs lists): it shows the new one now rather
-            // than the next time the app opens.
-            if matches!(
-                self.section,
-                Section::Folders
-                    | Section::Artists
-                    | Section::Albums
-                    | Section::Songs
-                    | Section::Genres
-                    | Section::Playlists
-            ) {
-                self.refresh_current();
+        for ev in &events {
+            if let Event::Played(path) = ev {
+                self.after_played(path);
             }
         }
         let mut changed = false;
@@ -404,7 +422,11 @@ impl Browser {
                 match ev {
                     LibEvent::Changed(_) => changed = true,
                     LibEvent::Error(e) => self.notes.push(Note::Error(e)),
-                    LibEvent::Progress(_) | LibEvent::Ready => self.generation += 1,
+                    // Progress only moves the sidebar's count; rebuilding the
+                    // open view for it made a big library crawl while it
+                    // scanned.
+                    LibEvent::Progress(_) => self.touch_side(),
+                    LibEvent::Ready => self.touch(),
                 }
             }
         }
@@ -421,8 +443,9 @@ impl Browser {
         while let Ok((url, summary)) = self.check_rx.try_recv() {
             self.checks.insert(url, summary.clone());
             self.note(summary);
-            self.refresh_section(Section::Radio);
+            self.refresh_or_stale(Section::Radio);
         }
+        self.poll_devices();
         if self.roots_checked.elapsed() >= Duration::from_secs(5) {
             self.roots_checked = Instant::now();
             let mut flipped = false;
@@ -451,11 +474,11 @@ impl Browser {
         changed |= synced;
         if changed {
             self.avail_dirty = true;
-            self.refresh_all();
+            self.refresh_visible();
             self.rebuild_sidebar();
         } else if pods_changed {
-            self.refresh_section(Section::Podcasts);
-            self.refresh_section(Section::Downloads);
+            self.refresh_or_stale(Section::Podcasts);
+            self.refresh_or_stale(Section::Downloads);
         }
         if self.avail_dirty {
             self.avail_dirty = false;
@@ -467,6 +490,18 @@ impl Browser {
     // ----- Sidebar -----
 
     pub fn rebuild_sidebar(&mut self) {
+        self.build_sidebar();
+        self.touch();
+    }
+
+    /// The sidebar again, for a change that only shows there (a server's
+    /// status), so the open view isn't rebuilt with it.
+    pub(crate) fn rebuild_sidebar_status(&mut self) {
+        self.build_sidebar();
+        self.touch_side();
+    }
+
+    fn build_sidebar(&mut self) {
         let mut s: Vec<SideEntry> = Section::NUMBERED
             .iter()
             .map(|&x| SideEntry::Section(x))
@@ -546,7 +581,6 @@ impl Browser {
         s.push(SideEntry::Section(Section::Settings));
         self.sidebar = s;
         self.sync_sidebar_sel();
-        self.touch();
     }
 
     fn sync_sidebar_sel(&mut self) {
@@ -624,10 +658,13 @@ impl Browser {
         self.section = s;
         self.view_error = None;
         if s == Section::Settings {
-            // Cards come and go (a USB DAC); look again each time.
-            self.devices = exclusive::list_devices();
-            self.refresh_outputs();
-            self.refresh_section(Section::Settings);
+            // Cards come and go (a USB DAC); look again each time. Off this
+            // thread: asking PipeWire takes a round trip, and Settings
+            // opens with what was found last time until the answer's in.
+            self.look_for_devices();
+        }
+        if self.stale.remove(&s) && self.stacks.contains_key(&s) {
+            self.refresh_section(s);
         }
         if s != Section::Queue && !self.stacks.contains_key(&s) {
             let level = self.build(&Source::Section(s));
@@ -804,6 +841,7 @@ impl Browser {
             Ok((title, items)) => {
                 level.title = title;
                 level.items = items;
+                level.rev = next_rev();
                 if !level.marked.is_empty() {
                     let keys: std::collections::HashSet<String> =
                         level.items.iter().map(Item::key).collect();
@@ -839,7 +877,144 @@ impl Browser {
         }
     }
 
+    /// Refresh what's on screen now, and leave the other sections to be
+    /// refreshed when they're opened. For changes that come from the
+    /// background (a sync, a scan), which can come every half second.
+    pub fn refresh_visible(&mut self) {
+        let t = Instant::now();
+        let sections: Vec<Section> = self.stacks.keys().copied().collect();
+        for s in sections {
+            if self.stacks[&s].is_empty() {
+                self.stacks.remove(&s);
+            } else if s != self.section {
+                self.stale.insert(s);
+            }
+        }
+        if self.stacks.contains_key(&self.section) {
+            self.refresh_section(self.section);
+        } else {
+            self.switch(self.section);
+        }
+        self.refresh_cost = t.elapsed();
+    }
+
+    /// Refresh a section now if it's open, or when it's next opened.
+    pub fn refresh_or_stale(&mut self, s: Section) {
+        if s == self.section {
+            self.refresh_section(s);
+        } else if self.stacks.contains_key(&s) {
+            self.stale.insert(s);
+        }
+    }
+
+    /// A song played to the end: its play count went up. Small lists are
+    /// read again; a big one (every song, a huge folder) gets the count
+    /// changed in place, since reading 85,000 songs again after every song
+    /// stalls a phone for a second.
+    fn after_played(&mut self, path: &std::path::Path) {
+        for s in Section::STATS {
+            self.refresh_or_stale(s);
+        }
+        if !matches!(
+            self.section,
+            Section::Folders
+                | Section::Artists
+                | Section::Albums
+                | Section::Songs
+                | Section::Genres
+                | Section::Playlists
+        ) {
+            return;
+        }
+        let big = self.level().is_some_and(|l| l.items.len() > BIG_LIST);
+        if !big {
+            return self.refresh_current();
+        }
+        let album = self
+            .level()
+            .and_then(|l| {
+                l.items.iter().find_map(|i| match i {
+                    Item::Track(t) if t.path == path => Some(t.album_key.clone()),
+                    _ => None,
+                })
+            })
+            .or_else(|| {
+                self.lib
+                    .as_ref()
+                    .and_then(|l| l.track_by_path(path).ok().flatten())
+                    .map(|t| t.album_key)
+            });
+        let Some(l) = self
+            .stacks
+            .get_mut(&self.section)
+            .and_then(|s| s.last_mut())
+        else {
+            return;
+        };
+        let mut hit = false;
+        for it in &mut l.items {
+            match it {
+                Item::Track(t) if t.path == path => {
+                    t.play_count += 1;
+                    hit = true;
+                }
+                Item::Album(a) if Some(&a.key) == album.as_ref() => {
+                    a.play_count += 1;
+                    hit = true;
+                }
+                _ => {}
+            }
+        }
+        if hit {
+            l.rev = next_rev();
+            self.touch();
+        }
+    }
+
+    /// Look up sound cards and output devices on a thread of their own;
+    /// [`Self::poll_devices`] picks the answer up.
+    fn look_for_devices(&mut self) {
+        if self.devices_job.is_some() {
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let backend = self.config.output.backend;
+        let spawned = std::thread::Builder::new()
+            .name("patina-devices".into())
+            .spawn(move || {
+                let _ = tx.send((
+                    exclusive::list_devices(),
+                    crate::audio::output::list_outputs(backend),
+                ));
+            });
+        match spawned {
+            Ok(_) => self.devices_job = Some(rx),
+            Err(_) => {
+                self.devices = exclusive::list_devices();
+                self.refresh_outputs();
+                self.refresh_or_stale(Section::Settings);
+            }
+        }
+    }
+
+    fn poll_devices(&mut self) {
+        let Some(rx) = &self.devices_job else { return };
+        match rx.try_recv() {
+            Ok((devices, outputs)) => {
+                self.devices_job = None;
+                if devices != self.devices || outputs != self.outputs {
+                    self.devices = devices;
+                    self.outputs = outputs;
+                    self.refresh_or_stale(Section::Settings);
+                }
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            Err(crossbeam_channel::TryRecvError::Disconnected) => self.devices_job = None,
+        }
+    }
+
     pub fn refresh_all(&mut self) {
+        self.stale.clear();
         let sections: Vec<Section> = self.stacks.keys().copied().collect();
         for s in sections {
             let n = self.stacks[&s].len();
@@ -1671,6 +1846,25 @@ impl Browser {
                     let v = &options[*index].0;
                     w(config::set_value(&path, "appearance", "theme", v.as_str()))?;
                     self.config.appearance.theme = v.parse().unwrap_or_default();
+                }
+                (Key::Backdrop, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(
+                        &path,
+                        "appearance",
+                        "backdrop",
+                        v.as_str(),
+                    ))?;
+                    self.config.appearance.backdrop = v.parse().unwrap_or_default();
+                }
+                (Key::BackdropStrength, Control::Number { value, .. }) => {
+                    w(config::set_value(
+                        &path,
+                        "appearance",
+                        "backdrop_strength",
+                        *value,
+                    ))?;
+                    self.config.appearance.backdrop_strength = (*value).clamp(10, 100) as u8;
                 }
                 (
                     Key::SidebarLandscape | Key::SidebarPortrait,

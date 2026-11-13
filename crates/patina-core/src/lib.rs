@@ -7,6 +7,7 @@ pub mod audio;
 pub mod browse;
 pub mod cache;
 pub mod config;
+pub mod cover;
 pub mod dsp;
 pub mod eq;
 pub mod ipod;

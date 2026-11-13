@@ -30,6 +30,10 @@ const NEXT: jint = 4;
 const BACK: jint = 5;
 const STOP: jint = 6;
 const SEEK: jint = 7;
+/// The car's heart button: heart the song playing, or take it off.
+const LOVE: jint = 8;
+/// The car's shuffle button.
+const SHUFFLE: jint = 9;
 
 pub const STOPPED: jint = 0;
 pub const PLAYING: jint = 1;
@@ -38,6 +42,7 @@ pub const PAUSED: jint = 2;
 // What a pick is for. Must match Native.java.
 const PICK_FOLDER: jint = 1;
 const PICK_EQ_FILE: jint = 2;
+const PICK_IMAGE: jint = 3;
 
 /// How long a picker may stay open before the wait for it is given up.
 const PICK_PATIENCE: Duration = Duration::from_secs(15 * 60);
@@ -98,6 +103,19 @@ pub extern "system" fn Java_dev_patina_player_Native_nativeInit<'local>(
     }
 }
 
+/// The media service started with no window (a car connected with the
+/// app closed): start the player without it. `files` is the app's storage.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_patina_player_Native_startHeadless<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    files: JString<'local>,
+) {
+    if let Some(f) = opt_string(&mut env, &files) {
+        crate::headless::start(Path::new(&f));
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_patina_player_Native_permissionsDone<'local>(
     _env: JNIEnv<'local>,
@@ -118,10 +136,17 @@ pub extern "system" fn Java_dev_patina_player_Native_command<'local>(
     cmd: jint,
     arg: jlong,
 ) {
+    if cmd == LOVE {
+        // Hearting goes through the library and Last.fm, which whoever
+        // holds the player (the window, or the car's player) does.
+        platform::outside_action("love");
+        return;
+    }
     let Some(p) = PLAYER.lock().unwrap().clone() else {
         return;
     };
     p.send(match cmd {
+        SHUFFLE => Command::ToggleShuffle,
         PLAY => Command::Play,
         PAUSE => Command::Pause,
         TOGGLE => Command::TogglePause,
@@ -273,8 +298,9 @@ fn auto_children(parent: &str) -> Vec<patina_core::browse::auto::AutoItem> {
         .unwrap_or_default()
 }
 
-/// The rows under a browse id, four strings each: id, title, subtitle,
-/// and "b", "p" or "bp" for browsable, playable or both.
+/// The rows under a browse id, five strings each: id, title, subtitle,
+/// flags ("b" browsable, "p" playable, "g" its rows as a grid of covers),
+/// and the heading it goes under (empty for none).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
     mut env: JNIEnv<'local>,
@@ -285,28 +311,34 @@ pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
     let items = auto_children(&parent);
     let build = |env: &mut JNIEnv<'local>| -> jni::errors::Result<JObjectArray<'local>> {
         let arr = env.new_object_array(
-            (items.len() * 4) as i32,
+            (items.len() * 5) as i32,
             "java/lang/String",
             JObject::null(),
         )?;
         for (i, it) in items.iter().enumerate() {
-            let flags = match (it.browsable, it.playable) {
-                (true, true) => "bp",
-                (true, false) => "b",
-                _ => "p",
-            };
+            let mut flags = String::new();
+            if it.browsable {
+                flags.push('b');
+            }
+            if it.playable {
+                flags.push('p');
+            }
+            if it.grid {
+                flags.push('g');
+            }
             for (j, text) in [
                 it.id.as_str(),
                 it.title.as_str(),
                 it.subtitle.as_str(),
-                flags,
+                flags.as_str(),
+                it.group.as_str(),
             ]
             .into_iter()
             .enumerate()
             {
                 let js = env.new_string(text)?;
-                env.set_object_array_element(&arr, (i * 4 + j) as i32, &js)?;
-                // Two hundred rows are eight hundred strings: let each go
+                env.set_object_array_element(&arr, (i * 5 + j) as i32, &js)?;
+                // Two hundred rows are a thousand strings: let each go
                 // rather than fill the local reference table.
                 env.delete_local_ref(js)?;
             }
@@ -363,6 +395,12 @@ pub fn pick_eq_file() -> Picked {
     pick(PICK_EQ_FILE, "pickFile")
 }
 
+/// The system's picker for an image, copied where the app can read it:
+/// a cover for an album.
+pub fn pick_image() -> Picked {
+    pick(PICK_IMAGE, "pickImage")
+}
+
 /// Show a text form as an Android dialog. False if Java isn't there.
 pub fn prompt(id: u64, p: &Prompt) -> bool {
     with_java(|env, class| {
@@ -413,6 +451,8 @@ pub fn on_state(
     duration_ms: i64,
     position_ms: i64,
     state: jint,
+    loved: jint,
+    shuffle: bool,
 ) {
     with_java(|env, class| {
         let t = env.new_string(title)?;
@@ -422,7 +462,7 @@ pub fn on_state(
         env.call_static_method(
             class,
             "onState",
-            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JJI)V",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JJIIZ)V",
             &[
                 JValue::Object(&t),
                 JValue::Object(&ar),
@@ -431,6 +471,8 @@ pub fn on_state(
                 JValue::Long(duration_ms),
                 JValue::Long(position_ms),
                 JValue::Int(state),
+                JValue::Int(loved),
+                JValue::Bool(u8::from(shuffle)),
             ],
         )?;
         Ok(())

@@ -63,6 +63,11 @@ pub trait Hooks: Send + Sync {
     /// Ask for an AutoEq or Equalizer APO file, as a path the app can
     /// read. Blocks, like [`Hooks::pick_folder`].
     fn pick_eq_file(&self) -> Picked;
+    /// Ask for an image file (a cover), as a path the app can read.
+    /// Blocks, like [`Hooks::pick_folder`].
+    fn pick_image(&self) -> Picked {
+        Picked::Unavailable("No picker for images here".into())
+    }
     /// Show a prompt. Its answer comes back through [`prompt_event`] under
     /// `id`. False if it couldn't be shown, and the window's own dialog is
     /// used instead.
@@ -126,6 +131,48 @@ pub fn play_media_id(id: String) {
 
 pub(crate) fn take_media_ids() -> Vec<String> {
     std::mem::take(&mut *MEDIA.lock().unwrap())
+}
+
+/// Buttons pressed outside the window (a car's heart button), waiting for
+/// whoever holds the player to act on them.
+static ACTIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Whether the song playing is hearted: 0 can't be (nothing, radio), 1
+/// not, 2 hearted. For a car's heart button.
+static LOVED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Ask for something the window (or the player running without it)
+/// does: "love" hearts the song playing, or takes the heart off.
+pub fn outside_action(a: &str) {
+    ACTIONS.lock().unwrap().push(a.to_string());
+}
+
+pub fn take_outside_actions() -> Vec<String> {
+    std::mem::take(&mut *ACTIONS.lock().unwrap())
+}
+
+/// The song playing's heart, as [`Browser::loved_now`] has it.
+///
+/// [`Browser::loved_now`]: patina_core::browse::Browser::loved_now
+pub fn set_now_loved(loved: Option<bool>) {
+    let v = match loved {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    LOVED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn now_loved() -> Option<bool> {
+    match LOVED.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
+/// Things picked in a car, by browse id: see [`play_media_id`].
+pub fn take_media_ids_pub() -> Vec<String> {
+    take_media_ids()
 }
 
 /// Set the platform's hooks. Only the first call counts.

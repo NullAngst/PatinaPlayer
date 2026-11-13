@@ -8,10 +8,16 @@
 //! folder and file pickers and its text dialogs, and the media session and
 //! notification, which the Java service runs from what this reports.
 //!
+//! The player can also start without the window: a car (Android Auto)
+//! binds the media service with the app closed, and the service starts
+//! the player on a thread of its own ([`headless`]). Opening the app then
+//! takes that same player over, queue, song and all.
+//!
 //! On anything but Android this crate is empty.
 
 #![cfg(target_os = "android")]
 
+mod headless;
 mod jni_glue;
 
 use std::cell::Cell;
@@ -29,7 +35,7 @@ use slint::ComponentHandle;
 use slint::android::AndroidApp;
 
 /// Where Android keeps a phone's own music.
-const MUSIC: &str = "/storage/emulated/0/Music";
+pub(crate) const MUSIC: &str = "/storage/emulated/0/Music";
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
@@ -40,7 +46,14 @@ fn android_main(app: AndroidApp) {
     );
     std::panic::set_hook(Box::new(|p| log::error!("panic: {p}")));
 
-    set_dirs(&app);
+    // Taken by the window from here on: a car connecting now uses this
+    // player rather than starting one of its own.
+    headless::window_starting();
+    if let Some(base) = app.internal_data_path() {
+        set_dirs(&base);
+    } else {
+        log::error!("Android gave no app storage");
+    }
 
     // The Music folder goes in the library on first start whatever the
     // permission answer is. Without the permission it scans as empty, and
@@ -54,12 +67,20 @@ fn android_main(app: AndroidApp) {
         return;
     }
 
-    let session = match Session::open(Options::default()) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("can't start: {e}");
-            return;
+    // Playing for a car already: carry on with that player.
+    let session = match headless::take() {
+        Some(s) => {
+            log::info!("the window takes over the player the car started");
+            s
         }
+        None => match Session::open(Options::default()) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("can't start: {e}");
+                headless::window_closed();
+                return;
+            }
+        },
     };
     let fade_ms = session.fade_ms;
     let playing_files = session.playing_files;
@@ -111,6 +132,7 @@ fn android_main(app: AndroidApp) {
     drop(media);
     bridge.shutdown(fade_ms);
     jni_glue::stopped();
+    headless::window_closed();
 }
 
 /// What the window asks of Android, answered through the Java side.
@@ -123,6 +145,10 @@ impl Hooks for AndroidHooks {
 
     fn pick_eq_file(&self) -> Picked {
         jni_glue::pick_eq_file()
+    }
+
+    fn pick_image(&self) -> Picked {
+        jni_glue::pick_image()
     }
 
     fn prompt(&self, id: u64, p: &Prompt) -> bool {
@@ -141,11 +167,15 @@ impl Hooks for AndroidHooks {
 
 /// Point the app's folders (config, library, cache) at Android's app
 /// storage. The core finds them through the XDG variables, as on Linux.
-fn set_dirs(app: &AndroidApp) {
-    let Some(base) = app.internal_data_path() else {
-        log::error!("Android gave no app storage");
-        return;
-    };
+/// Only the first call does anything: the window and the car's player
+/// both set them, and once the player runs its threads read them.
+pub(crate) fn set_dirs(base: &Path) {
+    static DONE: std::sync::Once = std::sync::Once::new();
+    DONE.call_once(|| set_dirs_now(base));
+}
+
+fn set_dirs_now(base: &Path) {
+    let base = base.to_path_buf();
     let dirs = [
         ("HOME", base.clone()),
         ("XDG_CONFIG_HOME", base.join("config")),
@@ -154,9 +184,10 @@ fn set_dirs(app: &AndroidApp) {
     ];
     for (k, v) in dirs {
         let _ = std::fs::create_dir_all(&v);
-        // SAFETY: this runs first thing in android_main, before the core
-        // or the window start threads. The only other threads alive are
-        // Android's and the activity glue's, which don't read these.
+        // SAFETY: this runs once, before the core or the window start
+        // threads (first thing in android_main, or before the car's player
+        // starts). The only other threads alive are Android's and the
+        // activity glue's, which don't read these.
         unsafe { std::env::set_var(k, v) };
     }
 }
@@ -164,7 +195,7 @@ fn set_dirs(app: &AndroidApp) {
 /// First start: write the default config, and add the phone's Music
 /// folder to the library. No check that it's a folder: without the
 /// permission, Android may not even let the app see that much.
-fn first_run(music: &Path) {
+pub(crate) fn first_run(music: &Path) {
     let path = patina_core::config::config_path();
     if path.exists() {
         return;
@@ -182,9 +213,11 @@ fn first_run(music: &Path) {
 /// What the media session was last told, so it's only told changes, and
 /// the position now and then (it moves the lock screen's bar on its own in
 /// between).
-struct Media {
+pub(crate) struct Media {
     track: Option<(u64, String, String, String)>,
     state: i32,
+    /// The car's heart and shuffle buttons, as last shown.
+    marks: (i32, bool),
     pos_s: u64,
     /// The cover for which track, found on a thread of its own since a
     /// server cover may have to be fetched.
@@ -195,11 +228,12 @@ struct Media {
 }
 
 impl Media {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (art_tx, art_rx) = mpsc::channel();
         Self {
             track: None,
             state: -1,
+            marks: (-1, false),
             pos_s: 0,
             art_for: None,
             art: None,
@@ -208,7 +242,7 @@ impl Media {
         }
     }
 
-    fn report(&mut self, p: &Player) {
+    pub(crate) fn report(&mut self, p: &Player) {
         let snap = p.snapshot();
         let state = match snap.state {
             PlayState::Stopped => jni_glue::STOPPED,
@@ -255,7 +289,16 @@ impl Media {
         }
 
         let pos_s = snap.position.as_secs();
-        let changed = track != self.track || state != self.state || art_new;
+        let marks = (
+            match platform::now_loved() {
+                None => 0,
+                Some(false) => 1,
+                Some(true) => 2,
+            },
+            snap.shuffle,
+        );
+        let changed = track != self.track || state != self.state || art_new || marks != self.marks;
+        self.marks = marks;
         let moved =
             pos_s.abs_diff(self.pos_s) >= 5 || (state != jni_glue::PLAYING && pos_s != self.pos_s);
         if !changed && !moved {
@@ -273,6 +316,8 @@ impl Media {
             snap.duration.map_or(0, |d| d.as_millis() as i64),
             snap.position.as_millis() as i64,
             state,
+            marks.0,
+            marks.1,
         );
     }
 }

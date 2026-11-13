@@ -4,11 +4,14 @@
 //! the library or queue; that's patina-core's job, shared with the TUI.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use patina_core::browse::covers::CoverTarget;
 use patina_core::browse::{
     Activated, Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, Section,
     SideEntry, Source, fmt_duration, fmt_length,
@@ -25,7 +28,8 @@ use crate::art::{ArtCache, LARGE, Req, THUMB};
 use crate::desktop::Action;
 use crate::platform::{self, Picked, Prompt, PromptEvent, PromptField};
 use crate::{
-    AmpKnob, AmpUnit, AppWindow, ChainRow, EqBand, Hero, Icons, P, QueueRow, Row, SideItem, Ui,
+    AmpKnob, AmpUnit, AppWindow, ChainRow, CoverPick, EqBand, Hero, Icons, P, QueueRow, Row,
+    SideItem, Ui,
 };
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
@@ -72,6 +76,8 @@ enum Dlg {
     ServerPlaylist(String, Vec<PathBuf>),
     Confirm(Confirm),
     Help,
+    /// Picking a cover found online.
+    Covers,
 }
 
 enum Confirm {
@@ -180,6 +186,65 @@ pub struct State {
     import_pick: Option<(crossbeam_channel::Receiver<Picked>, Instant)>,
     /// Rows were picked or let go of: their marks need redrawing.
     marks_dirty: bool,
+    /// The album grid's tiles near the screen, a slice of `rows` from
+    /// `grid_base` on. The grid builds only these.
+    grid_rows: Rc<VecModel<Row>>,
+    grid_base: usize,
+    /// The sidebar as last drawn, by the browser's sidebar generation.
+    last_side_gen: u64,
+    /// What the rows were last built from: the level, its items' revision
+    /// and everything else a row shows. While it's the same, a new song
+    /// only moves the playing mark instead of every row being built again.
+    rows_sig: Option<(String, u64, u64)>,
+    /// The song the rows last marked as playing.
+    rows_playing: Option<PathBuf>,
+    /// The last two big lists' rows, to show again without building them.
+    rows_cache: Vec<RowsCache>,
+    /// Each queue entry's row as last drawn, by id and revision, to reuse
+    /// while the entry hasn't changed, and what greyed out then.
+    queue_rows: HashMap<patina_core::queue::EntryId, (u64, QueueRow)>,
+    queue_decor: u64,
+    /// The cover picker: what it's for and what's been found.
+    covers: CoverPicker,
+    covers_model: Rc<VecModel<CoverPick>>,
+    /// An image being picked for a cover, and the album it's for.
+    cover_file_pick: Option<(crossbeam_channel::Receiver<Picked>, CoverTarget)>,
+    /// The blurred cover behind Now Playing, by the song and whether its
+    /// cover had arrived.
+    blur_key: Option<(PathBuf, bool)>,
+}
+
+/// Lists at least this long keep their built rows for when they're opened
+/// again.
+const CACHE_ROWS: usize = 2000;
+
+/// A big list's rows as built, by what they were built from.
+struct RowsCache {
+    sig: (String, u64, u64),
+    rows: Vec<Row>,
+    art: Vec<Option<Req>>,
+    height: f32,
+}
+
+/// The cover picker's search, running off the window's thread.
+#[derive(Default)]
+struct CoverPicker {
+    target: Option<CoverTarget>,
+    found: Vec<patina_core::cover::Found>,
+    rx: Option<crossbeam_channel::Receiver<CoverMsg>>,
+    /// Bumped per search, so answers from an earlier one are dropped.
+    seq: u64,
+}
+
+enum CoverMsg {
+    /// What was found, without pictures yet.
+    Found(u64, Vec<patina_core::cover::Found>),
+    /// One thumbnail, by its place in the list; None if it wouldn't load.
+    Thumb(u64, usize, Option<image::RgbaImage>),
+    /// Every thumbnail is in.
+    Done(u64),
+    /// The picked cover is saved, or why not.
+    Saved(Result<(patina_core::cover::Saved, PathBuf), String>),
 }
 
 const HELP: &str = "Space        play / pause
@@ -211,6 +276,8 @@ Ctrl+L       lyrics for the song playing (looked up only when asked)
 Right-click a song or album to rate it, a folder, album or artist to
              add it to Favorites; the album header and the bottom bar
              have stars too
+Right-click an album, a folder or a cover to find cover art online,
+             or to use an image file as the cover
 F5           check folders and feeds for changes
 Ctrl+Q       quit. Closing the window only hides it to the tray
              while there's a tray icon (Settings, Desktop)
@@ -351,6 +418,18 @@ impl State {
             np_chain: Rc::new(VecModel::default()),
             import_pick: None,
             marks_dirty: false,
+            grid_rows: Rc::new(VecModel::default()),
+            grid_base: 0,
+            last_side_gen: u64::MAX,
+            rows_sig: None,
+            rows_playing: None,
+            rows_cache: Vec::new(),
+            queue_rows: HashMap::new(),
+            queue_decor: 0,
+            covers: CoverPicker::default(),
+            covers_model: Rc::new(VecModel::default()),
+            cover_file_pick: None,
+            blur_key: None,
         }
     }
 
@@ -901,21 +980,133 @@ impl State {
             .collect();
         self.fav_keys = fav_keys;
         let playing = self.playing_path();
+        // The same rows as last time, apart from which song plays: move
+        // the playing mark and keep the rest. Building every row again for
+        // a new song made 85,000 songs stall the window.
+        let library_view = matches!(
+            self.b.section,
+            Section::Folders
+                | Section::Artists
+                | Section::Albums
+                | Section::Songs
+                | Section::Genres
+                | Section::Playlists
+                | Section::History
+                | Section::MostListened
+                | Section::TopAlbums
+                | Section::TopArtists
+        );
+        let sig = (
+            self.level_key.clone(),
+            self.b.level().map(|l| l.rev).unwrap_or(0),
+            self.decor_stamp(),
+        );
+        if library_view
+            && self.rows_sig.as_ref() == Some(&sig)
+            && self.rows.row_count() == items.len()
+        {
+            if playing != self.rows_playing {
+                for (i, it) in items.iter().enumerate() {
+                    let Item::Track(t) = it else { continue };
+                    let now = playing.as_deref() == Some(t.path.as_path());
+                    let was = self.rows_playing.as_deref() == Some(t.path.as_path());
+                    if now != was
+                        && let Some(mut r) = self.rows.row_data(i)
+                    {
+                        r.playing = now;
+                        self.rows.set_row_data(i, r);
+                    }
+                }
+                self.rows_playing = playing;
+            }
+            let sel_ok = items
+                .get(selected.max(0) as usize)
+                .is_some_and(Item::selectable);
+            ui.set_selected(if sel_ok { selected } else { -1 });
+            let had_marks = ui.get_marked_count() > 0;
+            ui.set_marked_count(self.b.marked_count() as i32);
+            if had_marks || self.b.marked_count() > 0 {
+                self.refresh_marks(ui);
+            }
+            if self.b.marked_count() == 0 && !is_touch(ui) {
+                self.marking = false;
+            }
+            ui.set_marking(self.marking);
+            ui.set_ipod(self.b.ipod_connected());
+            return;
+        }
+        self.rows_sig = Some(sig.clone());
+        self.rows_playing = playing.clone();
         let marked: std::collections::HashSet<String> =
             self.b.level().map(|l| l.marked.clone()).unwrap_or_default();
-        let rows: Vec<Row> = items
+        // A big list opened again (back to Songs from Albums) takes the
+        // rows built last time, with the playing mark and picks redone.
+        let cached = self
+            .rows_cache
             .iter()
-            .map(|it| {
-                if matches!(it, Item::Header(_)) {
-                    n = 0;
-                } else {
-                    n += 1;
+            .position(|c| c.sig == sig && c.rows.len() == items.len())
+            .map(|i| self.rows_cache.remove(i));
+        let (rows, row_art, rows_h) = match cached {
+            Some(c) => {
+                let mut rows = c.rows.clone();
+                for (r, it) in rows.iter_mut().zip(items) {
+                    if let Item::Track(t) = it {
+                        r.playing = playing.as_deref() == Some(t.path.as_path());
+                    }
+                    r.marked = !marked.is_empty() && marked.contains(&it.key());
                 }
-                let mut r = self.row(it, n.max(1) - 1, ctx, playing.as_deref());
-                r.marked = !marked.is_empty() && marked.contains(&it.key());
-                r
-            })
-            .collect();
+                let out = (rows, c.art.clone(), c.height);
+                self.rows_cache.push(c);
+                out
+            }
+            None => {
+                let rows: Vec<Row> = items
+                    .iter()
+                    .map(|it| {
+                        if matches!(it, Item::Header(_)) {
+                            n = 0;
+                        } else {
+                            n += 1;
+                        }
+                        let mut r = self.row(it, n.max(1) - 1, ctx, playing.as_deref());
+                        r.marked = !marked.is_empty() && marked.contains(&it.key());
+                        r
+                    })
+                    .collect();
+                // Songs in a list don't show covers; everything else that
+                // has one does.
+                let row_art: Vec<Option<Req>> = items
+                    .iter()
+                    .map(|it| match it {
+                        Item::Track(_) => None,
+                        other => Self::art_req(other),
+                    })
+                    .collect();
+                // The rows' whole height, for views where the page scrolls
+                // as one (the Amp and EQ panels on a phone). Matches
+                // ListRow's heights.
+                let rows_h: f32 = rows
+                    .iter()
+                    .map(|r| match r.kind {
+                        9 => 34.0,
+                        12 => 54.0,
+                        _ => 40.0,
+                    })
+                    .sum();
+                if library_view && rows.len() >= CACHE_ROWS {
+                    self.rows_cache.push(RowsCache {
+                        sig,
+                        rows: rows.clone(),
+                        art: row_art.clone(),
+                        height: rows_h,
+                    });
+                    if self.rows_cache.len() > 2 {
+                        self.rows_cache.remove(0);
+                    }
+                }
+                (rows, row_art, rows_h)
+            }
+        };
         ui.set_marked_count(self.b.marked_count() as i32);
         if self.b.marked_count() == 0 && !is_touch(ui) {
             self.marking = false;
@@ -930,14 +1121,6 @@ impl State {
         }
         ui.set_lifted(self.lifted.map(|i| i as i32).unwrap_or(-1));
         ui.set_ipod(self.b.ipod_connected());
-        // Songs in a list don't show covers; everything else that has one does.
-        let row_art: Vec<Option<Req>> = items
-            .iter()
-            .map(|it| match it {
-                Item::Track(_) => None,
-                other => Self::art_req(other),
-            })
-            .collect();
         ui.set_view_title(ss(match self.b.level().map(|l| &l.source) {
             Some(Source::Search(_)) => "Search".to_string(),
             // Top levels are named after their section; the sort and mode
@@ -971,16 +1154,6 @@ impl State {
         }
         self.row_shown = shown;
         self.row_art = row_art;
-        // The rows' whole height, for views where the page scrolls as one
-        // (the Amp and EQ panels on a phone). Matches ListRow's heights.
-        let rows_h: f32 = rows
-            .iter()
-            .map(|r| match r.kind {
-                9 => 34.0,
-                12 => 54.0,
-                _ => 40.0,
-            })
-            .sum();
         ui.set_rows_height(rows_h);
         update_rows(&self.rows, rows);
         let sel_ok = items
@@ -1042,6 +1215,39 @@ impl State {
             // over it.
             ui.set_np_open(false);
         }
+    }
+
+    /// Everything a row shows that isn't in its item: Favorites, genres
+    /// marked for a mix, what greys out with a server away, what's pinned,
+    /// the mix playing, an iPod. A change in any of these builds the rows
+    /// again.
+    fn decor_stamp(&self) -> u64 {
+        let one = |x: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            x(&mut h);
+            h.finish()
+        };
+        // Favorites in any order: their hashes added up.
+        let favs = self
+            .fav_keys
+            .iter()
+            .map(|k| one(&|h| k.hash(h)))
+            .fold(0u64, u64::wrapping_add);
+        one(&|h| {
+            favs.hash(h);
+            for g in &self.b.genre_marks {
+                g.norm.hash(h);
+            }
+            if self.b.avail.any_offline() {
+                self.b.avail.stamp.hash(h);
+            }
+            for p in &self.b.cache_status.pins {
+                p.pin.id.hash(h);
+            }
+            self.b.mix.as_ref().and_then(|m| m.saved).hash(h);
+            self.b.ipod_connected().hash(h);
+            self.b.config.appearance.theme.is_kawaii().hash(h);
+        })
     }
 
     /// Send the theme's colors to the home screen widget when they change:
@@ -1225,49 +1431,69 @@ impl State {
     }
 
     fn sync_queue(&mut self, ui: &AppWindow) {
-        let (rows, current, total) = {
+        // Each entry's row is kept by its id and revision, and only built
+        // again when its tags change. A shuffled library of 85,000 songs
+        // used to be built whole on every new song.
+        let marks: std::collections::HashSet<patina_core::queue::EntryId> =
+            self.b.queue_marks.iter().copied().collect();
+        let decor = if self.b.avail.any_offline() {
+            self.b.avail.stamp
+        } else {
+            0
+        };
+        if decor != self.queue_decor {
+            self.queue_rows.clear();
+            self.queue_decor = decor;
+        }
+        let mut ids: Vec<patina_core::queue::EntryId> = Vec::new();
+        let mut models: Vec<QueueRow> = Vec::new();
+        let mut rows_art: Vec<Option<Req>> = Vec::new();
+        let (current, total) = {
             let q = self.b.player.queue();
             let cur = q.current();
+            let order = q.play_order();
+            ids.reserve(order.len());
+            models.reserve(order.len());
+            rows_art.reserve(order.len());
             let mut total = Duration::ZERO;
             let mut current = -1;
-            let mut infos = Vec::new();
-            for (pos, &id) in q.play_order().iter().enumerate() {
+            for (pos, &id) in order.iter().enumerate() {
                 let Some(e) = q.get(id) else { continue };
                 total += e.info.duration.unwrap_or_default();
                 if cur == Some(id) {
                     current = pos as i32;
                 }
-                infos.push((
-                    e.info.clone(),
-                    cur == Some(id),
-                    e.failed,
-                    self.b.queue_marks.contains(&id),
-                ));
+                let mut row = match self.queue_rows.get(&id) {
+                    Some((rev, row)) if *rev == e.rev => row.clone(),
+                    _ => {
+                        let row = QueueRow {
+                            off: !self.b.avail.info_plays(&e.info),
+                            title: ss(e.info.display_title()),
+                            sub: ss(sub_line(&e.info)),
+                            failed: e.failed,
+                            ..Default::default()
+                        };
+                        self.queue_rows.insert(id, (e.rev, row.clone()));
+                        row
+                    }
+                };
+                row.playing = cur == Some(id);
+                row.marked = marks.contains(&id);
+                models.push(row);
+                rows_art.push(
+                    (e.info.kind == MediaKind::File && !e.info.path.as_os_str().is_empty())
+                        .then(|| Req::Track(e.info.path.clone())),
+                );
+                ids.push(id);
             }
-            (infos, current, total)
+            (current, total)
         };
-        let rows_art: Vec<Option<Req>> = rows
-            .iter()
-            .map(|(info, _, _, _)| {
-                (info.kind == MediaKind::File && !info.path.as_os_str().is_empty())
-                    .then(|| Req::Track(info.path.clone()))
-            })
-            .collect();
-        let n = rows.len();
-        let models: Vec<QueueRow> = rows
-            .into_iter()
-            .map(|(info, playing, failed, marked)| QueueRow {
-                off: !self.b.avail.info_plays(&info),
-                title: ss(info.display_title()),
-                sub: ss(sub_line(&info)),
-                playing,
-                failed,
-                marked,
-                ..Default::default()
-            })
-            .collect();
+        if self.queue_rows.len() > ids.len() * 2 + 64 {
+            let keep: std::collections::HashSet<_> = ids.iter().copied().collect();
+            self.queue_rows.retain(|id, _| keep.contains(id));
+        }
+        let n = models.len();
         self.queue_art = rows_art;
-        let mut models = models;
         let shown = self.queue_ranges(ui, models.len());
         for r in &shown {
             for i in r.clone() {
@@ -1491,6 +1717,12 @@ impl State {
             self.b.auto_play(&id);
             self.follow = true;
         }
+        for a in platform::take_outside_actions() {
+            if a == "love" {
+                self.b.toggle_love();
+            }
+        }
+        platform::set_now_loved(self.b.loved_now);
         if let Some(found) = self.b.take_dlna_found() {
             self.open_dlna(ui, found);
         }
@@ -1523,10 +1755,14 @@ impl State {
         let art_arrived = self.art.collect();
         let qv = self.b.player.queue().version;
         let gen_changed = self.b.generation() != self.last_gen;
+        let side_changed = self.b.side_generation() != self.last_side_gen;
         if gen_changed || qv != self.last_queue_ver {
             self.last_gen = self.b.generation();
-            self.sync_side(ui);
             self.sync_view(ui);
+        }
+        if gen_changed || side_changed || qv != self.last_queue_ver {
+            self.last_side_gen = self.b.side_generation();
+            self.sync_side(ui);
         }
         if qv != self.last_queue_ver || gen_changed {
             self.last_queue_ver = qv;
@@ -1553,7 +1789,10 @@ impl State {
         // come into view or leave it.
         self.update_row_art(ui, art_arrived);
         self.update_queue_art(ui, art_arrived);
+        self.sync_grid(ui);
         self.sync_playback(ui);
+        self.sync_backdrop(ui);
+        self.poll_covers(ui);
         self.notes(ui);
         // Both side panels only fit on a wide window: shrinking the window
         // with both open folds the queue away.
@@ -2718,6 +2957,340 @@ impl State {
         }
     }
 
+    // ----- The album grid -----
+
+    /// Hand the grid the tiles near the screen: two rows of them either
+    /// side of what shows. Updated in place, so scrolling reuses tiles.
+    fn sync_grid(&mut self, ui: &AppWindow) {
+        if ui.get_layout() != 1 {
+            if self.grid_rows.row_count() > 0 {
+                self.grid_rows.set_vec(Vec::new());
+            }
+            return;
+        }
+        let n = self.rows.row_count();
+        let cols = ui.get_grid_cols().max(1);
+        let r = window(ui.get_grid_first(), ui.get_grid_count(), cols * 2, n);
+        // Start on a row's first tile, so the base keeps tiles in columns.
+        let start = r.start - r.start % cols as usize;
+        let want = r.end.saturating_sub(start);
+        if start != self.grid_base {
+            self.grid_base = start;
+            ui.set_grid_base(start as i32);
+        }
+        while self.grid_rows.row_count() > want {
+            self.grid_rows.remove(self.grid_rows.row_count() - 1);
+        }
+        for j in 0..want {
+            let Some(row) = self.rows.row_data(start + j) else {
+                break;
+            };
+            if j < self.grid_rows.row_count() {
+                if self.grid_rows.row_data(j).as_ref() != Some(&row) {
+                    self.grid_rows.set_row_data(j, row);
+                }
+            } else {
+                self.grid_rows.push(row);
+            }
+        }
+    }
+
+    // ----- The cover backdrop -----
+
+    /// The playing song's cover, blurred, for the backdrop, made again
+    /// when the song or its cover changes.
+    fn sync_backdrop(&mut self, ui: &AppWindow) {
+        let look = &self.b.config.appearance;
+        ui.set_backdrop(look.backdrop.index());
+        ui.set_backdrop_strength(f32::from(look.backdrop_strength) / 100.0);
+        if look.backdrop == patina_core::config::Backdrop::Off {
+            if self.blur_key.take().is_some() {
+                ui.set_np_has_blur(false);
+                ui.set_np_blur(slint::Image::default());
+            }
+            return;
+        }
+        let has = ui.get_np_has_art();
+        let key = self.playing_path().map(|p| (p, has));
+        if key == self.blur_key {
+            return;
+        }
+        self.blur_key = key;
+        let img = if has { blurred(&ui.get_np_art()) } else { None };
+        ui.set_np_has_blur(img.is_some());
+        ui.set_np_blur(img.unwrap_or_default());
+    }
+
+    // ----- Choosing a cover -----
+
+    /// A menu's cover action, for the album it was picked on.
+    fn cover_action(&mut self, ui: &AppWindow, a: &str, target: Option<CoverTarget>) {
+        let Some(t) = target else {
+            return self.b.note("That has no album to find a cover for");
+        };
+        match a {
+            "cover-find" => self.open_cover_find(ui, t),
+            "cover-file" => self.pick_cover_file(t),
+            _ => {}
+        }
+    }
+
+    fn cover_channel(&mut self) -> crossbeam_channel::Sender<CoverMsg> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        self.covers.rx = Some(rx);
+        tx
+    }
+
+    /// Look online for covers, and show them as they come in.
+    fn open_cover_find(&mut self, ui: &AppWindow, t: CoverTarget) {
+        self.covers.seq += 1;
+        let seq = self.covers.seq;
+        self.covers.found.clear();
+        self.covers_model.set_vec(Vec::new());
+        let what = match (t.album.is_empty(), t.artist.is_empty()) {
+            (false, false) => format!("\"{}\" by {}", t.album, t.artist),
+            (false, true) => format!("\"{}\"", t.album),
+            _ => t.label.clone(),
+        };
+        ui.set_covers_note(ss(format!(
+            "Looking for {what} on iTunes, Deezer and MusicBrainz…"
+        )));
+        ui.set_dlg_title(ss(format!("Cover for {}", t.label)));
+        let (artist, album) = (t.artist.clone(), t.album.clone());
+        self.covers.target = Some(t);
+        self.dlg = Dlg::Covers;
+        ui.set_dialog(5);
+        let tx = self.cover_channel();
+        std::thread::Builder::new()
+            .name("patina-covers".into())
+            .spawn(move || {
+                let found = patina_core::cover::search(&artist, &album);
+                let thumbs: Vec<String> = found.iter().map(|f| f.thumb.clone()).collect();
+                if tx.send(CoverMsg::Found(seq, found)).is_err() {
+                    return;
+                }
+                // A few at a time: quick, without hammering one server.
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                std::thread::scope(|sc| {
+                    for _ in 0..4 {
+                        sc.spawn(|| {
+                            loop {
+                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(url) = thumbs.get(i) else { return };
+                                let img = patina_core::cover::fetch(url)
+                                    .ok()
+                                    .and_then(|b| patina_core::cover::thumbnail(&b, THUMB));
+                                if tx.send(CoverMsg::Thumb(seq, i, img)).is_err() {
+                                    return;
+                                }
+                            }
+                        });
+                    }
+                });
+                let _ = tx.send(CoverMsg::Done(seq));
+            })
+            .ok();
+    }
+
+    /// One of the covers found was picked: fetch it whole and save it.
+    fn cover_pick(&mut self, ui: &AppWindow, i: usize) {
+        let (Some(t), Some(f)) = (
+            self.covers.target.clone(),
+            self.covers.found.get(i).cloned(),
+        ) else {
+            return;
+        };
+        self.dlg = Dlg::None;
+        ui.set_dialog(0);
+        self.b.note(format!("Saving the cover from {}…", f.source));
+        let tx = self.cover_channel();
+        std::thread::spawn(move || {
+            // The big one, or the small one if the big one won't come.
+            let bytes =
+                patina_core::cover::fetch(&f.full).or_else(|_| patina_core::cover::fetch(&f.thumb));
+            let r = bytes
+                .map_err(|e| format!("Couldn't download that cover: {e}"))
+                .and_then(|b| patina_core::cover::save(&t.dir, &b))
+                .map(|s| (s, t.dir.clone()));
+            let _ = tx.send(CoverMsg::Saved(r));
+        });
+    }
+
+    /// Pick an image file for an album's cover.
+    fn pick_cover_file(&mut self, t: CoverTarget) {
+        if self.cover_file_pick.is_some() {
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(match platform::hooks() {
+                Some(h) => h.pick_image(),
+                None => pick_image_dialog(),
+            });
+        });
+        self.cover_file_pick = Some((rx, t));
+    }
+
+    fn poll_covers(&mut self, ui: &AppWindow) {
+        if let Some((rx, _)) = &self.cover_file_pick
+            && let Ok(picked) = rx.try_recv()
+        {
+            let (_, t) = self.cover_file_pick.take().unwrap();
+            match picked {
+                Picked::Path(p) => {
+                    match patina_core::cover::save_file(&t.dir, &p) {
+                        Ok(saved) => self.cover_done(ui, &saved, &t.dir),
+                        Err(e) => self.b.error(e),
+                    }
+                    // Android hands over a copy in the app's cache.
+                    if cfg!(target_os = "android") {
+                        let _ = std::fs::remove_file(&p);
+                    }
+                }
+                Picked::Unavailable(why) => self.b.error(why),
+                Picked::Cancelled => {}
+            }
+        }
+        let Some(rx) = &self.covers.rx else { return };
+        let msgs: Vec<CoverMsg> = rx.try_iter().collect();
+        for m in msgs {
+            match m {
+                CoverMsg::Found(seq, found) if seq == self.covers.seq => {
+                    self.covers_model.set_vec(
+                        found
+                            .iter()
+                            .map(|f| CoverPick {
+                                title: ss(&f.title),
+                                source: ss(f.source),
+                                ..Default::default()
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    ui.set_covers_note(ss(if found.is_empty() {
+                        "Nothing found. Use an image file instead, or fix the album's tags and look again."
+                            .to_string()
+                    } else {
+                        "Loading the pictures… Tap one to use it.".to_string()
+                    }));
+                    self.covers.found = found;
+                }
+                CoverMsg::Thumb(seq, i, img) if seq == self.covers.seq => {
+                    if let (Some(img), Some(mut row)) = (img, self.covers_model.row_data(i)) {
+                        row.art = slint::Image::from_rgba8(slint::SharedPixelBuffer::<
+                            slint::Rgba8Pixel,
+                        >::clone_from_slice(
+                            img.as_raw(),
+                            img.width(),
+                            img.height(),
+                        ));
+                        row.has_art = true;
+                        self.covers_model.set_row_data(i, row);
+                    }
+                }
+                CoverMsg::Done(seq) if seq == self.covers.seq => {
+                    // Those with no picture after all (MusicBrainz knows the
+                    // album, but nobody gave it a cover) aren't worth showing.
+                    let keep: Vec<usize> = (0..self.covers_model.row_count())
+                        .filter(|&i| self.covers_model.row_data(i).is_some_and(|r| r.has_art))
+                        .collect();
+                    let rows: Vec<CoverPick> = keep
+                        .iter()
+                        .filter_map(|&i| self.covers_model.row_data(i))
+                        .collect();
+                    self.covers.found = keep
+                        .iter()
+                        .filter_map(|&i| self.covers.found.get(i).cloned())
+                        .collect();
+                    self.covers_model.set_vec(rows);
+                    ui.set_covers_note(ss(match self.covers.found.len() {
+                        0 => "None of what was found has a picture. Use an image file instead."
+                            .to_string(),
+                        n => format!(
+                            "{n} found. Tap one to use it; it's saved as album_art.jpg in the album's folder."
+                        ),
+                    }));
+                }
+                CoverMsg::Saved(Ok((saved, dir))) => self.cover_done(ui, &saved, &dir),
+                CoverMsg::Saved(Err(e)) => self.b.error(e),
+                _ => {}
+            }
+        }
+    }
+
+    /// A cover is saved: show it everywhere it shows.
+    fn cover_done(
+        &mut self,
+        ui: &AppWindow,
+        saved: &patina_core::cover::Saved,
+        dir: &std::path::Path,
+    ) {
+        self.art.forget_under(dir);
+        self.blur_key = None;
+        // The album header and any list kept for later show it too.
+        self.rows_sig = None;
+        self.rows_cache.clear();
+        // The rows draw again with it.
+        self.row_shown.clear();
+        self.queue_shown.clear();
+        self.b.cover_saved(saved);
+        if matches!(self.dlg, Dlg::Covers) {
+            self.dlg = Dlg::None;
+            ui.set_dialog(0);
+        }
+    }
+
+    /// Now Playing's own menu.
+    fn np_act(&mut self, ui: &AppWindow, a: &str) {
+        match a {
+            "cover-find" | "cover-file" => {
+                let t = self.b.playing_cover_target();
+                self.cover_action(ui, a, t);
+            }
+            "go-album" | "go-artist" => {
+                let Some(t) = self.snap.track.clone() else {
+                    return;
+                };
+                let row = self
+                    .b
+                    .lib
+                    .as_ref()
+                    .and_then(|l| l.track_by_path(&t.path).ok().flatten());
+                match row {
+                    Some(r) => {
+                        self.b.go_to_track(&r, a == "go-artist");
+                        ui.set_np_open(false);
+                        self.after_go_to(ui);
+                    }
+                    None => self.b.note("That song isn't in the library"),
+                }
+            }
+            "chain" => {
+                let np = self.b.now_playing(&self.snap);
+                let mut text = String::new();
+                if !np.format.is_empty() {
+                    text.push_str(&format!("{}\n", np.format));
+                }
+                if !np.output.is_empty() {
+                    text.push_str(&format!("Output: {}\n", np.output));
+                }
+                if !np.path.is_empty() {
+                    text.push_str(&format!("{}\n", np.path));
+                }
+                if !np.chain.is_empty() {
+                    text.push('\n');
+                    for (name, state) in &np.chain {
+                        text.push_str(&format!("{name:<14} {state}\n"));
+                    }
+                }
+                self.dlg = Dlg::Help;
+                ui.set_dlg_title(ss("Sound chain"));
+                ui.set_dlg_message(ss(text.trim_end()));
+                ui.set_dialog(4);
+            }
+            _ => {}
+        }
+    }
+
     /// The Now Playing page, while it's open.
     fn sync_now_playing(&mut self, ui: &AppWindow) {
         let np = self.b.now_playing(&self.snap);
@@ -3022,6 +3595,10 @@ impl State {
             return self.b.rate_selected(n);
         }
         match a {
+            "cover-find" | "cover-file" => {
+                let t = self.b.selected_cover_target();
+                self.cover_action(ui, a, t);
+            }
             "select" => {
                 if let Some(i) = self.selected_index() {
                     self.b.toggle_mark(i);
@@ -3339,7 +3916,8 @@ impl State {
                 Confirm::DeleteSmart(id) => self.b.delete_smart(id),
                 Confirm::IpodRemove(row) => self.b.remove_from_ipod(&row),
             },
-            Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Dlna(_) | Dlg::Help | Dlg::None => {}
+            Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Dlna(_) | Dlg::Help | Dlg::Covers | Dlg::None => {
+            }
         }
         ui.set_dlg_note(SharedString::new());
         ui.set_dialog(0);
@@ -3592,6 +4170,23 @@ fn sub_line(t: &TrackInfo) -> String {
 }
 
 /// `count` rows from `first`, widened by `margin` each way, kept inside `n`.
+/// A cover blurred for the backdrop: shrunk to a small square and blurred
+/// there, cheap at any size. Drawn stretched over the window, which
+/// softens it further.
+fn blurred(img: &slint::Image) -> Option<slint::Image> {
+    let buf = img.to_rgba8()?;
+    let rgba = image::RgbaImage::from_raw(buf.width(), buf.height(), buf.as_bytes().to_vec())?;
+    let small = image::imageops::resize(&rgba, 48, 48, image::imageops::FilterType::Triangle);
+    let soft = image::imageops::blur(&small, 4.0);
+    Some(slint::Image::from_rgba8(slint::SharedPixelBuffer::<
+        slint::Rgba8Pixel,
+    >::clone_from_slice(
+        soft.as_raw(),
+        soft.width(),
+        soft.height(),
+    )))
+}
+
 fn window(first: i32, count: i32, margin: i32, n: usize) -> Range<usize> {
     let start = (first - margin).max(0) as usize;
     let end = (first.max(0) + count.max(0) + margin).max(0) as usize;
@@ -3713,6 +4308,8 @@ pub fn install(
         ui.set_dlg_items(ModelRc::from(s.dlg_items.clone()));
         ui.set_queue_servers(ModelRc::from(s.queue_servers.clone()));
         ui.set_np_chain(ModelRc::from(s.np_chain.clone()));
+        ui.set_grid_rows(ModelRc::from(s.grid_rows.clone()));
+        ui.set_covers_found(ModelRc::from(s.covers_model.clone()));
     }
 
     // Wire a callback to a closure that gets the state and the window.
@@ -3792,6 +4389,19 @@ pub fn install(
     });
     on!(on_output_clicked, |s, u| s.pick_device(&u));
     on!(on_love_clicked, |s, _u| s.b.toggle_love());
+    on!(on_np_act, |s, u, a| s.np_act(&u, &a));
+    on!(on_hero_cover, |s, u, a| {
+        let t = s.b.level_cover_target();
+        s.cover_action(&u, &a, t)
+    });
+    on!(on_cover_pick, |s, u, i| s.cover_pick(&u, i.max(0) as usize));
+    on!(on_cover_file, |s, u| {
+        if let Some(t) = s.covers.target.clone() {
+            s.dlg = Dlg::None;
+            u.set_dialog(0);
+            s.pick_cover_file(t);
+        }
+    });
     on!(on_level_clicked, |s, u| {
         let tip = u.get_level_tip().to_string();
         if !tip.is_empty() {
@@ -4040,6 +4650,23 @@ fn pick_eq_dialog() -> Picked {
 #[cfg(target_os = "android")]
 fn pick_eq_dialog() -> Picked {
     Picked::Unavailable("No file picker is available here.".into())
+}
+
+#[cfg(not(target_os = "android"))]
+fn pick_image_dialog() -> Picked {
+    match rfd::FileDialog::new()
+        .set_title("Pick a cover")
+        .add_filter("Images", &["jpg", "jpeg", "png", "webp", "gif", "bmp"])
+        .pick_file()
+    {
+        Some(p) => Picked::Path(p),
+        None => Picked::Cancelled,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn pick_image_dialog() -> Picked {
+    Picked::Unavailable("No picker for images is available here.".into())
 }
 
 #[cfg(not(target_os = "android"))]

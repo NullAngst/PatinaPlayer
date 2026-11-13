@@ -5,11 +5,18 @@
 //! play request it makes comes back through [`Browser::auto_play`], on the
 //! app's own thread, so it plays the way a tap in the app would.
 //!
-//! Ids: `root`, `favorites`, `playlists`, `smart`, `history`, `mixes`,
-//! `shuffle`, and for things in them `fav:<id>`, `pl:<id>`, `sp:<id>`,
-//! `mix:<id>`, `album:<key>`, `artist:<name>`, `dir:<hex of the path>`.
-//! A song is its list's id, a `|`, and its place in the list, so playing
-//! it plays the list from there.
+//! The top level is the car's tabs: Home, Artists, Albums, Playlists and
+//! Folders. A car that shows only four tabs asks for `root4`, which folds
+//! Home into the top of Playlists. Long lists of artists or albums come
+//! as one folder per first letter, since a car shows only so many rows.
+//!
+//! Ids: `root`, `root4`, `home`, `artists`, `albums`, `playlists`,
+//! `lists` (Home and Playlists together), `folders`, `favorites`,
+//! `smart`, `history`, `mixes`, `recent`, `shuffle`, `artists:<letter>`,
+//! `albums:<letter>`, and for things in them `fav:<id>`, `pl:<id>`,
+//! `sp:<id>`, `mix:<id>`, `album:<key>`, `artist:<name>`,
+//! `dir:<hex of the path>`. A song is its list's id, a `|`, and its place
+//! in the list, so playing it plays the list from there.
 
 use std::path::PathBuf;
 
@@ -20,13 +27,18 @@ use crate::library::{AlbumSort, ArtistMode, ArtistRow, Library, TrackRow};
 /// A list gets at most this many rows in the car.
 pub const MAX: usize = 200;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AutoItem {
     pub id: String,
     pub title: String,
     pub subtitle: String,
     pub browsable: bool,
     pub playable: bool,
+    /// A heading the car shows it under, with the rows after it that
+    /// share it. Empty for none.
+    pub group: String,
+    /// Show what's in it as a grid of covers rather than a list.
+    pub grid: bool,
 }
 
 fn folder(id: &str, title: &str, subtitle: impl Into<String>) -> AutoItem {
@@ -35,8 +47,51 @@ fn folder(id: &str, title: &str, subtitle: impl Into<String>) -> AutoItem {
         title: title.into(),
         subtitle: subtitle.into(),
         browsable: true,
-        playable: false,
+        ..Default::default()
     }
+}
+
+fn grouped(mut v: Vec<AutoItem>, group: &str) -> Vec<AutoItem> {
+    for it in &mut v {
+        it.group = group.to_string();
+    }
+    v
+}
+
+/// The letter a name files under in a long list: A to Z, or # for the rest.
+fn letter(name: &str) -> char {
+    match name.trim().chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => c.to_ascii_uppercase(),
+        Some(c) if c.is_alphabetic() => c.to_uppercase().next().unwrap_or('#'),
+        _ => '#',
+    }
+}
+
+/// One folder per first letter, with how many are in it.
+fn letter_folders<'a>(
+    prefix: &str,
+    names: impl Iterator<Item = &'a str>,
+    noun: &str,
+) -> Vec<AutoItem> {
+    let mut counts: Vec<(char, usize)> = Vec::new();
+    for n in names {
+        let l = letter(n);
+        match counts.iter_mut().find(|(c, _)| *c == l) {
+            Some((_, k)) => *k += 1,
+            None => counts.push((l, 1)),
+        }
+    }
+    counts.sort_by_key(|(c, _)| (*c == '#', *c));
+    counts
+        .into_iter()
+        .map(|(c, k)| {
+            folder(
+                &format!("{prefix}:{c}"),
+                &c.to_string(),
+                format!("{k} {noun}{}", if k == 1 { "" } else { "s" }),
+            )
+        })
+        .collect()
 }
 
 fn hex(b: &[u8]) -> String {
@@ -82,8 +137,8 @@ fn track_items(list: &str, tracks: &[TrackRow]) -> Vec<AutoItem> {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" · "),
-            browsable: false,
             playable: true,
+            ..Default::default()
         })
         .collect()
 }
@@ -166,28 +221,87 @@ fn list_tracks(lib: &Library, id: &str) -> Vec<TrackRow> {
 /// The rows under `parent`.
 pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
     match parent {
-        "root" => {
-            let mut v = vec![AutoItem {
-                id: "shuffle".into(),
-                title: "Shuffle everything".into(),
-                subtitle: String::new(),
-                browsable: false,
-                playable: true,
-            }];
-            if lib.favorites().is_ok_and(|f| !f.is_empty()) {
-                v.push(folder("favorites", "Favorites", ""));
-            }
-            v.push(folder("playlists", "Playlists", ""));
-            if lib.smart_playlists().is_ok_and(|s| !s.is_empty()) {
-                v.push(folder("smart", "Smart playlists", ""));
-            }
-            v.push(folder("history", "Recently played", ""));
-            if lib.saved_mixes().is_ok_and(|m| !m.is_empty()) {
-                v.push(folder("mixes", "Mixes", ""));
-            }
-            v.push(folder("albums", "Recently added", ""));
+        "root" => vec![
+            folder("home", "Home", ""),
+            folder("artists", "Artists", ""),
+            AutoItem {
+                grid: true,
+                ..folder("albums", "Albums", "")
+            },
+            folder("playlists", "Playlists", ""),
+            folder("folders", "Folders", ""),
+        ],
+        // A car with room for four tabs: Home goes at the top of Playlists.
+        "root4" => vec![
+            folder("artists", "Artists", ""),
+            AutoItem {
+                grid: true,
+                ..folder("albums", "Albums", "")
+            },
+            folder("lists", "Playlists", ""),
+            folder("folders", "Folders", ""),
+        ],
+        "home" => home(lib),
+        "lists" => {
+            let mut v = grouped(home(lib), "Home");
+            v.extend(grouped(all_playlists(lib), "Playlists"));
             v
         }
+        "artists" => {
+            let rows = lib.artists(ArtistMode::AlbumArtist).unwrap_or_default();
+            if rows.len() <= MAX {
+                rows.iter().map(artist_item).collect()
+            } else {
+                letter_folders("artists", rows.iter().map(|a| a.name.as_str()), "artist")
+            }
+        }
+        "albums" => {
+            let rows = lib.albums(AlbumSort::Name).unwrap_or_default();
+            let mut v = vec![AutoItem {
+                grid: true,
+                ..folder("recent", "Recently added", "")
+            }];
+            if rows.len() <= MAX {
+                v.extend(rows.iter().map(album_item));
+            } else {
+                v.extend(
+                    letter_folders("albums", rows.iter().map(|a| a.name.as_str()), "album")
+                        .into_iter()
+                        .map(|f| AutoItem { grid: true, ..f }),
+                );
+            }
+            v
+        }
+        "recent" => lib
+            .albums(AlbumSort::RecentlyAdded)
+            .unwrap_or_default()
+            .iter()
+            .take(MAX)
+            .map(album_item)
+            .collect(),
+        "folders" => {
+            let roots = lib.sources().unwrap_or_default();
+            // One folder: straight into it, rather than a list of one.
+            if let [only] = roots.as_slice() {
+                return dir_children(lib, &only.root);
+            }
+            roots
+                .iter()
+                .map(|r| {
+                    let name = match crate::remote::server_of(&r.root) {
+                        Some(s) => s.to_string(),
+                        None => r
+                            .root
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| r.root.display().to_string()),
+                    };
+                    folder(&dir_id(&r.root), &name, songs_line(r.tracks as usize))
+                })
+                .collect()
+        }
+        "playlists" => all_playlists(lib),
+        "smart" => smart_rows(lib),
         "favorites" => lib
             .favorites()
             .unwrap_or_default()
@@ -199,32 +313,6 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
                     FavKind::Artist => "Artist",
                 };
                 folder(&format!("fav:{}", f.id), &f.label, sub)
-            })
-            .collect(),
-        "playlists" => {
-            let mut rows = lib.hearted_row().ok().into_iter().collect::<Vec<_>>();
-            rows.extend(lib.playlists().unwrap_or_default());
-            rows.into_iter()
-                .filter(|p| p.items > 0)
-                .map(|p| {
-                    folder(
-                        &format!("pl:{}", p.id),
-                        &p.name,
-                        songs_line(p.items as usize),
-                    )
-                })
-                .collect()
-        }
-        "smart" => lib
-            .smart_playlists()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|p| {
-                folder(
-                    &format!("sp:{}", p.id),
-                    &p.name,
-                    songs_line(p.items as usize),
-                )
             })
             .collect(),
         "mixes" => lib
@@ -239,18 +327,32 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
                     "artist" => "Artist mix".into(),
                     _ => "Track mix".into(),
                 },
-                browsable: false,
                 playable: true,
+                ..Default::default()
             })
             .collect(),
-        "albums" => lib
-            .albums(AlbumSort::RecentlyAdded)
-            .unwrap_or_default()
-            .into_iter()
-            .take(MAX)
-            .map(|a| folder(&format!("album:{}", a.key), &a.name, a.artist_line()))
-            .collect(),
         id => {
+            if let Some(l) = id.strip_prefix("artists:").and_then(|l| l.chars().next()) {
+                return lib
+                    .artists(ArtistMode::AlbumArtist)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|a| letter(&a.name) == l)
+                    .take(MAX)
+                    .map(artist_item)
+                    .collect();
+            }
+            if let Some(l) = id.strip_prefix("albums:").and_then(|l| l.chars().next()) {
+                return lib
+                    .albums(AlbumSort::Name)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|a| letter(&a.name) == l)
+                    .take(MAX)
+                    .map(album_item)
+                    .collect();
+            }
+
             // A favorite artist or folder lists what's in it; everything
             // else is a list of songs.
             if let Some(n) = id.strip_prefix("fav:").and_then(|n| n.parse::<i64>().ok())
@@ -274,6 +376,76 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
             track_items(id, &list_tracks(lib, id))
         }
     }
+}
+
+/// What the Home tab holds: shuffle, then the short lists.
+fn home(lib: &Library) -> Vec<AutoItem> {
+    let mut v = vec![AutoItem {
+        id: "shuffle".into(),
+        title: "Shuffle everything".into(),
+        playable: true,
+        ..Default::default()
+    }];
+    if lib.favorites().is_ok_and(|f| !f.is_empty()) {
+        v.push(folder("favorites", "Favorites", ""));
+    }
+    v.push(folder("history", "Recently played", ""));
+    v.push(AutoItem {
+        grid: true,
+        ..folder("recent", "Recently added", "")
+    });
+    if lib.saved_mixes().is_ok_and(|m| !m.is_empty()) {
+        v.push(folder("mixes", "Mixes", ""));
+    }
+    v
+}
+
+/// Hearted songs, your playlists, then smart playlists.
+fn all_playlists(lib: &Library) -> Vec<AutoItem> {
+    let mut rows = lib.hearted_row().ok().into_iter().collect::<Vec<_>>();
+    rows.extend(lib.playlists().unwrap_or_default());
+    let mut v: Vec<AutoItem> = rows
+        .into_iter()
+        .filter(|p| p.items > 0)
+        .map(|p| {
+            folder(
+                &format!("pl:{}", p.id),
+                &p.name,
+                songs_line(p.items as usize),
+            )
+        })
+        .collect();
+    v.extend(smart_rows(lib));
+    v
+}
+
+fn smart_rows(lib: &Library) -> Vec<AutoItem> {
+    lib.smart_playlists()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| {
+            folder(
+                &format!("sp:{}", p.id),
+                &p.name,
+                format!("Smart · {}", songs_line(p.items as usize)),
+            )
+        })
+        .collect()
+}
+
+fn artist_item(a: &ArtistRow) -> AutoItem {
+    AutoItem {
+        grid: true,
+        ..folder(
+            &format!("artist:{}", a.name),
+            &a.name,
+            format!("{} album{}", a.albums, if a.albums == 1 { "" } else { "s" }),
+        )
+    }
+}
+
+fn album_item(a: &crate::library::AlbumRow) -> AutoItem {
+    folder(&format!("album:{}", a.key), &a.name, a.artist_line())
 }
 
 fn artist_children(lib: &Library, name: &str) -> Vec<AutoItem> {
@@ -326,6 +498,9 @@ pub fn resolve(lib: &Library, id: &str) -> AutoPlay {
     if let Some(n) = id.strip_prefix("mix:").and_then(|n| n.parse::<i64>().ok()) {
         return AutoPlay::Mix(n);
     }
+    if let Some(q) = id.strip_prefix("search:") {
+        return search(lib, q);
+    }
     let (list, start) = match id.rsplit_once('|') {
         Some((l, i)) => (l, i.parse::<usize>().unwrap_or(0)),
         None => (id, 0),
@@ -337,6 +512,40 @@ pub fn resolve(lib: &Library, id: &str) -> AutoPlay {
     AutoPlay::Tracks {
         start: start.min(tracks.len() - 1),
         tracks,
+    }
+}
+
+/// What to play for something said to the car ("play Nirvana on
+/// PatinaPlayer"): an artist or album named exactly, else the songs that
+/// match, else the first album or artist that does. Nothing said
+/// shuffles everything.
+fn search(lib: &Library, q: &str) -> AutoPlay {
+    let q = q.trim();
+    if q.is_empty() {
+        return resolve(lib, "shuffle");
+    }
+    let Ok(r) = lib.search(q, MAX) else {
+        return AutoPlay::Nothing;
+    };
+    let tracks = if let Some(a) = r.artists.iter().find(|a| a.name.eq_ignore_ascii_case(q)) {
+        lib.artist_tracks(&a.name, ArtistMode::AlbumArtist)
+            .unwrap_or_default()
+    } else if let Some(a) = r.albums.iter().find(|a| a.name.eq_ignore_ascii_case(q)) {
+        lib.album_tracks(&a.key).unwrap_or_default()
+    } else if !r.tracks.is_empty() {
+        r.tracks
+    } else if let Some(a) = r.albums.first() {
+        lib.album_tracks(&a.key).unwrap_or_default()
+    } else if let Some(a) = r.artists.first() {
+        lib.artist_tracks(&a.name, ArtistMode::AlbumArtist)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if tracks.is_empty() {
+        AutoPlay::Nothing
+    } else {
+        AutoPlay::Tracks { tracks, start: 0 }
     }
 }
 
@@ -379,6 +588,47 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letters() {
+        assert_eq!(letter("abba"), 'A');
+        assert_eq!(letter("  Émile"), 'É');
+        assert_eq!(letter("2Pac"), '#');
+        let f = letter_folders(
+            "artists",
+            ["Beck", "abba", "ABC", "311"].into_iter(),
+            "artist",
+        );
+        let got: Vec<(&str, &str)> = f
+            .iter()
+            .map(|i| (i.id.as_str(), i.subtitle.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("artists:A", "2 artists"),
+                ("artists:B", "1 artist"),
+                ("artists:#", "1 artist")
+            ]
+        );
+    }
+
+    #[test]
+    fn tabs_hold_only_folders() {
+        let lib = Library::open_in_memory().unwrap();
+        let root = children(&lib, "root");
+        assert_eq!(
+            root.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+            ["Home", "Artists", "Albums", "Playlists", "Folders"]
+        );
+        assert!(root.iter().all(|i| i.browsable && !i.playable));
+        assert_eq!(children(&lib, "root4").len(), 4);
+        // Four tabs: Home's rows lead Playlists, under their own heading.
+        let lists = children(&lib, "lists");
+        assert_eq!(lists[0].id, "shuffle");
+        assert_eq!(lists[0].group, "Home");
+        assert_eq!(resolve(&lib, "search:nothing here"), AutoPlay::Nothing);
+    }
 
     #[test]
     fn ids_round_trip() {

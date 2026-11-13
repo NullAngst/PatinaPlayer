@@ -326,6 +326,11 @@ pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // A big library's lists (85,000 songs) read faster with more of the
+    // file kept in memory than SQLite's 2 MB default, and their sorts
+    // stay in memory rather than going to a temporary file.
+    conn.pragma_update(None, "cache_size", -32_000)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
     Ok(())
 }

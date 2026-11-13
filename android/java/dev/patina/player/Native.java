@@ -27,10 +27,14 @@ final class Native {
     static final int BACK = 5;
     static final int STOP = 6;
     static final int SEEK = 7;
+    /** The car's heart and shuffle buttons. */
+    static final int LOVE = 8;
+    static final int SHUFFLE = 9;
 
     /** What's being picked. Rust has the same numbers. */
     static final int PICK_FOLDER = 1;
     static final int PICK_EQ_FILE = 2;
+    static final int PICK_IMAGE = 3;
 
     /** Playback state, as Rust reports it. */
     static final int STOPPED = 0;
@@ -50,8 +54,34 @@ final class Native {
 
     /** Called by MainActivity before android_main starts. */
     static void init(Activity a) {
-        app = a.getApplicationContext();
         activity = new WeakReference<>(a);
+        initCommon(a.getApplicationContext());
+    }
+
+    /**
+     * Called by PlaybackService when Android starts it with no window: a
+     * car connected with the app closed. Starts the player without the
+     * window; opening the app later takes the same player over.
+     */
+    static void initWithoutWindow(Context c) {
+        if (ready) {
+            return;
+        }
+        System.loadLibrary("patina_android");
+        initCommon(c.getApplicationContext());
+        String audio = android.os.Build.VERSION.SDK_INT >= 33
+            ? android.Manifest.permission.READ_MEDIA_AUDIO
+            : android.Manifest.permission.READ_EXTERNAL_STORAGE;
+        permissionsDone(c.checkSelfPermission(audio)
+            == android.content.pm.PackageManager.PERMISSION_GRANTED);
+        startHeadless(c.getFilesDir().getPath());
+    }
+
+    private static synchronized void initCommon(Context c) {
+        if (ready) {
+            return;
+        }
+        app = c;
         main = new Handler(Looper.getMainLooper());
         nativeInit();
         ready = true;
@@ -75,9 +105,10 @@ final class Native {
     // ----- Into Rust -----
 
     /**
-     * What the car can browse under an id ("root" for the top): four
-     * strings a row, the id, title, subtitle, and "b", "p" or "bp" for
-     * browsable, playable or both.
+     * What the car can browse under an id ("root" for the top): five
+     * strings a row, the id, title, subtitle, flags ("b" browsable, "p"
+     * playable, "g" show its rows as a grid of covers), and the heading
+     * the row goes under, empty for none.
      */
     static native String[] browse(String parent);
 
@@ -86,6 +117,9 @@ final class Native {
 
     /** Keeps this class, so Rust's threads can find it. */
     static native void nativeInit();
+
+    /** Start the player without the window, keeping things in this folder. */
+    static native void startHeadless(String filesDir);
 
     /** The permission question is answered; true if music can be read. */
     static native void permissionsDone(boolean audio);
@@ -110,11 +144,16 @@ final class Native {
 
     // ----- From Rust -----
 
-    /** What's playing, for the media session and the notification. */
+    /**
+     * What's playing, for the media session and the notification. loved is
+     * 0 when the song can't be hearted (nothing playing, radio), 1 not
+     * hearted, 2 hearted.
+     */
     static void onState(String title, String artist, String album, String artPath,
-                        long durationMs, long positionMs, int state) {
+                        long durationMs, long positionMs, int state, int loved,
+                        boolean shuffle) {
         main.post(() -> PlaybackService.update(app, title, artist, album, artPath,
-            durationMs, positionMs, state));
+            durationMs, positionMs, state, loved, shuffle));
     }
 
     /**
@@ -158,6 +197,11 @@ final class Native {
     /** Open the system's file picker for an EQ file to import. */
     static void pickFile() {
         main.post(() -> Picker.start(activity.get(), PICK_EQ_FILE));
+    }
+
+    /** Open the system's picker for an image (an album's cover). */
+    static void pickImage() {
+        main.post(() -> Picker.start(activity.get(), PICK_IMAGE));
     }
 
     /** Show a text dialog; the answer comes to promptDone. */

@@ -28,6 +28,9 @@ pub struct Availability {
     dead_playlists: HashSet<i64>,
     /// Folders on an unreachable server that hold a kept song.
     kept_dirs: HashSet<PathBuf>,
+    /// Different for every computed answer, so a frontend can tell when
+    /// what greys out may have changed. 0 for the default (nothing away).
+    pub stamp: u64,
 }
 
 impl Availability {
@@ -35,6 +38,7 @@ impl Availability {
     pub fn compute(lib: &Library, offline: HashSet<String>, kept: &HashMap<SongKey, Tier>) -> Self {
         let mut a = Self {
             offline,
+            stamp: super::next_rev(),
             ..Default::default()
         };
         if a.offline.is_empty() {

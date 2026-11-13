@@ -1,11 +1,18 @@
 //! Cover art for the GUI, loaded on worker threads and handed to Slint on
 //! the UI thread. Images are cached by source and size, with a cap so a big
 //! album grid doesn't hold every cover in memory forever.
+//!
+//! Requests are taken newest first: scrolling quickly through thousands of
+//! albums asks for every cover it passes, and the ones on screen when it
+//! stops should load first, not after all the ones that went by. Requests
+//! that pile up past a limit are dropped, oldest first, and asked for
+//! again if their rows come back on screen.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, unbounded};
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 /// What to find art for.
@@ -17,6 +24,18 @@ pub enum Req {
     Dir(PathBuf),
 }
 
+impl Req {
+    /// Whether a cover saved for the album in `dir` is what this shows.
+    fn under(&self, dir: &Path) -> bool {
+        match self {
+            Req::Track(p) => p.parent().is_some_and(|d| {
+                d.starts_with(dir) || patina_core::library::tags::album_dir(d) == dir
+            }),
+            Req::Dir(d) => d.starts_with(dir) || patina_core::library::tags::album_dir(d) == dir,
+        }
+    }
+}
+
 /// Grid tiles and list thumbnails.
 pub const THUMB: u32 = 192;
 /// The album header and the bottom bar.
@@ -24,31 +43,52 @@ pub const LARGE: u32 = 400;
 
 /// Most decoded images kept at once.
 const CAP: usize = 900;
+/// Most requests waiting at once; older ones beyond it are dropped.
+const WAITING: usize = 300;
 
 type Key = (Req, u32);
-type Loaded = (Key, Option<SharedPixelBuffer<Rgba8Pixel>>);
+
+type Done = (Key, Option<SharedPixelBuffer<Rgba8Pixel>>);
+
+/// Requests waiting, newest at the back.
+struct Waiting {
+    keys: Mutex<VecDeque<Key>>,
+    ready: Condvar,
+}
 
 pub struct ArtCache {
     images: HashMap<Key, Option<Image>>,
     order: VecDeque<Key>,
     pending: HashSet<Key>,
-    tx: Sender<Key>,
-    rx: Receiver<Loaded>,
+    waiting: Arc<Waiting>,
+    rx: Receiver<Done>,
 }
 
 impl ArtCache {
     pub fn new() -> Self {
-        let (tx, jobs) = unbounded::<Key>();
-        let (done_tx, rx) = unbounded::<Loaded>();
+        let waiting = Arc::new(Waiting {
+            keys: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+        });
+        let (done_tx, rx) = unbounded::<Done>();
         // Two workers: enough to keep up with scrolling, few enough that a
         // first visit to a huge album grid doesn't hog the disk.
         for n in 0..2 {
-            let jobs = jobs.clone();
+            let waiting = waiting.clone();
             let done = done_tx.clone();
             std::thread::Builder::new()
                 .name(format!("patina-art-{n}"))
                 .spawn(move || {
-                    for key in jobs {
+                    loop {
+                        let key = {
+                            let mut q = waiting.keys.lock().unwrap();
+                            loop {
+                                if let Some(k) = q.pop_back() {
+                                    break k;
+                                }
+                                q = waiting.ready.wait(q).unwrap();
+                            }
+                        };
                         let img = match &key.0 {
                             Req::Track(p) => patina_core::art::load(p, key.1),
                             Req::Dir(d) => patina_core::art::load_dir(d, key.1),
@@ -71,7 +111,7 @@ impl ArtCache {
             images: HashMap::new(),
             order: VecDeque::new(),
             pending: HashSet::new(),
-            tx,
+            waiting,
             rx,
         }
     }
@@ -83,7 +123,16 @@ impl ArtCache {
             return img.clone();
         }
         if self.pending.insert(key.clone()) {
-            let _ = self.tx.send(key);
+            let mut q = self.waiting.keys.lock().unwrap();
+            q.push_back(key);
+            while q.len() > WAITING {
+                if let Some(old) = q.pop_front() {
+                    // Not loading after all: asked for again when it shows.
+                    self.pending.remove(&old);
+                }
+            }
+            drop(q);
+            self.waiting.ready.notify_one();
         }
         None
     }
@@ -92,7 +141,10 @@ impl ArtCache {
     pub fn collect(&mut self) -> bool {
         let mut any = false;
         while let Ok((key, buf)) = self.rx.try_recv() {
-            self.pending.remove(&key);
+            // Forgotten while it loaded (a new cover chosen): asked again.
+            if !self.pending.remove(&key) {
+                continue;
+            }
             self.images.insert(key.clone(), buf.map(Image::from_rgba8));
             self.order.push_back(key);
             any = true;
@@ -103,5 +155,13 @@ impl ArtCache {
             }
         }
         any
+    }
+
+    /// A new cover was chosen for the album in `dir`: forget what was
+    /// loaded for it, so it's loaded again.
+    pub fn forget_under(&mut self, dir: &Path) {
+        self.images.retain(|k, _| !k.0.under(dir));
+        self.order.retain(|k| !k.0.under(dir));
+        self.pending.retain(|k| !k.0.under(dir));
     }
 }

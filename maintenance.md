@@ -39,8 +39,15 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 
 1. Install the latest APK from a release on your phone and open it.
 2. Long press the home screen, add the PatinaPlayer widget, play something, and check the cover, title and buttons follow it.
-3. In the car, or in the Android Auto desktop head unit (`desktop-head-unit` from the SDK's extras), browse Favorites, Playlists and Recently played, and play something from each.
+3. In the car, or in the Android Auto desktop head unit (`desktop-head-unit` from the SDK's extras), browse each tab (Home, Artists, Albums, Playlists, Folders) and play something from each. Tap the heart and shuffle buttons beside the transport and check the app agrees.
+3.5. Close the app (swipe it away), then connect the car or start the head unit. It should browse and play without the app being opened. Then open the app on the phone: the same song keeps playing, with no restart. If the car says "Open PatinaPlayer on the phone" instead, the player couldn't start without the window; `adb logcat -s PatinaPlayer` says why.
 4. The target SDK is whatever platform is newest on the runner (`TARGET_SDK` in `packaging/build-apk.sh`), so it moves up on its own. When it does, a new Android version's rules can change how background playback or notifications behave. If something stops working after a runner update, that's the first place to look.
+
+## 5.5. Cover search and big libraries
+
+1. Right-click an album, Find cover art. If one of iTunes, Deezer or MusicBrainz stops answering, its results just go missing: the parsers are `parse_itunes`, `parse_deezer` and `parse_musicbrainz` in `crates/patina-core/src/cover.rs`, each with a test of the answer's shape. Compare against a real answer (open the URL the code builds in a browser) and fix the field names there.
+2. MusicBrainz asks for a User-Agent naming the app and a contact. It's in `http()` in the same file; keep the URL in it current.
+3. Speed on a big library: `cargo run --release -p patina-core --example bigbench` makes a made-up 85,000 song library and times every view's query. Run it before and after anything that touches `library/mod.rs` or the queries in `browse/model.rs`. Nothing there should take more than a quarter of a second on a desktop.
 
 ## 6. ListenBrainz and Last.fm
 

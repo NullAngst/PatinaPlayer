@@ -106,6 +106,11 @@ pub fn original_bytes(track: &Path) -> Option<Vec<u8>> {
 
 /// Find art for a track without decoding it.
 pub fn find(track: &Path) -> Option<Origin> {
+    // A cover chosen by hand wins: it was picked to replace whatever else
+    // there is.
+    if let Some(p) = track.parent().and_then(crate::cover::chosen) {
+        return Some(Origin::File(p));
+    }
     // Reading pictures means reading tags; cheap next to decoding audio.
     if let Ok(f) = lofty::read_from_path(track)
         && f.tags().iter().any(|t| !t.pictures().is_empty())
@@ -122,18 +127,24 @@ fn cache_dir() -> PathBuf {
 /// Cache file for an origin at a size. Keyed on the source path and its
 /// modification time, so editing the art makes a new entry.
 fn cache_path(origin: &Origin, size: u32) -> PathBuf {
-    let mtime = std::fs::metadata(origin.path())
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let meta = std::fs::metadata(origin.path()).ok();
+    let modified = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+    let mtime = modified.map(|d| d.as_secs()).unwrap_or(0);
     // Tracks with embedded art share one entry per folder when the folder
     // is one album, but tracks can carry different art, so key on the file.
     let mut h = std::collections::hash_map::DefaultHasher::new();
     origin.path().hash(&mut h);
     matches!(origin, Origin::Embedded(_)).hash(&mut h);
     mtime.hash(&mut h);
+    // A cover chosen by hand can be replaced twice within a second; its
+    // size and the finer time keep each one its own entry.
+    if crate::cover::is_chosen_file(origin.path()) {
+        modified.map(|d| d.subsec_nanos()).hash(&mut h);
+        meta.map(|m| m.len()).hash(&mut h);
+    }
     cache_dir().join(format!("{:016x}-{size}.png", h.finish()))
 }
 
@@ -147,7 +158,7 @@ fn decode(origin: &Origin) -> Option<DynamicImage> {
 
 /// Scale to fit inside `size`×`size`, square-cropping from the center so a
 /// slightly off-square scan doesn't letterbox.
-fn square(img: DynamicImage, size: u32) -> RgbaImage {
+pub(crate) fn square(img: DynamicImage, size: u32) -> RgbaImage {
     let (w, h) = (img.width(), img.height());
     let side = w.min(h);
     let img = if w != h {
@@ -163,6 +174,9 @@ fn square(img: DynamicImage, size: u32) -> RgbaImage {
 /// Server songs get their cover from the server.
 pub fn load(track: &Path, size: u32) -> Option<RgbaImage> {
     if crate::remote::is_remote(track) {
+        if let Some(p) = track.parent().and_then(crate::cover::chosen) {
+            return load_origin(&Origin::File(p), size);
+        }
         return load_remote(track, size);
     }
     let origin = find(track)?;
@@ -172,6 +186,9 @@ pub fn load(track: &Path, size: u32) -> Option<RgbaImage> {
 /// Art for a folder: a cover image in it, or for a server folder, the
 /// cover of the first song in it.
 pub fn load_dir(dir: &Path, size: u32) -> Option<RgbaImage> {
+    if let Some(p) = crate::cover::chosen(dir) {
+        return load_origin(&Origin::File(p), size);
+    }
     if crate::remote::is_remote(dir) {
         return load_remote(dir, size);
     }
@@ -215,7 +232,12 @@ fn load_remote(path: &Path, size: u32) -> Option<RgbaImage> {
 /// Fills the cache entry first if it isn't there yet. Can be slow: it may
 /// decode the art, or fetch it from a server.
 pub fn cached_file(track: &Path, size: u32) -> Option<PathBuf> {
-    let path = if crate::remote::is_remote(track) {
+    let chosen = crate::remote::is_remote(track)
+        .then(|| track.parent().and_then(crate::cover::chosen))
+        .flatten();
+    let path = if let Some(c) = chosen {
+        cache_path(&Origin::File(c), size)
+    } else if crate::remote::is_remote(track) {
         remote_cache_path(track, size)?.0
     } else {
         cache_path(&find(track)?, size)
@@ -261,5 +283,21 @@ mod tests {
         );
         let s = square(DynamicImage::ImageRgb8(img), 16);
         assert_eq!((s.width(), s.height()), (16, 16));
+    }
+
+    #[test]
+    fn a_chosen_cover_wins() {
+        let d = tempfile::tempdir().unwrap();
+        let album = d.path().join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        let img = image::RgbImage::from_pixel(40, 40, image::Rgb([9, 9, 9]));
+        img.save(album.join("cover.jpg")).unwrap();
+        let track = album.join("01.flac");
+        assert_eq!(find(&track), Some(Origin::File(album.join("cover.jpg"))));
+        img.save(album.join("album_art.png")).unwrap();
+        assert_eq!(
+            find(&track),
+            Some(Origin::File(album.join("album_art.png")))
+        );
     }
 }

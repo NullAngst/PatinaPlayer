@@ -40,6 +40,9 @@ pub struct Entry {
     pub probed: bool,
     /// Last attempt to open this file failed.
     pub failed: bool,
+    /// Changes whenever `info` or `failed` does, so a frontend can keep
+    /// what it drew for an entry until then.
+    pub rev: u64,
 }
 
 #[derive(Debug, Default)]
@@ -175,6 +178,7 @@ impl Queue {
             info,
             probed,
             failed: false,
+            rev: 0,
         });
         id
     }
@@ -249,6 +253,7 @@ impl Queue {
                     info: t,
                     probed: true,
                     failed: false,
+                    rev: 0,
                 },
             );
             let pat = cur_play
@@ -271,6 +276,7 @@ impl Queue {
                 e.probed = true;
                 e.failed = false;
                 self.touch();
+                self.entries[i].rev = self.version;
             }
         }
     }
@@ -280,6 +286,7 @@ impl Queue {
             self.entries[i].failed = true;
             self.entries[i].probed = true;
             self.touch();
+            self.entries[i].rev = self.version;
         }
     }
 

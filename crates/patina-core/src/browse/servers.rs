@@ -79,16 +79,20 @@ impl Browser {
             // A server that went away or came back changes what greys out.
             self.avail_dirty = true;
             // Stations and status lines show in Radio and Settings.
-            self.refresh_section(Section::Radio);
-            self.refresh_section(Section::Settings);
-            self.rebuild_sidebar();
+            self.refresh_or_stale(Section::Radio);
+            self.refresh_or_stale(Section::Settings);
+            self.rebuild_sidebar_status();
         }
         self.dlna_tick();
         self.queue_tick();
         // A big sync reports after every few albums. Redraw at most twice
-        // a second, so the views don't rebuild hundreds of times.
+        // a second, so the views don't rebuild hundreds of times, and less
+        // often when reading the open view again is slow (every song of a
+        // huge library on a phone), so it never takes more than about a
+        // tenth of the time.
+        let wait = Duration::from_millis(500).max(self.refresh_cost * 10);
         match self.servers_changed {
-            Some(t) if t.elapsed() >= Duration::from_millis(500) => {
+            Some(t) if t.elapsed() >= wait => {
                 self.servers_changed = None;
                 true
             }

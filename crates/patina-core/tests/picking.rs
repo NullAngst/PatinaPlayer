@@ -956,21 +956,39 @@ fn the_car_browses_playlists_and_plays_from_a_song() {
     b.toggle_favorite_selected();
     let lib = b.lib.as_ref().unwrap();
 
-    let root: Vec<String> = auto::children(lib, "root")
-        .into_iter()
-        .map(|i| i.id)
-        .collect();
+    // The car's tabs, and Home's rows.
+    let ids = |parent: &str| -> Vec<String> {
+        auto::children(lib, parent)
+            .into_iter()
+            .map(|i| i.id)
+            .collect()
+    };
     assert_eq!(
-        root,
-        [
-            "shuffle",
-            "favorites",
-            "playlists",
-            "smart",
-            "history",
-            "albums"
-        ]
+        ids("root"),
+        ["home", "artists", "albums", "playlists", "folders"]
     );
+    assert_eq!(ids("root4"), ["artists", "albums", "lists", "folders"]);
+    assert_eq!(ids("home"), ["shuffle", "favorites", "history", "recent"]);
+    // Few enough artists and albums to list them whole, not by letter.
+    let artists = auto::children(lib, "artists");
+    assert!(artists.iter().any(|a| a.title == "Nirvana" && a.browsable));
+    let albums = ids("albums");
+    assert_eq!(albums[0], "recent");
+    assert!(albums.iter().any(|a| a.starts_with("album:")));
+    // One library folder: the tab opens straight into it.
+    let folders = auto::children(lib, "folders");
+    assert!(folders.iter().any(|f| f.title == "Nirvana" && f.browsable));
+    // Smart playlists are listed with the others.
+    assert!(
+        auto::children(lib, "playlists")
+            .iter()
+            .any(|p| p.title == "Grunge")
+    );
+    // Asking by voice: an artist named plays their songs.
+    match auto::resolve(lib, "search:nirvana") {
+        auto::AutoPlay::Tracks { tracks, .. } => assert_eq!(tracks.len(), 3),
+        other => panic!("{other:?}"),
+    }
     let lists = auto::children(lib, "playlists");
     let drive = lists
         .iter()

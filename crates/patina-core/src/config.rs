@@ -317,14 +317,85 @@ impl std::str::FromStr for ScrobbleMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppearanceConfig {
     pub theme: Theme,
     /// The GUI's sidebar with the window wider than it's tall.
     pub sidebar_landscape: SidebarMode,
     /// And taller than it's wide.
     pub sidebar_portrait: SidebarMode,
+    /// A blurred wash of the playing song's cover behind the window.
+    pub backdrop: Backdrop,
+    /// How strong it is, 10 to 100 percent.
+    pub backdrop_strength: u8,
 }
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            sidebar_landscape: SidebarMode::default(),
+            sidebar_portrait: SidebarMode::default(),
+            backdrop: Backdrop::default(),
+            backdrop_strength: BACKDROP_STRENGTH,
+        }
+    }
+}
+
+/// Where the GUI draws the blurred cover of the song playing, over the
+/// theme's own colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Backdrop {
+    #[default]
+    Off,
+    /// Behind Now Playing.
+    NowPlaying,
+    /// Behind the views too.
+    Everywhere,
+}
+
+impl Backdrop {
+    pub const ALL: [Backdrop; 3] = [Backdrop::Off, Backdrop::NowPlaying, Backdrop::Everywhere];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Backdrop::Off => "off",
+            Backdrop::NowPlaying => "now-playing",
+            Backdrop::Everywhere => "everywhere",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Backdrop::Off => "Off",
+            Backdrop::NowPlaying => "Now Playing",
+            Backdrop::Everywhere => "Everywhere",
+        }
+    }
+
+    /// The GUI's number for it.
+    pub fn index(self) -> i32 {
+        match self {
+            Backdrop::Off => 0,
+            Backdrop::NowPlaying => 1,
+            Backdrop::Everywhere => 2,
+        }
+    }
+}
+
+impl std::str::FromStr for Backdrop {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let s = s.trim().replace('_', "-");
+        Backdrop::ALL
+            .into_iter()
+            .find(|b| b.as_str().eq_ignore_ascii_case(&s))
+            .ok_or_else(|| format!("unknown backdrop \"{s}\" (off, now-playing, everywhere)"))
+    }
+}
+
+/// The backdrop's strength when none is set.
+pub const BACKDROP_STRENGTH: u8 = 60;
 
 /// How the GUI's sidebar shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -675,6 +746,8 @@ struct RawAppearance {
     theme: Option<String>,
     sidebar_landscape: Option<String>,
     sidebar_portrait: Option<String>,
+    backdrop: Option<String>,
+    backdrop_strength: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -958,6 +1031,17 @@ impl Config {
         };
         let sidebar_landscape = sidebar(&look.sidebar_landscape, "sidebar_landscape")?;
         let sidebar_portrait = sidebar(&look.sidebar_portrait, "sidebar_portrait")?;
+        let backdrop = match &look.backdrop {
+            Some(b) => b.parse::<Backdrop>().map_err(|msg| ConfigError::Parse {
+                path: path.to_path_buf(),
+                msg: format!("appearance.backdrop: {msg}"),
+            })?,
+            None => Backdrop::default(),
+        };
+        let backdrop_strength = look
+            .backdrop_strength
+            .map(|v| v.clamp(10, 100) as u8)
+            .unwrap_or(BACKDROP_STRENGTH);
         let backend = match out.backend {
             Some(b) => b.parse::<Backend>().map_err(|msg| ConfigError::Parse {
                 path: path.to_path_buf(),
@@ -1059,6 +1143,8 @@ impl Config {
                 theme,
                 sidebar_landscape,
                 sidebar_portrait,
+                backdrop,
+                backdrop_strength,
             },
             servers,
             cache,
@@ -1200,6 +1286,11 @@ theme = "runout"
 # The button at the bottom of the sidebar sets the one in use.
 sidebar_landscape = "auto"
 sidebar_portrait = "auto"
+# The playing song's cover, blurred, washed over the theme: off,
+# now-playing (behind Now Playing) or everywhere (behind the views too).
+# Its strength is 10 to 100 percent. Window only, not the TUI.
+backdrop = "off"
+backdrop_strength = 60
 
 [playback]
 # Starting volume, 0 to 100.
@@ -1741,6 +1832,18 @@ mod tests {
             )
             .is_err()
         );
+        let c = Config::parse(
+            "[appearance]\nbackdrop = \"now_playing\"\nbackdrop_strength = 500\n",
+            Path::new("x"),
+        )
+        .unwrap();
+        assert_eq!(c.appearance.backdrop, Backdrop::NowPlaying);
+        assert_eq!(c.appearance.backdrop_strength, 100);
+        assert_eq!(
+            Config::default().appearance.backdrop_strength,
+            BACKDROP_STRENGTH
+        );
+        assert!(Config::parse("[appearance]\nbackdrop = \"blur\"\n", Path::new("x")).is_err());
         let c = Config::parse("[appearance]\ntheme = \"kawaii-dark\"\n", Path::new("x")).unwrap();
         assert_eq!(c.appearance.theme, Theme::KawaiiDark);
         let c = Config::parse("[appearance]\ntheme = \"OLED\"\n", Path::new("x")).unwrap();

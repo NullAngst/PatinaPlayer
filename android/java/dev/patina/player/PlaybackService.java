@@ -38,10 +38,16 @@ import java.util.List;
  * It's a MediaBrowserService so Android Auto takes it for a music app and
  * drives its session: next and previous on the car's screen and wheel
  * buttons, instead of the generic controls (seek back and forward) it
- * gives an app it doesn't know. The car browses Favorites, Playlists,
- * Smart playlists, Recently played, saved Mixes and recently added
- * albums; the tree comes from the Rust library (patina_core::browse::auto)
- * and picking a song there plays its list from that song.
+ * gives an app it doesn't know. The car's tabs are Home (shuffle,
+ * Favorites, Recently played, Recently added, Mixes), Artists, Albums,
+ * Playlists and Folders; the tree comes from the Rust library
+ * (patina_core::browse::auto) and picking a song there plays its list from
+ * that song. Beside the transport the car shows a heart for the song
+ * playing and a shuffle button.
+ *
+ * A car can bind this with the app closed. Then there's no player yet,
+ * and this starts one without the window (Native.initWithoutWindow), so
+ * the car browses and plays as it would with the app open.
  */
 public class PlaybackService extends MediaBrowserService {
     private static final String CHANNEL = "playback";
@@ -55,12 +61,28 @@ public class PlaybackService extends MediaBrowserService {
         "android.media.playback.ALWAYS_RESERVE_SPACE_FOR.ACTION_SKIP_TO_NEXT";
     private static final String RESERVE_PREV =
         "android.media.playback.ALWAYS_RESERVE_SPACE_FOR.ACTION_SKIP_TO_PREVIOUS";
+    // How the car lays rows out, and how many tabs it has room for. Also
+    // from androidx.media's MediaConstants.
+    private static final String STYLE_SUPPORTED = "android.media.browse.CONTENT_STYLE_SUPPORTED";
+    private static final String STYLE_BROWSABLE = "android.media.browse.CONTENT_STYLE_BROWSABLE_HINT";
+    private static final String STYLE_PLAYABLE = "android.media.browse.CONTENT_STYLE_PLAYABLE_HINT";
+    private static final String STYLE_GROUP = "android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT";
+    private static final String ROOT_LIMIT = "androidx.media.MediaBrowserCompat.Extras.KEY_ROOT_CHILDREN_LIMIT";
+    private static final String SEARCH_SUPPORTED = "android.media.browse.SEARCH_SUPPORTED";
+    private static final int STYLE_LIST = 1;
+    private static final int STYLE_GRID = 2;
+    // The car's own buttons beside play and pause.
+    private static final String ACT_LOVE = "dev.patina.player.LOVE";
+    private static final String ACT_SHUFFLE = "dev.patina.player.SHUFFLE";
 
     private static PlaybackService running;
     // The latest state, kept for when the service is (re)created.
     private static String title = "", artist = "", album = "", artPath = "";
     private static long duration, position, positionAt;
     private static int state = Native.STOPPED;
+    // 0 can't be hearted, 1 not hearted, 2 hearted.
+    private static int loved;
+    private static boolean shuffle;
 
     private MediaSession session;
     private AudioManager audio;
@@ -69,6 +91,8 @@ public class PlaybackService extends MediaBrowserService {
     private boolean resumeOnGain;
     private String shownArt;
     private Bitmap art;
+    // Started (not just bound by a car), so it outlives the car unbinding.
+    private boolean started;
 
     private final BroadcastReceiver noisy = new BroadcastReceiver() {
         @Override
@@ -82,9 +106,10 @@ public class PlaybackService extends MediaBrowserService {
 
     /** From Native.onState, on the main thread. */
     static void update(Context ctx, String t, String ar, String al, String artFile,
-                       long durMs, long posMs, int st) {
+                       long durMs, long posMs, int st, int love, boolean shuf) {
         boolean wasStopped = state == Native.STOPPED;
         title = t; artist = ar; album = al; artPath = artFile;
+        loved = love; shuffle = shuf;
         duration = durMs; position = posMs; positionAt = SystemClock.elapsedRealtime();
         state = st;
         NowPlayingWidget.show(ctx, t, ar, artFile, st);
@@ -114,6 +139,15 @@ public class PlaybackService extends MediaBrowserService {
     public void onCreate() {
         super.onCreate();
         running = this;
+        // Started by a car with the app closed: no player yet. Start one
+        // without the window.
+        if (!Native.ready()) {
+            try {
+                Native.initWithoutWindow(this);
+            } catch (Throwable t) {
+                android.util.Log.e("PatinaPlayer", "can't start the player for the car", t);
+            }
+        }
         audio = (AudioManager) getSystemService(AUDIO_SERVICE);
         NotificationManager nm = getSystemService(NotificationManager.class);
         NotificationChannel ch = new NotificationChannel(CHANNEL, "Playback",
@@ -137,6 +171,20 @@ public class PlaybackService extends MediaBrowserService {
             @Override public void onPlayFromMediaId(String id, Bundle extras) {
                 if (Native.ready() && id != null) {
                     Native.playMediaId(id);
+                }
+            }
+            // "Play Nirvana on PatinaPlayer". Nothing said shuffles it all.
+            @Override public void onPlayFromSearch(String query, Bundle extras) {
+                if (Native.ready()) {
+                    Native.playMediaId("search:" + (query == null ? "" : query));
+                }
+            }
+            // The car's heart and shuffle buttons.
+            @Override public void onCustomAction(String action, Bundle extras) {
+                if (ACT_LOVE.equals(action)) {
+                    Native.command(Native.LOVE, 0);
+                } else if (ACT_SHUFFLE.equals(action)) {
+                    Native.command(Native.SHUFFLE, 0);
                 }
             }
         });
@@ -187,6 +235,7 @@ public class PlaybackService extends MediaBrowserService {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        started = true;
         if (intent != null && ACTION.equals(intent.getAction())) {
             Native.command(intent.getIntExtra("cmd", Native.TOGGLE), 0);
         }
@@ -217,20 +266,49 @@ public class PlaybackService extends MediaBrowserService {
         int ps = state == Native.PLAYING ? PlaybackState.STATE_PLAYING
             : state == Native.PAUSED ? PlaybackState.STATE_PAUSED
             : PlaybackState.STATE_STOPPED;
-        session.setPlaybackState(new PlaybackState.Builder()
+        PlaybackState.Builder pb = new PlaybackState.Builder()
             .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
                 | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_SKIP_TO_NEXT
                 | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_STOP
                 | PlaybackState.ACTION_PLAY_FROM_MEDIA_ID
+                | PlaybackState.ACTION_PLAY_FROM_SEARCH
                 | (duration > 0 ? PlaybackState.ACTION_SEEK_TO : 0))
-            .setState(ps, position, state == Native.PLAYING ? 1f : 0f, positionAt)
-            .build());
+            .setState(ps, position, state == Native.PLAYING ? 1f : 0f, positionAt);
+        // The car shows these beside the transport: heart first, then
+        // shuffle, each drawn as it is now.
+        if (loved > 0) {
+            pb.addCustomAction(new PlaybackState.CustomAction.Builder(ACT_LOVE,
+                loved == 2 ? "Unheart" : "Heart",
+                loved == 2 ? R.drawable.ic_action_heart_on : R.drawable.ic_action_heart).build());
+        }
+        if (state != Native.STOPPED) {
+            pb.addCustomAction(new PlaybackState.CustomAction.Builder(ACT_SHUFFLE,
+                shuffle ? "Shuffle on" : "Shuffle off",
+                shuffle ? R.drawable.ic_action_shuffle_on : R.drawable.ic_action_shuffle).build());
+        }
+        session.setPlaybackState(pb.build());
 
         Notification n = notification();
         if (state == Native.STOPPED) {
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
         } else if (state == Native.PLAYING) {
+            // A car only binds the service. Start it too, so it keeps
+            // playing when the car lets go; the car's command is what
+            // lets it start from the background.
+            if (!started) {
+                started = true;
+                Intent self = new Intent(this, PlaybackService.class);
+                try {
+                    if (Build.VERSION.SDK_INT >= 26) {
+                        startForegroundService(self);
+                    } else {
+                        startService(self);
+                    }
+                } catch (RuntimeException e) {
+                    started = false;
+                }
+            }
             if (Build.VERSION.SDK_INT >= 29) {
                 startForeground(NOTE_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
             } else {
@@ -298,16 +376,24 @@ public class PlaybackService extends MediaBrowserService {
 
     @Override
     public BrowserRoot onGetRoot(String clientPackage, int clientUid, Bundle hints) {
-        return new BrowserRoot(ROOT, null);
+        Bundle extras = new Bundle();
+        extras.putBoolean(STYLE_SUPPORTED, true);
+        extras.putInt(STYLE_BROWSABLE, STYLE_LIST);
+        extras.putInt(STYLE_PLAYABLE, STYLE_LIST);
+        extras.putBoolean(SEARCH_SUPPORTED, false);
+        // The tabs: five, or four with Home folded into Playlists when the
+        // car says it has room for only four.
+        int limit = hints == null ? 0 : hints.getInt(ROOT_LIMIT, 0);
+        return new BrowserRoot(limit > 0 && limit < 5 ? "root4" : ROOT, extras);
     }
 
     @Override
     public void onLoadChildren(String parentId, Result<List<MediaBrowser.MediaItem>> result) {
         if (!Native.ready()) {
-            // The app hasn't been opened since the phone started: there's no
-            // player to browse yet.
+            // The player couldn't be started without the window (see
+            // onCreate): there's nothing to browse.
             List<MediaBrowser.MediaItem> none = new ArrayList<>();
-            if (ROOT.equals(parentId)) {
+            if (parentId != null && parentId.startsWith(ROOT)) {
                 none.add(new MediaBrowser.MediaItem(new MediaDescription.Builder()
                     .setMediaId("closed")
                     .setTitle("Open PatinaPlayer on the phone")
@@ -324,23 +410,35 @@ public class PlaybackService extends MediaBrowserService {
             List<MediaBrowser.MediaItem> items = new ArrayList<>();
             String[] raw = null;
             try {
-                raw = Native.browse(ROOT.equals(parentId) ? "root" : parentId);
+                raw = Native.browse(parentId);
             } catch (Throwable t) {
                 raw = null;
             }
             if (raw != null) {
-                for (int i = 0; i + 3 < raw.length; i += 4) {
+                for (int i = 0; i + 4 < raw.length; i += 5) {
                     MediaDescription.Builder d = new MediaDescription.Builder()
                         .setMediaId(raw[i])
                         .setTitle(raw[i + 1]);
                     if (raw[i + 2] != null && !raw[i + 2].isEmpty()) {
                         d.setSubtitle(raw[i + 2]);
                     }
+                    String f = raw[i + 3] == null ? "" : raw[i + 3];
+                    Bundle extras = new Bundle();
+                    if (f.contains("g")) {
+                        extras.putInt(STYLE_BROWSABLE, STYLE_GRID);
+                        extras.putInt(STYLE_PLAYABLE, STYLE_LIST);
+                    }
+                    if (raw[i + 4] != null && !raw[i + 4].isEmpty()) {
+                        extras.putString(STYLE_GROUP, raw[i + 4]);
+                    }
+                    if (!extras.isEmpty()) {
+                        d.setExtras(extras);
+                    }
                     int flags = 0;
-                    if (raw[i + 3] != null && raw[i + 3].contains("b")) {
+                    if (f.contains("b")) {
                         flags |= MediaBrowser.MediaItem.FLAG_BROWSABLE;
                     }
-                    if (raw[i + 3] != null && raw[i + 3].contains("p")) {
+                    if (f.contains("p")) {
                         flags |= MediaBrowser.MediaItem.FLAG_PLAYABLE;
                     }
                     items.add(new MediaBrowser.MediaItem(d.build(), flags));

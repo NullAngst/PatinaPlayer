@@ -25,7 +25,9 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 - Right-click a song (long press on a phone), in any list or in the queue, for Go to album and Go to artist.
 - Pick several rows and act on them at once: play them, queue them, add them to a playlist, keep them offline, send them to an iPod, or take them out of a playlist or the queue. Ctrl-click and Shift-click on the desktop, Space in the terminal app, and on a phone long press, Select, then tap the others. A bar at the bottom says how many are picked.
 - Drag songs by the grip at the right of each row to reorder the queue or a playlist. On a touch screen, tap the grip to lift the song and tap where it should go.
-- Now Playing: at the top of the sidebar, or tap the cover in the bottom bar (Ctrl+N in the terminal app), for the big cover, the song, its format, whether it's bit-perfect, the output it's going to, every stage of the sound chain that's touching it, and the lyrics beside it. Going anywhere else (the sidebar, a search, Back, Go to album) closes it, so you see where you went.
+- Now Playing: at the top of the sidebar, or tap the cover in the bottom bar (Ctrl+N in the terminal app), for the big cover, the song, its format, whether it's bit-perfect, the output it's going to, every stage of the sound chain that's touching it, and the lyrics beside it. Going anywhere else (the sidebar, a search, Back, Go to album) closes it, so you see where you went. On a phone it takes the whole screen and keeps it simple: the cover, the song with its heart, the seek bar with the format between the times, the transport, volume, and lyrics and the queue at the foot. Rating, Go to album or artist, the cover and the sound chain are in the menu at the top.
+- Cover backdrop: the playing song's cover, blurred, washed over whatever theme you use, behind Now Playing or behind every view. Off by default; Settings, Appearance turns it on and sets how strong it is.
+- Covers you choose: right-click an album, a folder, a song, the album header's cover or Now Playing's cover (long press on a phone) for Find cover art or Cover from an image file. Find looks the album up on iTunes, Deezer and MusicBrainz (Cover Art Archive) and shows what it finds to pick from. Either way the picture is saved as `album_art.jpg` (or `.png`) in the album's folder, where other players find it too, and it wins over any art embedded in the files. A server album's folder, or one the app can't write to (most folders on Android), keeps it in the app's own folder instead.
 - Hover any icon button for what it does.
 - Every library view has Play, Shuffle, Add to queue and Add to playlist at the top, and they take the whole view. Shuffle on a folder of three hundred albums plays all of them in random order.
 - Ratings, 1 to 5 stars, on songs and albums.
@@ -146,7 +148,7 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 - Your Music folder is in the library from the first start. Add more with Android's folder picker.
 - Tap opens and plays, long press opens the menu that right-click opens on the desktop. Text is typed in Android's own dialogs, which stay clear of the keyboard.
 - Music keeps playing with the screen off, with the notification, lock screen controls, Bluetooth buttons, and pausing when headphones come out or a call comes in.
-- Android Auto shows what's playing, with next, previous and play/pause, and has music to browse from the car: Shuffle everything, Favorites, Playlists, Smart playlists, Recently played, Mixes and Recently added albums.
+- Android Auto works with the app closed on the phone: connecting the car starts the player in the background, with your last queue where you left it, and opening the app later carries on with the same player. The car shows what's playing with next, previous and play/pause, plus a heart for the song playing and a shuffle button. Its tabs are Home (Shuffle everything, Favorites, Recently played, Recently added, Mixes), Artists, Albums, Playlists (smart playlists included) and Folders. A long list of artists or albums comes as one folder per letter. A car with room for only four tabs gets Home at the top of Playlists. "Play Nirvana on PatinaPlayer" plays an artist, album or songs that match.
 - A home screen widget with the cover, the song, and back, play or pause, and next, in the app's theme. It keeps the theme after a restart.
 - The System theme (Android 12 and later) follows your wallpaper's Material You colors and the phone's light or dark mode.
 - The volume button opens a tall slider, easier to hit with a thumb than the bar's.
@@ -289,6 +291,8 @@ crossfade_ms = 0         # 0 to 12000
 theme = "runout"         # runout, system, light, dark, oled, kawaii-light or kawaii-dark
 sidebar_landscape = "auto"   # auto, expanded or folded
 sidebar_portrait = "auto"
+backdrop = "off"         # off, now-playing or everywhere: the playing cover, blurred
+backdrop_strength = 60   # 10 to 100 percent
 
 [playback]
 volume = 80              # starting volume, 0 to 100
@@ -482,6 +486,7 @@ To time indexing on your own collection: `cargo run --release -p patina-core --e
 - Metered connections are only detected through NetworkManager.
 - inotify needs one watch per folder, so a very large library can run past `fs.inotify.max_user_watches`. The app says so if it does, and raising the limit with `sysctl` fixes it.
 - On Android, folders are added by path, so a folder from a cloud app's storage provider can't go in. Add that music through a server instead. Bit-perfect depends on the phone's maker offering it.
+- Covers are found by the album's tags, so an album tagged wrong turns up wrong covers or none. Fix the tags, or use an image file. Android Auto never had a phone of mine to test against: the car side follows Google's documentation and reports from others, so tell me what your car does with it.
 - The home screen widget's buttons control the player while the app is running. After the phone restarts, or Android stops the app, they open it instead, since there's no player to tell until it starts. With the System theme, the widget picks up a new wallpaper or a switch between light and dark mode the next time the app runs, since only the app can work out the colors.
 - The iPod sync covers what libgpod covers: iPod classic, the older nanos (up to the 5th generation), minis, and shuffles up to the 2nd generation. The 6th and 7th generation nanos and the iPod touch don't work. It's desktop only. Play counts and ratings made on the iPod don't come back.
 - Smart playlists are typed rules, not a form of drop-downs. The dialog checks them as you type and the examples are one click away, but it's still a small language to learn.

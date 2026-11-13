@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::audio::output::exclusive::HwDevice;
 use crate::audio::output::{Backend, BitPerfect, OutDevice, RATES, SampleFormat};
-use crate::config::{Config, SidebarMode, Theme};
+use crate::config::{Backdrop, Config, SidebarMode, Theme};
 use crate::dsp::resample::Quality;
 use crate::remote::{ServerStatus, StreamFormat};
 
@@ -24,6 +24,9 @@ pub enum Key {
     SidebarLandscape,
     /// And taller than it's wide.
     SidebarPortrait,
+    /// The blurred cover behind the window.
+    Backdrop,
+    BackdropStrength,
     StartVolume,
     FadeMs,
     Backend,
@@ -914,6 +917,44 @@ pub fn rows(
             "With the window taller than it's wide. On a phone, Folded keeps the icons on screen instead of behind the menu button. Window only, not the TUI.",
             cfg.appearance.sidebar_portrait,
         ),
+    );
+
+    push(
+        "Appearance",
+        Setting {
+            disabled: None,
+            key: Key::Backdrop,
+            label: "Cover backdrop".into(),
+            help: "The playing song's cover, blurred, washed over the theme: behind Now Playing, or behind the views too. Window only, not the TUI.",
+            control: Control::Choice {
+                options: Backdrop::ALL
+                    .iter()
+                    .map(|b| (b.as_str().to_string(), b.label().to_string()))
+                    .collect(),
+                index: Backdrop::ALL
+                    .iter()
+                    .position(|b| *b == cfg.appearance.backdrop)
+                    .unwrap_or(0),
+            },
+        },
+    );
+    push(
+        "Appearance",
+        Setting {
+            disabled: (cfg.appearance.backdrop == Backdrop::Off)
+                .then_some("Needs the cover backdrop"),
+            key: Key::BackdropStrength,
+            label: "Backdrop strength".into(),
+            help: "How much of the cover shows through. Low keeps the theme's colors; high lets the cover take over.",
+            control: Control::Number {
+                value: cfg.appearance.backdrop_strength as i64,
+                min: 10,
+                max: 100,
+                step: 10,
+                scale: 1,
+                unit: "%",
+            },
+        },
     );
 
     // Desktop

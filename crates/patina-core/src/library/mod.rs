@@ -682,12 +682,12 @@ impl Library {
             .query_map(params![lo, hi], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let mut children: Vec<String> = Vec::new();
-        for d in dirs {
+        let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
+        for d in &dirs {
             let rest = &d[lo.len()..];
             let first = rest.split(|&b| b == b'/').next().unwrap_or(rest);
-            let name = String::from_utf8_lossy(first).into_owned();
-            if !name.is_empty() && !children.contains(&name) {
-                children.push(name);
+            if !first.is_empty() && seen.insert(first) {
+                children.push(String::from_utf8_lossy(first).into_owned());
             }
         }
         children.sort_by(|a, b| natural_cmp(a, b));

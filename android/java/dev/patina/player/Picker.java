@@ -20,7 +20,7 @@ import java.io.OutputStream;
 
 /**
  * The system's own pickers (DocumentsUI): a music folder for the library,
- * and an EQ file to import. Rust asks through Native.pickFolder and
+ * an EQ file to import, and an image to use as an album's cover. Rust asks through Native.pickFolder and
  * Native.pickFile and waits; the answer goes back through Native.pickDone.
  *
  * The library scans folders by path, the way it does on Linux, so a picked
@@ -48,6 +48,10 @@ final class Picker {
             // Start in Music, where most phones keep it.
             i.putExtra(DocumentsContract.EXTRA_INITIAL_URI,
                 DocumentsContract.buildDocumentUri(STORAGE, "primary:" + Environment.DIRECTORY_MUSIC));
+        } else if (what == Native.PICK_IMAGE) {
+            i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("image/*");
         } else {
             i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -68,7 +72,8 @@ final class Picker {
     /** A result from the activity: true if it was a pick, and answered. */
     static boolean onResult(Activity a, int request, int result, Intent data) {
         int what = request - REQUEST_BASE;
-        if (what != Native.PICK_FOLDER && what != Native.PICK_EQ_FILE) {
+        if (what != Native.PICK_FOLDER && what != Native.PICK_EQ_FILE
+                && what != Native.PICK_IMAGE) {
             return false;
         }
         Uri uri = result == Activity.RESULT_OK && data != null ? data.getData() : null;
@@ -86,7 +91,9 @@ final class Picker {
                 Native.pickDone(what, path, null);
             }
         } else {
-            File f = copyToCache(a, uri);
+            File f = what == Native.PICK_IMAGE
+                ? copyToCache(a, uri, "cover-pick", 40L << 20)
+                : copyToCache(a, uri, "eq-import.txt", 4L << 20);
             if (f == null) {
                 Native.pickDone(what, null, "Couldn't read that file");
             } else {
@@ -149,8 +156,7 @@ final class Picker {
     }
 
     /** Copy a picked file into the app's cache, where Rust can read it. */
-    private static File copyToCache(Context c, Uri uri) {
-        String name = "eq-import.txt";
+    private static File copyToCache(Context c, Uri uri, String name, long max) {
         try (Cursor cur = c.getContentResolver().query(uri,
                 new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
             if (cur != null && cur.moveToFirst() && !cur.isNull(0)) {
@@ -172,12 +178,13 @@ final class Picker {
                 return null;
             }
             byte[] buf = new byte[16384];
-            // EQ files are a few KB; anything past 4 MB isn't one.
+            // EQ files are a few KB and covers a few MB: anything past the
+            // limit isn't one.
             long total = 0;
             int n;
             while ((n = in.read(buf)) > 0) {
                 total += n;
-                if (total > 4L << 20) {
+                if (total > max) {
                     return null;
                 }
                 o.write(buf, 0, n);

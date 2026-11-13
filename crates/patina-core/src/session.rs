@@ -352,3 +352,12 @@ pub fn edit_folders(
     out.push(format!("Config: {}", config_path.display()));
     Ok(out)
 }
+
+/// A session can move to another thread: Android starts the player on a
+/// thread of its own for a car, and hands it to the window if the app is
+/// opened later.
+#[allow(dead_code)]
+fn session_is_send() {
+    fn send<T: Send>() {}
+    send::<Session>();
+}
