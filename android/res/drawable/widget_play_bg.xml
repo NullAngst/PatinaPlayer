@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The play button: a verdigris disc, as in the app. -->
+<!-- The play button's disc, white so it can be tinted to the theme's accent. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="oval">
-    <solid android:color="#5FB8A5" />
+    <solid android:color="#FFFFFFFF" />
 </shape>

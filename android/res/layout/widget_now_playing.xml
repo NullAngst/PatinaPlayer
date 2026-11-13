@@ -1,77 +1,115 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The home screen widget: cover, title and artist, back, play, next.
-     RemoteViews only take the plain widgets, so it's laid out with those. -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     RemoteViews only take the plain widgets, so it's laid out with those.
+     The ground, its edge and the play disc are white shapes the widget
+     tints to the app's theme (see NowPlayingWidget). -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="@drawable/widget_bg"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
-    android:padding="8dp">
+    android:layout_height="match_parent">
 
     <ImageView
-        android:id="@+id/widget_art"
-        android:layout_width="56dp"
-        android:layout_height="56dp"
-        android:contentDescription="Open PatinaPlayer"
-        android:scaleType="centerCrop"
-        android:src="@mipmap/ic_launcher" />
+        android:id="@+id/widget_bg"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/widget_bg" />
+
+    <ImageView
+        android:id="@+id/widget_edge"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/widget_edge" />
 
     <LinearLayout
-        android:id="@+id/widget_text"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:orientation="vertical"
-        android:paddingStart="12dp"
-        android:paddingEnd="4dp">
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="8dp">
 
-        <TextView
-            android:id="@+id/widget_title"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:singleLine="true"
-            android:text="PatinaPlayer"
-            android:textColor="#E6ECE9"
-            android:textSize="15sp"
-            android:textStyle="bold" />
+        <ImageView
+            android:id="@+id/widget_art"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:contentDescription="Open PatinaPlayer"
+            android:scaleType="centerCrop"
+            android:src="@mipmap/ic_launcher" />
 
-        <TextView
-            android:id="@+id/widget_artist"
-            android:layout_width="match_parent"
+        <LinearLayout
+            android:id="@+id/widget_text"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:singleLine="true"
-            android:text="Nothing playing"
-            android:textColor="#8FA39D"
-            android:textSize="13sp" />
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingStart="12dp"
+            android:paddingEnd="4dp">
+
+            <TextView
+                android:id="@+id/widget_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="PatinaPlayer"
+                android:textColor="#E6ECE9"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_artist"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="Nothing playing"
+                android:textColor="#8FA39D"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/widget_prev"
+            android:layout_width="40dp"
+            android:layout_height="48dp"
+            android:background="@android:color/transparent"
+            android:contentDescription="Back"
+            android:src="@android:drawable/ic_media_previous"
+            android:tint="#E6ECE9" />
+
+        <FrameLayout
+            android:id="@+id/widget_play"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:clickable="true"
+            android:contentDescription="Play"
+            android:focusable="true">
+
+            <ImageView
+                android:id="@+id/widget_play_disc"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:importantForAccessibility="no"
+                android:src="@drawable/widget_play_bg" />
+
+            <ImageView
+                android:id="@+id/widget_play_icon"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:importantForAccessibility="no"
+                android:scaleType="center"
+                android:src="@android:drawable/ic_media_play"
+                android:tint="#0B1513" />
+        </FrameLayout>
+
+        <ImageButton
+            android:id="@+id/widget_next"
+            android:layout_width="40dp"
+            android:layout_height="48dp"
+            android:background="@android:color/transparent"
+            android:contentDescription="Next"
+            android:src="@android:drawable/ic_media_next"
+            android:tint="#E6ECE9" />
     </LinearLayout>
-
-    <ImageButton
-        android:id="@+id/widget_prev"
-        android:layout_width="40dp"
-        android:layout_height="48dp"
-        android:background="@android:color/transparent"
-        android:contentDescription="Back"
-        android:src="@android:drawable/ic_media_previous"
-        android:tint="#E6ECE9" />
-
-    <ImageButton
-        android:id="@+id/widget_play"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="@drawable/widget_play_bg"
-        android:contentDescription="Play"
-        android:src="@android:drawable/ic_media_play"
-        android:tint="#0B1513" />
-
-    <ImageButton
-        android:id="@+id/widget_next"
-        android:layout_width="40dp"
-        android:layout_height="48dp"
-        android:background="@android:color/transparent"
-        android:contentDescription="Next"
-        android:src="@android:drawable/ic_media_next"
-        android:tint="#E6ECE9" />
-</LinearLayout>
+</FrameLayout>

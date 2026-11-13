@@ -73,6 +73,43 @@ pub trait Hooks: Send + Sync {
     fn system_colors(&self) -> Option<crate::system_theme::SystemColors> {
         None
     }
+    /// The theme's colors for a home screen widget, sent whenever they
+    /// change: see [`WidgetColors`].
+    fn widget_colors(&self, _c: &WidgetColors) {}
+}
+
+/// The colors a home screen widget takes from the app's theme, as ARGB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WidgetColors {
+    /// The widget's ground.
+    pub surface: u32,
+    pub border: u32,
+    pub text: u32,
+    pub muted: u32,
+    /// The play button.
+    pub accent: u32,
+    /// The play icon on it.
+    pub on_accent: u32,
+}
+
+impl WidgetColors {
+    pub fn to_array(self) -> [u32; 6] {
+        [
+            self.surface,
+            self.border,
+            self.text,
+            self.muted,
+            self.accent,
+            self.on_accent,
+        ]
+    }
+}
+
+/// Hand the theme's colors to the platform's widget, if it has one.
+pub(crate) fn widget_colors(c: &WidgetColors) {
+    if let Some(h) = hooks() {
+        h.widget_colors(c);
+    }
 }
 
 static HOOKS: OnceLock<Box<dyn Hooks>> = OnceLock::new();

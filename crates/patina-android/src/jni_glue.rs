@@ -484,6 +484,19 @@ pub fn system_colors() -> Option<Vec<i32>> {
     .flatten()
 }
 
+/// The theme's colors for the home screen widget, as ARGB (see
+/// `patina_gui::platform::WidgetColors`). Java keeps them, so the widget
+/// stays in the theme while the app is closed.
+pub fn widget_colors(c: &[u32; 6]) {
+    with_java(|env, class| {
+        let v: Vec<jint> = c.iter().map(|&x| x as jint).collect();
+        let arr = env.new_int_array(v.len() as i32)?;
+        env.set_int_array_region(&arr, 0, &v)?;
+        env.call_static_method(class, "widgetColors", "([I)V", &[JValue::Object(&arr)])?;
+        Ok(())
+    });
+}
+
 /// Back with nowhere left to go: send the app to the background.
 pub fn move_to_back() {
     with_java(|env, class| {

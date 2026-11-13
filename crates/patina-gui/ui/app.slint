@@ -1828,6 +1828,11 @@ component SelBar inherits Rectangle {
     // scrolling sideways.
     property <bool> narrow: root.width < 600px;
     height: 56px;
+    // Takes every press on the bar that isn't on a button, so a tap or a
+    // long press on its text, its gaps or its edge doesn't reach the row
+    // underneath. Declared first, so the buttons sit above it. The scroll
+    // wheel still goes through to the list.
+    TouchArea {}
     Rectangle {
         y: 4px;
         height: 44px;

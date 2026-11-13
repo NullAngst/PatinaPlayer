@@ -135,6 +135,16 @@ final class Native {
         });
     }
 
+    /**
+     * The theme's colors for the home screen widget, as ARGB: surface,
+     * border, text, muted, accent, and the color on the accent. Sent when
+     * the theme changes.
+     */
+    static void widgetColors(int[] colors) {
+        int[] copy = colors.clone();
+        main.post(() -> NowPlayingWidget.setColors(app, copy));
+    }
+
     /** The app is closing: take the notification down. */
     static void stopped() {
         main.post(() -> PlaybackService.stop(app));

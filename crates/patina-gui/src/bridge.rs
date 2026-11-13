@@ -155,6 +155,8 @@ pub struct State {
     /// and what was put on screen from them.
     system_checked: Option<Instant>,
     system_shown: Option<Option<crate::system_theme::SystemColors>>,
+    /// The colors last sent to the home screen widget.
+    widget_sent: Option<platform::WidgetColors>,
     /// MPRIS and the tray icon.
     desktop: crate::desktop::Desktop,
     /// What Back does with nowhere left to go back to (Android: send the
@@ -336,6 +338,7 @@ impl State {
             theme: None,
             system_checked: None,
             system_shown: None,
+            widget_sent: None,
             desktop,
             back_out: None,
             hide_on_close,
@@ -1039,6 +1042,25 @@ impl State {
         }
     }
 
+    /// Send the theme's colors to the home screen widget when they change:
+    /// a new theme, or for System, a new wallpaper or dark mode. Read from
+    /// the window's own palette, so the widget matches it exactly.
+    fn sync_widget_colors(&mut self, ui: &AppWindow) {
+        let p = ui.global::<P>();
+        let c = platform::WidgetColors {
+            surface: p.get_surface().as_argb_encoded(),
+            border: p.get_border().as_argb_encoded(),
+            text: p.get_text().as_argb_encoded(),
+            muted: p.get_muted().as_argb_encoded(),
+            accent: p.get_verdigris().as_argb_encoded(),
+            on_accent: p.get_on_accent().as_argb_encoded(),
+        };
+        if self.widget_sent != Some(c) {
+            self.widget_sent = Some(c);
+            platform::widget_colors(&c);
+        }
+    }
+
     fn sync_side(&mut self, ui: &AppWindow) {
         let icons = ui.global::<Icons>();
         let kawaii = self.b.config.appearance.theme.is_kawaii();
@@ -1494,6 +1516,7 @@ impl State {
             // The sidebar's Japanese names and the album kicker change too.
             self.last_gen = u64::MAX;
         }
+        self.sync_widget_colors(ui);
         let art_arrived = self.art.collect();
         let qv = self.b.player.queue().version;
         let gen_changed = self.b.generation() != self.last_gen;

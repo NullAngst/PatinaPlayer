@@ -1,5 +1,13 @@
 # Changes
 
+2026.11.12 - UX fixes (picked-rows bar, widget theme)
+
+* The picked-rows bar takes every press that isn't on one of its buttons. A tap or long press on its "N picked" text, the gaps between buttons or its edge went through to the row underneath it.
+* The home screen widget follows the app's theme: its ground, edge, text, buttons and play disc take the theme's colors, Material You included with the System theme. The app sends them whenever the theme changes, and the widget keeps them, so it stays in the theme after a restart. Before, it was always in Runout's colors.
+* The widget's background and play disc are now white shapes tinted to the theme, since a widget can't recolor a view's background before Android 12 but can tint an image on every version.
+
+Reasons for changes: long-pressing the picked-rows bar acted on the song underneath it, and the widget didn't match the app's theme.
+
 2026.11.12 - UX overhaul (Now Playing)
 
 * Now Playing has its own row at the top of the sidebar, lit while it's open. The cover in the bottom bar still opens and closes it.

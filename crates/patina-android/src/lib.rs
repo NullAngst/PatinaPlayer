@@ -133,6 +133,10 @@ impl Hooks for AndroidHooks {
         jni_glue::system_colors()
             .and_then(|v| patina_gui::system_theme::SystemColors::from_flat(&v))
     }
+
+    fn widget_colors(&self, c: &patina_gui::platform::WidgetColors) {
+        jni_glue::widget_colors(&c.to_array());
+    }
 }
 
 /// Point the app's folders (config, library, cache) at Android's app
