@@ -74,6 +74,16 @@ public class PlaybackService extends MediaBrowserService {
     // The car's own buttons beside play and pause.
     private static final String ACT_LOVE = "dev.patina.player.LOVE";
     private static final String ACT_SHUFFLE = "dev.patina.player.SHUFFLE";
+    // Newer Android Auto draws its own icon for a custom action given one
+    // of Media3's CommandButton.ICON_ numbers under this key, and ignores
+    // the app's drawable. Older versions draw the drawable. From
+    // androidx.media3.session.MediaConstants and CommandButton.
+    private static final String ICON_COMPAT =
+        "androidx.media3.session.EXTRAS_KEY_COMMAND_BUTTON_ICON_COMPAT";
+    private static final int ICON_HEART_FILLED = 0xfe87d;
+    private static final int ICON_HEART_UNFILLED = 0xe87d;
+    private static final int ICON_SHUFFLE_ON = 0xe043;
+    private static final int ICON_SHUFFLE_OFF = 0xfe044;
 
     private static PlaybackService running;
     // The latest state, kept for when the service is (re)created.
@@ -279,12 +289,16 @@ public class PlaybackService extends MediaBrowserService {
         if (loved > 0) {
             pb.addCustomAction(new PlaybackState.CustomAction.Builder(ACT_LOVE,
                 loved == 2 ? "Unheart" : "Heart",
-                loved == 2 ? R.drawable.ic_action_heart_on : R.drawable.ic_action_heart).build());
+                loved == 2 ? R.drawable.ic_action_heart_on : R.drawable.ic_action_heart)
+                .setExtras(iconExtras(loved == 2 ? ICON_HEART_FILLED : ICON_HEART_UNFILLED))
+                .build());
         }
         if (state != Native.STOPPED) {
             pb.addCustomAction(new PlaybackState.CustomAction.Builder(ACT_SHUFFLE,
                 shuffle ? "Shuffle on" : "Shuffle off",
-                shuffle ? R.drawable.ic_action_shuffle_on : R.drawable.ic_action_shuffle).build());
+                shuffle ? R.drawable.ic_action_shuffle_on : R.drawable.ic_action_shuffle)
+                .setExtras(iconExtras(shuffle ? ICON_SHUFFLE_ON : ICON_SHUFFLE_OFF))
+                .build());
         }
         session.setPlaybackState(pb.build());
 
@@ -374,6 +388,12 @@ public class PlaybackService extends MediaBrowserService {
 
     // ----- Media browsing (Android Auto) -----
 
+    private static Bundle iconExtras(int icon) {
+        Bundle b = new Bundle();
+        b.putInt(ICON_COMPAT, icon);
+        return b;
+    }
+
     @Override
     public BrowserRoot onGetRoot(String clientPackage, int clientUid, Bundle hints) {
         Bundle extras = new Bundle();
@@ -415,7 +435,7 @@ public class PlaybackService extends MediaBrowserService {
                 raw = null;
             }
             if (raw != null) {
-                for (int i = 0; i + 4 < raw.length; i += 5) {
+                for (int i = 0; i + 5 < raw.length; i += 6) {
                     MediaDescription.Builder d = new MediaDescription.Builder()
                         .setMediaId(raw[i])
                         .setTitle(raw[i + 1]);
@@ -433,6 +453,19 @@ public class PlaybackService extends MediaBrowserService {
                     }
                     if (!extras.isEmpty()) {
                         d.setExtras(extras);
+                    }
+                    // Its picture: an album's cover through ArtProvider, or
+                    // one of the app's icons. The car takes only URIs.
+                    String art = raw[i + 5] == null ? "" : raw[i + 5];
+                    if (art.startsWith("art:")) {
+                        d.setIconUri(ArtProvider.uriFor(art.substring(4)));
+                    } else if (art.startsWith("icon:")) {
+                        d.setIconUri(new android.net.Uri.Builder()
+                            .scheme("android.resource")
+                            .authority(getPackageName())
+                            .appendPath("drawable")
+                            .appendPath(art.substring(5))
+                            .build());
                     }
                     int flags = 0;
                     if (f.contains("b")) {

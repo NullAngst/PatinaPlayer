@@ -115,6 +115,12 @@ final class Native {
     /** Play something the car picked, by its browse id. */
     static native void playMediaId(String id);
 
+    /**
+     * A cover's file for the car, by the key its browse row carried; null
+     * for a key never given out. ArtProvider calls it.
+     */
+    static native String carArt(String key);
+
     /** Keeps this class, so Rust's threads can find it. */
     static native void nativeInit();
 

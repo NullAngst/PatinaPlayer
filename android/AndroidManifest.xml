@@ -65,6 +65,13 @@
             </intent-filter>
         </service>
 
+        <!-- Album covers for Android Auto's lists, which takes pictures
+             only as content:// URIs. Serves only covers it was shown. -->
+        <provider
+            android:name=".ArtProvider"
+            android:authorities="dev.patina.player.art"
+            android:exported="true" />
+
         <!-- The home screen widget: what's playing, and its buttons. -->
         <receiver
             android:name=".NowPlayingWidget"

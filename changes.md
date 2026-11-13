@@ -1,5 +1,15 @@
 # Changes
 
+2026.11.13 - Android Auto fixes
+
+* Album covers show in Android Auto's lists and grids. The rows had no pictures at all, which a grid draws as its broken-picture sign. Covers now go to the car through a small content provider (`ArtProvider`), the only way Android Auto takes them, made at 320 pixels from the same caches the window uses. An album with no cover gets a plain tile rather than the broken-picture sign.
+* The other rows have icons: Shuffle everything, Favorites, Recently played, Recently added, Mixes, playlists, smart playlists, artists and folders.
+* The Albums tab is a list, each album with its cover beside it, or with one folder per letter on a big library; a letter, Recently added and an artist's albums open as a grid of covers.
+* The heart and shuffle buttons carry Media3's icon numbers, so newer Android Auto draws its own heart and shuffle icons for them. It drew a blank square and a circle in their place. The app's own icons stay for older versions.
+* The provider serves only covers the car was handed in a list, by a key, never by a path, so nothing else on the phone can use it to read other files.
+
+Reasons for changes: in a real car, album covers didn't show in Albums and the heart and shuffle buttons worked but showed the wrong icons.
+
 2026.11.13 - UX overhaul (phone Now Playing, cover backdrop, chosen covers) / Backend overhaul (Android Auto, speed on big libraries)
 
 * Now Playing on a phone takes the whole screen and keeps to what matters: the cover big, the song and artist with the heart, the seek bar with the format between the times, shuffle, back, a wide play button, next and repeat, a volume slider, and lyrics and the queue at the foot. Rating, Go to album, Go to artist, the cover and the sound chain are in the menu at the top. The wide window's Now Playing is as it was.

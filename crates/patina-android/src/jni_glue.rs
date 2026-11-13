@@ -6,6 +6,7 @@
 //! `nativeInit`: a thread Rust started can't look the app's classes up by
 //! name, since it only sees the system's class loader.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -19,6 +20,7 @@ use jni::objects::{
 };
 use jni::sys::{jboolean, jint, jlong};
 use patina_core::audio::output::aaudio::{self, AndroidDevice};
+use patina_core::browse::auto::CarArt;
 use patina_core::{Command, Player};
 use patina_gui::platform::{self, Picked, Prompt, PromptEvent};
 
@@ -311,7 +313,7 @@ pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
     let items = auto_children(&parent);
     let build = |env: &mut JNIEnv<'local>| -> jni::errors::Result<JObjectArray<'local>> {
         let arr = env.new_object_array(
-            (items.len() * 5) as i32,
+            (items.len() * 6) as i32,
             "java/lang/String",
             JObject::null(),
         )?;
@@ -326,19 +328,25 @@ pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
             if it.grid {
                 flags.push('g');
             }
+            let art = match &it.art {
+                Some(CarArt::Icon(name)) => format!("icon:{name}"),
+                Some(CarArt::Cover(track)) => format!("art:{}", car_art_key(track)),
+                None => String::new(),
+            };
             for (j, text) in [
                 it.id.as_str(),
                 it.title.as_str(),
                 it.subtitle.as_str(),
                 flags.as_str(),
                 it.group.as_str(),
+                art.as_str(),
             ]
             .into_iter()
             .enumerate()
             {
                 let js = env.new_string(text)?;
-                env.set_object_array_element(&arr, (i * 5 + j) as i32, &js)?;
-                // Two hundred rows are a thousand strings: let each go
+                env.set_object_array_element(&arr, (i * 6 + j) as i32, &js)?;
+                // Two hundred rows are 1,200 strings: let each go
                 // rather than fill the local reference table.
                 env.delete_local_ref(js)?;
             }
@@ -351,6 +359,53 @@ pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
             log::warn!("couldn't hand the car its list: {e}");
             std::ptr::null_mut()
         }
+    }
+}
+
+/// Covers handed to the car, by the key in their content URI. Only these
+/// are served: the URI names a key, never a path, so nothing else on the
+/// phone can ask the app's provider for any file it likes.
+static CAR_ART: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
+
+/// The key a song's cover goes by in the car's URIs, remembered so the
+/// provider can find the song again.
+fn car_art_key(track: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    track.hash(&mut h);
+    let key = format!("{:016x}", h.finish());
+    let mut map = CAR_ART.lock().unwrap();
+    let map = map.get_or_insert_with(HashMap::new);
+    // A long drive through many lists: start over rather than grow
+    // forever. The car asks for the lists it shows again.
+    if map.len() > 20_000 {
+        map.clear();
+    }
+    map.insert(key.clone(), track.to_path_buf());
+    key
+}
+
+/// A cover's file for the car, by its key: ArtProvider.openFile. Runs on
+/// one of the provider's binder threads, so it can take its time loading
+/// the cover (the car shows a spinner meanwhile). Null for a key it never
+/// gave out.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_patina_player_Native_carArt<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    key: JString<'local>,
+) -> jni::sys::jstring {
+    let path = opt_string(&mut env, &key).and_then(|k| {
+        let track = CAR_ART.lock().unwrap().as_ref()?.get(&k)?.clone();
+        // Only plain keys name files.
+        k.chars()
+            .all(|c| c.is_ascii_hexdigit())
+            .then(|| patina_core::browse::auto::car_art_file(&track, &k))
+            .flatten()
+    });
+    match path.and_then(|p| env.new_string(p.to_string_lossy()).ok()) {
+        Some(s) => s.into_raw(),
+        None => std::ptr::null_mut(),
     }
 }
 

@@ -975,6 +975,13 @@ fn the_car_browses_playlists_and_plays_from_a_song() {
     let albums = ids("albums");
     assert_eq!(albums[0], "recent");
     assert!(albums.iter().any(|a| a.starts_with("album:")));
+    // Albums carry their cover for the car to show; the rest an icon.
+    for it in auto::children(lib, "albums") {
+        match (it.id.starts_with("album:"), &it.art) {
+            (true, Some(auto::CarArt::Cover(_))) | (false, Some(auto::CarArt::Icon(_))) => {}
+            other => panic!("{}: {other:?}", it.id),
+        }
+    }
     // One library folder: the tab opens straight into it.
     let folders = auto::children(lib, "folders");
     assert!(folders.iter().any(|f| f.title == "Nirvana" && f.browsable));

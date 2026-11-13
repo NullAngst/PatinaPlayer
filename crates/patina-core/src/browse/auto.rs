@@ -39,6 +39,22 @@ pub struct AutoItem {
     pub group: String,
     /// Show what's in it as a grid of covers rather than a list.
     pub grid: bool,
+    /// The picture beside it, or on its tile in a grid.
+    pub art: Option<CarArt>,
+}
+
+/// A row's picture in the car.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarArt {
+    /// One of the app's own icons, by its drawable name.
+    Icon(&'static str),
+    /// A song's cover, which stands for its album.
+    Cover(PathBuf),
+}
+
+fn icon(mut it: AutoItem, name: &'static str) -> AutoItem {
+    it.art = Some(CarArt::Icon(name));
+    it
 }
 
 fn folder(id: &str, title: &str, subtitle: impl Into<String>) -> AutoItem {
@@ -224,20 +240,14 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
         "root" => vec![
             folder("home", "Home", ""),
             folder("artists", "Artists", ""),
-            AutoItem {
-                grid: true,
-                ..folder("albums", "Albums", "")
-            },
+            folder("albums", "Albums", ""),
             folder("playlists", "Playlists", ""),
             folder("folders", "Folders", ""),
         ],
         // A car with room for four tabs: Home goes at the top of Playlists.
         "root4" => vec![
             folder("artists", "Artists", ""),
-            AutoItem {
-                grid: true,
-                ..folder("albums", "Albums", "")
-            },
+            folder("albums", "Albums", ""),
             folder("lists", "Playlists", ""),
             folder("folders", "Folders", ""),
         ],
@@ -257,10 +267,15 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
         }
         "albums" => {
             let rows = lib.albums(AlbumSort::Name).unwrap_or_default();
-            let mut v = vec![AutoItem {
-                grid: true,
-                ..folder("recent", "Recently added", "")
-            }];
+            // A list, with each album's cover beside it, or with a folder
+            // per letter; covers come as a grid once a letter's open.
+            let mut v = vec![icon(
+                AutoItem {
+                    grid: true,
+                    ..folder("recent", "Recently added", "")
+                },
+                "ic_car_recent",
+            )];
             if rows.len() <= MAX {
                 v.extend(rows.iter().map(album_item));
             } else {
@@ -296,7 +311,10 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| r.root.display().to_string()),
                     };
-                    folder(&dir_id(&r.root), &name, songs_line(r.tracks as usize))
+                    icon(
+                        folder(&dir_id(&r.root), &name, songs_line(r.tracks as usize)),
+                        "ic_car_folder",
+                    )
                 })
                 .collect()
         }
@@ -307,12 +325,12 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
             .unwrap_or_default()
             .into_iter()
             .map(|f| {
-                let sub = match f.kind {
-                    FavKind::Folder => "Folder",
-                    FavKind::Album => "Album",
-                    FavKind::Artist => "Artist",
+                let (sub, art) = match f.kind {
+                    FavKind::Folder => ("Folder", "ic_car_folder"),
+                    FavKind::Album => ("Album", "ic_car_album"),
+                    FavKind::Artist => ("Artist", "ic_car_artist"),
                 };
-                folder(&format!("fav:{}", f.id), &f.label, sub)
+                icon(folder(&format!("fav:{}", f.id), &f.label, sub), art)
             })
             .collect(),
         "mixes" => lib
@@ -380,22 +398,31 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
 
 /// What the Home tab holds: shuffle, then the short lists.
 fn home(lib: &Library) -> Vec<AutoItem> {
-    let mut v = vec![AutoItem {
-        id: "shuffle".into(),
-        title: "Shuffle everything".into(),
-        playable: true,
-        ..Default::default()
-    }];
+    let mut v = vec![icon(
+        AutoItem {
+            id: "shuffle".into(),
+            title: "Shuffle everything".into(),
+            playable: true,
+            ..Default::default()
+        },
+        "ic_car_shuffle",
+    )];
     if lib.favorites().is_ok_and(|f| !f.is_empty()) {
-        v.push(folder("favorites", "Favorites", ""));
+        v.push(icon(folder("favorites", "Favorites", ""), "ic_car_star"));
     }
-    v.push(folder("history", "Recently played", ""));
-    v.push(AutoItem {
-        grid: true,
-        ..folder("recent", "Recently added", "")
-    });
+    v.push(icon(
+        folder("history", "Recently played", ""),
+        "ic_car_history",
+    ));
+    v.push(icon(
+        AutoItem {
+            grid: true,
+            ..folder("recent", "Recently added", "")
+        },
+        "ic_car_recent",
+    ));
     if lib.saved_mixes().is_ok_and(|m| !m.is_empty()) {
-        v.push(folder("mixes", "Mixes", ""));
+        v.push(icon(folder("mixes", "Mixes", ""), "ic_car_mix"));
     }
     v
 }
@@ -408,10 +435,13 @@ fn all_playlists(lib: &Library) -> Vec<AutoItem> {
         .into_iter()
         .filter(|p| p.items > 0)
         .map(|p| {
-            folder(
-                &format!("pl:{}", p.id),
-                &p.name,
-                songs_line(p.items as usize),
+            icon(
+                folder(
+                    &format!("pl:{}", p.id),
+                    &p.name,
+                    songs_line(p.items as usize),
+                ),
+                "ic_car_playlist",
             )
         })
         .collect();
@@ -424,10 +454,13 @@ fn smart_rows(lib: &Library) -> Vec<AutoItem> {
         .unwrap_or_default()
         .into_iter()
         .map(|p| {
-            folder(
-                &format!("sp:{}", p.id),
-                &p.name,
-                format!("Smart · {}", songs_line(p.items as usize)),
+            icon(
+                folder(
+                    &format!("sp:{}", p.id),
+                    &p.name,
+                    format!("Smart · {}", songs_line(p.items as usize)),
+                ),
+                "ic_car_smart",
             )
         })
         .collect()
@@ -436,6 +469,7 @@ fn smart_rows(lib: &Library) -> Vec<AutoItem> {
 fn artist_item(a: &ArtistRow) -> AutoItem {
     AutoItem {
         grid: true,
+        art: Some(CarArt::Icon("ic_car_artist")),
         ..folder(
             &format!("artist:{}", a.name),
             &a.name,
@@ -445,7 +479,21 @@ fn artist_item(a: &ArtistRow) -> AutoItem {
 }
 
 fn album_item(a: &crate::library::AlbumRow) -> AutoItem {
-    folder(&format!("album:{}", a.key), &a.name, a.artist_line())
+    with_cover(
+        folder(&format!("album:{}", a.key), &a.name, a.artist_line()),
+        a,
+    )
+}
+
+/// An album's cover, or the album icon when it has no song to take one
+/// from. The cover itself may turn out missing; the car is sent a plain
+/// tile then (see [`car_art_file`]).
+fn with_cover(mut it: AutoItem, a: &crate::library::AlbumRow) -> AutoItem {
+    it.art = Some(match &a.cover_track {
+        Some(p) => CarArt::Cover(p.clone()),
+        None => CarArt::Icon("ic_car_album"),
+    });
+    it
 }
 
 fn artist_children(lib: &Library, name: &str) -> Vec<AutoItem> {
@@ -453,10 +501,13 @@ fn artist_children(lib: &Library, name: &str) -> Vec<AutoItem> {
         .unwrap_or_default()
         .into_iter()
         .map(|a| {
-            folder(
-                &format!("album:{}", a.key),
-                &a.name,
-                a.year.map(|y| y.to_string()).unwrap_or_default(),
+            with_cover(
+                folder(
+                    &format!("album:{}", a.key),
+                    &a.name,
+                    a.year.map(|y| y.to_string()).unwrap_or_default(),
+                ),
+                &a,
             )
         })
         .collect()
@@ -469,7 +520,7 @@ fn dir_children(lib: &Library, dir: &std::path::Path) -> Vec<AutoItem> {
     for e in entries {
         match e {
             crate::library::DirEntry::Dir { path, name } => {
-                out.push(folder(&dir_id(&path), &name, ""));
+                out.push(icon(folder(&dir_id(&path), &name, ""), "ic_car_folder"));
             }
             crate::library::DirEntry::Track(t) => tracks.push(t),
         }
@@ -477,6 +528,62 @@ fn dir_children(lib: &Library, dir: &std::path::Path) -> Vec<AutoItem> {
     out.extend(track_items(&dir_id(dir), &tracks));
     out.truncate(MAX);
     out
+}
+
+/// Where covers for the car are kept, as files the app's content
+/// provider hands it.
+pub fn car_art_dir() -> PathBuf {
+    crate::config::cache_dir().join("car-art")
+}
+
+/// A PNG of a song's cover for the car, `key` naming the file. Made the
+/// first time it's asked for, from the same caches the window uses. A
+/// cover that can't be found gets a plain tile instead, so the car doesn't
+/// draw its broken-picture sign.
+pub fn car_art_file(track: &std::path::Path, key: &str) -> Option<PathBuf> {
+    let dir = car_art_dir();
+    let out = dir.join(format!("{key}.png"));
+    if out.is_file() {
+        return Some(out);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    match crate::art::load(track, CAR_ART) {
+        Some(img) => {
+            let tmp = dir.join(format!(".{key}.part"));
+            img.save_with_format(&tmp, image::ImageFormat::Png).ok()?;
+            std::fs::rename(&tmp, &out).ok()?;
+            Some(out)
+        }
+        None => blank_tile(&dir),
+    }
+}
+
+/// Covers in the car are drawn this big.
+const CAR_ART: u32 = 320;
+
+/// The tile shown for an album with no cover: the Runout ground with a
+/// record on it.
+fn blank_tile(dir: &std::path::Path) -> Option<PathBuf> {
+    let out = dir.join("no-cover.png");
+    if out.is_file() {
+        return Some(out);
+    }
+    let n = CAR_ART;
+    let c = n as f32 / 2.0;
+    let img = image::RgbaImage::from_fn(n, n, |x, y| {
+        let r = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt() / c;
+        if r < 0.12 {
+            image::Rgba([0xb8, 0x73, 0x33, 0xff])
+        } else if r < 0.62 {
+            image::Rgba([0x1c, 0x24, 0x22, 0xff])
+        } else {
+            image::Rgba([0x2e, 0x4a, 0x45, 0xff])
+        }
+    });
+    let tmp = dir.join(".no-cover.part");
+    img.save_with_format(&tmp, image::ImageFormat::Png).ok()?;
+    std::fs::rename(&tmp, &out).ok()?;
+    Some(out)
 }
 
 /// What playing an id means.
@@ -628,6 +735,14 @@ mod tests {
         assert_eq!(lists[0].id, "shuffle");
         assert_eq!(lists[0].group, "Home");
         assert_eq!(resolve(&lib, "search:nothing here"), AutoPlay::Nothing);
+    }
+
+    #[test]
+    fn a_missing_cover_is_a_tile() {
+        let d = tempfile::tempdir().unwrap();
+        let p = blank_tile(d.path()).unwrap();
+        let img = image::open(&p).unwrap();
+        assert_eq!(img.width(), CAR_ART);
     }
 
     #[test]

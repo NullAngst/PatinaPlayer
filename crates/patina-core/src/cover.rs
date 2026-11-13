@@ -132,6 +132,13 @@ fn clear_others(stem_of: impl Fn(&str) -> PathBuf, keep: &str) {
 
 /// Save `bytes` as the cover of the album in `dir`.
 pub fn save(dir: &Path, bytes: &[u8]) -> Result<Saved, String> {
+    let saved = save_now(dir, bytes)?;
+    // The car's copies are made again, with the new one.
+    let _ = std::fs::remove_dir_all(crate::browse::auto::car_art_dir());
+    Ok(saved)
+}
+
+fn save_now(dir: &Path, bytes: &[u8]) -> Result<Saved, String> {
     let (data, ext) = prepare(bytes)?;
     let dir = crate::library::tags::album_dir(dir);
     if !crate::remote::is_remote(dir) && dir.is_dir() {
