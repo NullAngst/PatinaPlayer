@@ -176,3 +176,115 @@ fn clearing_near_the_end_drops_a_song_already_lined_up() {
     assert!(p.snapshot().track.is_none());
     p.send(Command::Quit);
 }
+
+#[test]
+fn sleep_timer_pauses_on_time_and_plays_again_after() {
+    use patina_core::player::PlayState;
+    use patina_core::sleep::SleepTimer;
+    let dir = tempfile::tempdir().unwrap();
+    let a = tone(dir.path(), "a.flac", 30.0);
+    let p = player(Arc::new(Mutex::new(Vec::new())));
+    p.send(Command::SetQueue {
+        paths: vec![a],
+        start: 0,
+    });
+    wait(&p, 10, |e| {
+        matches!(e, Event::StateChanged(PlayState::Playing))
+    });
+    let set = Instant::now();
+    p.send(Command::SetSleep(Some(SleepTimer::after(
+        Duration::from_millis(1500),
+    ))));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(p.snapshot().sleep.is_some(), "the snapshot shows the timer");
+    wait(&p, 10, |e| matches!(e, Event::SleepEnded));
+    let took = set.elapsed();
+    assert!(
+        took >= Duration::from_millis(1400) && took < Duration::from_millis(2500),
+        "paused after {took:?}"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let s = p.snapshot();
+    assert_eq!(s.state, PlayState::Paused);
+    assert!(s.sleep.is_none(), "the timer is gone once it's done");
+    // And play works again, with nothing left to stop it.
+    let at = s.position;
+    p.send(Command::Play);
+    std::thread::sleep(Duration::from_millis(800));
+    let s = p.snapshot();
+    assert_eq!(s.state, PlayState::Playing);
+    assert!(s.position > at, "playing on from where it paused");
+    p.send(Command::Quit);
+}
+
+#[test]
+fn sleep_timer_end_of_song_stops_before_the_next_one() {
+    use patina_core::player::PlayState;
+    use patina_core::sleep::SleepTimer;
+    let dir = tempfile::tempdir().unwrap();
+    let a = tone(dir.path(), "a.flac", 2.0);
+    let b = tone(dir.path(), "b.flac", 2.0);
+    let p = player(Arc::new(Mutex::new(Vec::new())));
+    p.send(Command::SetQueue {
+        paths: vec![a, b],
+        start: 0,
+    });
+    // The first song's own change of track, so only a later one counts.
+    let mut first = None;
+    wait(&p, 10, |e| match e {
+        Event::TrackChanged(Some(id)) => {
+            first = Some(*id);
+            true
+        }
+        _ => false,
+    });
+    p.send(Command::SetSleep(Some(SleepTimer::EndOfSong)));
+    let mut changed = false;
+    wait(&p, 10, |e| {
+        if matches!(e, Event::TrackChanged(Some(_))) {
+            changed = true;
+        }
+        matches!(e, Event::SleepEnded)
+    });
+    assert!(!changed, "the next song never started");
+    std::thread::sleep(Duration::from_millis(200));
+    let s = p.snapshot();
+    assert_eq!(s.state, PlayState::Paused);
+    assert_eq!(s.current, first, "still on the first song");
+    let left = s.duration.unwrap().saturating_sub(s.position);
+    assert!(
+        left < Duration::from_millis(300),
+        "{left:?} left of the song"
+    );
+    p.send(Command::Quit);
+}
+
+#[test]
+fn sleep_timer_running_out_while_paused_does_nothing() {
+    use patina_core::player::PlayState;
+    use patina_core::sleep::SleepTimer;
+    let dir = tempfile::tempdir().unwrap();
+    let a = tone(dir.path(), "a.flac", 30.0);
+    let p = player(Arc::new(Mutex::new(Vec::new())));
+    p.send(Command::SetQueue {
+        paths: vec![a],
+        start: 0,
+    });
+    wait(&p, 10, |e| {
+        matches!(e, Event::StateChanged(PlayState::Playing))
+    });
+    p.send(Command::Pause);
+    p.send(Command::SetSleep(Some(SleepTimer::after(
+        Duration::from_millis(300),
+    ))));
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(p.snapshot().sleep.is_none(), "dropped once its time passed");
+    p.send(Command::Play);
+    std::thread::sleep(Duration::from_millis(700));
+    assert_eq!(
+        p.snapshot().state,
+        PlayState::Playing,
+        "it doesn't pause later"
+    );
+    p.send(Command::Quit);
+}

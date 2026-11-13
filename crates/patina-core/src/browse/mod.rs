@@ -315,6 +315,27 @@ impl Browser {
         self.generation += 1;
     }
 
+    /// Start the sleep timer, or with `None`, turn it off, and say so.
+    pub fn set_sleep(&mut self, t: Option<crate::sleep::SleepTimer>) {
+        self.player.send(crate::player::Command::SetSleep(t));
+        match t {
+            Some(t) => self.note(t.describe()),
+            None => self.note("Sleep timer off"),
+        }
+    }
+
+    /// Read what was typed for the sleep timer and start it. Empty turns
+    /// it off.
+    pub fn set_sleep_text(&mut self, text: &str) -> Result<(), String> {
+        if text.trim().is_empty() {
+            self.set_sleep(None);
+            return Ok(());
+        }
+        let t = crate::sleep::parse(text)?;
+        self.set_sleep(Some(t));
+        Ok(())
+    }
+
     pub fn note(&mut self, msg: impl Into<String>) {
         self.notes.push(Note::Info(msg.into()));
     }

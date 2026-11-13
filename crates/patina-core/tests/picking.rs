@@ -376,6 +376,48 @@ fn smart_playlists_follow_the_library() {
     );
 }
 
+/// A song has a row per genre, so "and" between two genres means a song
+/// tagged with both, and "or" means either. When "and" finds nothing, the
+/// live check says so and shows the "or" form.
+#[test]
+fn smart_genres_and_or() {
+    let fx = fixture();
+    let b = browser(&fx);
+    let lib = b.lib.as_ref().unwrap();
+    let n = |q: &str| {
+        lib.query_count(&patina_core::library::smart::parse(q).unwrap())
+            .unwrap()
+    };
+    // "Blues Rock; Folk" is one song with both.
+    assert_eq!(n("genre is \"blues rock\" and genre is folk"), 1);
+    assert_eq!(n("genre = grunge"), 3);
+    // No song is both grunge and folk; either is all four.
+    assert_eq!(n("genre = grunge and genre = folk"), 0);
+    assert_eq!(n("genre = grunge or genre = folk"), 4);
+
+    let c = b.check_smart("genre = grunge and genre = folk");
+    assert!(c.ok);
+    assert!(
+        c.message
+            .contains("use or: genre is grunge or genre is folk"),
+        "{}",
+        c.message
+    );
+    // Found something: no hint.
+    let c = b.check_smart("genre is \"blues rock\" and genre is folk");
+    assert_eq!(c.message, "Matches 1 track");
+    // One-value fields get the hint too.
+    let c = b.check_smart("artist is nirvana and artist is someone");
+    assert!(
+        c.message.contains("artist is nirvana or artist is someone"),
+        "{}",
+        c.message
+    );
+    // Different fields, nothing found: no hint, since that's a real "and".
+    let c = b.check_smart("genre is folk and year < 1900");
+    assert!(!c.message.contains("use or"), "{}", c.message);
+}
+
 /// Smart playlist rules look a little like SQL, so they get attacked like
 /// SQL here. Every value typed in has to reach SQLite as a bound
 /// parameter, never as part of the statement, so none of these can change
@@ -952,8 +994,9 @@ fn the_car_browses_playlists_and_plays_from_a_song() {
     // Playing it from the car plays the list from that song.
     let id = songs[2].id.clone();
     b.auto_play(&id);
-    wait_queue(&b, "the playlist", |q| q.len() == 3);
-    let q = b.player.queue();
-    let cur = q.current().and_then(|c| q.position(c));
-    assert_eq!(cur, Some(2));
+    // The queue fills first and the current song is marked once it starts,
+    // so wait for both.
+    wait_queue(&b, "the playlist, from the third song", |q| {
+        q.len() == 3 && q.current().and_then(|c| q.position(c)) == Some(2)
+    });
 }

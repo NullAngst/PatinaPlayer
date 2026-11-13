@@ -64,6 +64,8 @@ enum Dlg {
     Export(bool),
     /// The path of a playlist file to read, when there's no file picker.
     ImportPath,
+    /// The sleep timer's own time.
+    Sleep,
     /// The paths, the servers offering "New playlist on…", the playlists.
     Pick(Vec<PathBuf>, Vec<String>, Vec<PlaylistRow>),
     /// Naming a new playlist on a server.
@@ -1322,6 +1324,7 @@ impl State {
         ui.set_has_track(track.is_some());
         ui.set_playing(s.state == PlayState::Playing);
         ui.set_live(s.live);
+        ui.set_sleep_label(ss(s.sleep.map(|t| t.short()).unwrap_or_default()));
         match &track {
             Some(t) => {
                 ui.set_np_title(ss(t.display_title()));
@@ -2914,6 +2917,47 @@ impl State {
         self.import_pick = Some((rx, Instant::now()));
     }
 
+    /// The sleep timer's menu: a few lengths, the end of the song, a time
+    /// of your own, or off.
+    fn sleep_act(&mut self, ui: &AppWindow, a: &str) {
+        use patina_core::sleep::SleepTimer;
+        match a {
+            "off" => self.b.set_sleep(None),
+            "end" => self.b.set_sleep(Some(SleepTimer::EndOfSong)),
+            "custom" => {
+                self.dlg = Dlg::Sleep;
+                open_text(ui, "Sleep timer", "Pause after, or at", "", None, "Start");
+                self.sleep_note(ui, "");
+            }
+            mins => {
+                if let Ok(m) = mins.parse::<u64>() {
+                    self.b
+                        .set_sleep(Some(SleepTimer::after(Duration::from_secs(m * 60))));
+                }
+            }
+        }
+    }
+
+    /// Under the sleep timer's box, as it's typed: when it would pause, or
+    /// what's wrong.
+    fn sleep_note(&self, ui: &AppWindow, text: &str) {
+        if text.trim().is_empty() {
+            ui.set_dlg_note(ss(patina_core::sleep::HELP));
+            ui.set_dlg_note_warn(false);
+            return;
+        }
+        match patina_core::sleep::parse(text) {
+            Ok(t) => {
+                ui.set_dlg_note(ss(t.describe()));
+                ui.set_dlg_note_warn(false);
+            }
+            Err(e) => {
+                ui.set_dlg_note(ss(e));
+                ui.set_dlg_note_warn(true);
+            }
+        }
+    }
+
     fn import_path_dialog(&mut self, ui: &AppWindow) {
         self.dlg = Dlg::ImportPath;
         open_text(
@@ -3256,6 +3300,15 @@ impl State {
                 }
             }
             Dlg::ImportPath => self.b.import_playlist_file(std::path::Path::new(&t1)),
+            Dlg::Sleep => {
+                if let Err(e) = self.b.set_sleep_text(&t1) {
+                    // Leave it up to fix.
+                    self.dlg = Dlg::Sleep;
+                    ui.set_dlg_note(ss(e));
+                    ui.set_dlg_note_warn(true);
+                    return;
+                }
+            }
             Dlg::ServerPlaylist(server, paths) => {
                 self.b.create_server_playlist(&server, &t1, &paths)
             }
@@ -3762,6 +3815,9 @@ pub fn install(
         if field == 2 && matches!(s.dlg, Dlg::SmartNew | Dlg::SmartEdit(_)) {
             s.smart_note(&u, text.as_str());
         }
+        if field == 1 && matches!(s.dlg, Dlg::Sleep) {
+            s.sleep_note(&u, text.as_str());
+        }
     });
     on!(on_queue_select, |s, u, i| {
         s.queue_sel = i as usize;
@@ -3839,6 +3895,7 @@ pub fn install(
         s.b.set_podcast_playback(next, s.b.podcast_trim);
     });
     on!(on_dlg_accept, |s, u| s.dlg_accept(&u));
+    on!(on_sleep_act, |s, u, a| s.sleep_act(&u, a.as_str()));
     on!(on_dlg_pick, |s, u, i| s.dlg_pick(&u, i as usize));
     on!(on_dlg_cancel, |s, u| {
         s.dlg = Dlg::None;

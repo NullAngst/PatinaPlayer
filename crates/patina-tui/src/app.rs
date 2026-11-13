@@ -98,6 +98,8 @@ pub enum InputPurpose {
     },
     /// An .m3u, .m3u8 or .pls file to read in.
     Import,
+    /// The sleep timer: a length, a time, or "end".
+    Sleep,
 }
 
 #[derive(Debug, Clone)]
@@ -592,6 +594,12 @@ impl App {
             KeyCode::Char('[') => self.b.nudge_tempo(-0.1),
             KeyCode::Char(']') => self.b.nudge_tempo(0.1),
             KeyCode::Char('z') => self.b.toggle_trim(),
+            KeyCode::Char('Z') => {
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::Sleep,
+                    buf: String::new(),
+                };
+            }
             KeyCode::Char('.') => {
                 self.follow = true;
                 if let Some(cur) = self.snap.current
@@ -1482,6 +1490,15 @@ impl App {
                 }
             }
             InputPurpose::Import => self.b.import_playlist_file(std::path::Path::new(&text)),
+            InputPurpose::Sleep => {
+                if self.b.set_sleep_text(&text).is_err() {
+                    // Keep the box up to fix it; the note says what's wrong.
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::Sleep,
+                        buf: text,
+                    };
+                }
+            }
         }
     }
 

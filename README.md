@@ -63,6 +63,7 @@ The rules look a bit like SQL, but what you type never becomes part of a databas
 - Sample rate set to Match (each album at its own rate) or a fixed rate, with three resampler qualities. Songs on one album that change rate are resampled to keep the join gapless.
 - PipeWire output with ALSA fallback on the desktop, AAudio on Android. Pick the output from the bottom bar and the song carries on from where it was.
 - Clearing the queue takes away what's coming up. The song playing finishes, then nothing plays.
+- Sleep timer: the moon in the bottom bar or on Now Playing (`Z` in the terminal app). Pick 15 minutes to an hour and a half, the end of this song, or type your own: minutes (`45`), a length (`1h30`), or a time of day (`23:30`, `11:30pm`). The volume comes down over the last 30 seconds, then it pauses, and the volume is back for the next play. It runs in the player itself, so it keeps going with the window closed or the phone's screen off. Bit-perfect gets no fade, since that would change the samples; it just pauses. The timer lasts until it runs out or you turn it off, and isn't kept when the app closes.
 
 ### The sound chain
 
@@ -421,6 +422,7 @@ HEADS UP IF YOU'VE USED THE TERMINAL APP BEFORE: Space in a list now picks the r
 | `*` | Star the selected folder, album or artist |
 | y / Y | Rate the selected song or album / the song playing |
 | [ / ], z | Podcast speed down / up, silence trimming |
+| Z | Sleep timer: a length (45, 1h30), a time (23:30) or end; empty turns it off |
 | . | Jump to the playing song in Queue |
 | Ctrl+E, Ctrl+A | The EQ, the amp stack |
 | Ctrl+O | Pick the output device |

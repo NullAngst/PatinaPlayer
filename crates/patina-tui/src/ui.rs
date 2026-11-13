@@ -95,6 +95,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::Export { queue: true } => "Export the queue as M3U8 to",
                 InputPurpose::Export { .. } => "Export as M3U8 to",
                 InputPurpose::Import => "Import an .m3u, .m3u8 or .pls file",
+                InputPurpose::Sleep if app.snap.sleep.is_some() => {
+                    "Sleep timer (empty turns it off)"
+                }
+                InputPurpose::Sleep => "Sleep timer: pause after, or at",
             };
             // Passwords show as dots.
             let shown = if matches!(purpose, InputPurpose::ServerSecret(_)) {
@@ -117,6 +121,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     } else {
                         let c = app.b.check_smart(buf);
                         (c.message, !c.ok)
+                    };
+                    draw_input_note(f, app, area, title, &shown, &note, warn);
+                }
+                // When it would pause, as it's typed, or what's wrong.
+                InputPurpose::Sleep => {
+                    let (note, warn) = if buf.trim().is_empty() {
+                        match app.snap.sleep {
+                            Some(t) => (
+                                format!("{}. Enter on empty turns it off", t.describe()),
+                                false,
+                            ),
+                            None => (patina_core::sleep::HELP.to_string(), false),
+                        }
+                    } else {
+                        match patina_core::sleep::parse(buf) {
+                            Ok(t) => (t.describe(), false),
+                            Err(e) => (e, true),
+                        }
                     };
                     draw_input_note(f, app, area, title, &shown, &note, warn);
                 }
@@ -1752,6 +1774,14 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         ));
         right.push(Span::raw(" "));
     }
+    // The sleep timer's time left.
+    if let Some(sl) = s.sleep {
+        right.push(Span::styled(
+            format!(" sleep {} ", sl.short()),
+            Style::default().fg(t.verdigris).bg(t.raised),
+        ));
+        right.push(Span::raw(" "));
+    }
     // The amp stack, lit when it's on and a device in it is.
     {
         let lit = app.b.amp_settings().changes_sound();
@@ -2232,6 +2262,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "Artists: album or track artist. Genre: albums or songs",
         ),
         ("[ ]   z", "Podcast speed, silence trimming"),
+        (
+            "Z",
+            "Sleep timer: pause after a while (45, 1h30), at a time (23:30), or at the end of the song (end)",
+        ),
         ("q", "Queue panel"),
         (".", "Go to the playing track in Queue"),
         (

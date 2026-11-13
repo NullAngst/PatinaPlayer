@@ -1,5 +1,18 @@
 # Changes
 
+2026.11.13 - Feature addition (sleep timer)
+
+* Sleep timer, from a moon button in the bottom bar and on Now Playing, or `Z` in the terminal app. Presets of 15, 30, 45, 60 and 90 minutes, the end of this song, or a time of your own: minutes, a length like 1h30, or a time of day like 23:30 or 11:30pm, with a live line saying when it will pause or what's wrong with what was typed.
+* Over the last 30 seconds the volume comes down to -40 dB, then playback pauses and the volume is back for the next play. Bit-perfect output gets no fade, only the pause.
+* "End of this song" pauses just before the song ends, or where a crossfade into the next would start, so none of the next song plays. It isn't offered for radio, which has no end.
+* The timer runs in the player thread on the wall clock, so it keeps going with the window closed, the screen off, or the phone asleep. A time that passes while playback is already paused is dropped.
+* Time left shows on Now Playing, at the top of the timer's menu and in the moon's tooltip, and in the terminal app's bottom line. "Sleep timer: paused" shows when it fires.
+* In a very narrow desktop window, the volume slider is a little shorter so the moon and the percentage both fit.
+* Tests for the timer: parsing lengths, times of day and refusals, the fade curve, pausing on time and playing again after, stopping at the end of the song before the next starts, and a time that passes while paused.
+* Fixed a race in the Android Auto test, which checked the playing song before the player had marked it.
+
+Reasons for changes: a sleep timer with a time of your own choosing was asked for. The test race turned up while running the full suite for it.
+
 2026.11.12 - UX fixes (picked-rows bar, widget theme)
 
 * The picked-rows bar takes every press that isn't on one of its buttons. A tap or long press on its "N picked" text, the gaps between buttons or its edge went through to the row underneath it.

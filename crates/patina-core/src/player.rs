@@ -72,6 +72,8 @@ pub enum Command {
     Next,
     /// Restart the track if more than 3 seconds in, otherwise go back one.
     Back,
+    /// Start the sleep timer, or with `None`, turn it off.
+    SetSleep(Option<crate::sleep::SleepTimer>),
     Seek(Duration),
     /// Relative seek in seconds, negative goes back.
     SeekBy(f64),
@@ -152,6 +154,8 @@ pub enum Event {
         info: Box<TrackInfo>,
         started: i64,
     },
+    /// The sleep timer ran out and paused playback.
+    SleepEnded,
 }
 
 /// What the frontends draw. Cloned out on every read; it's small.
@@ -199,6 +203,8 @@ pub struct Snapshot {
     pub limiting_db: f64,
     /// The playing song is resampled, from this rate to that one.
     pub resample: Option<(u32, u32)>,
+    /// The sleep timer, while it's set.
+    pub sleep: Option<crate::sleep::SleepTimer>,
 }
 
 /// The leveling gain for the bottom bar: "-4.2 dB album".
@@ -384,6 +390,10 @@ struct Core {
     /// Show nothing in the snapshot (no track, no length) until something
     /// plays again. Set when the queue is cleared.
     blank: bool,
+    /// The sleep timer, and how far its fade has brought the volume down
+    /// (1.0 is not at all).
+    sleep: Option<crate::sleep::SleepTimer>,
+    sleep_gain: f64,
 }
 
 impl Core {
@@ -460,6 +470,8 @@ impl Core {
             last_device: None,
             limit_hold: (0.0, Instant::now()),
             blank: false,
+            sleep: None,
+            sleep_gain: 1.0,
         }
     }
 
@@ -505,7 +517,71 @@ impl Core {
             self.shared.volume.store(if self.muted { 0.0 } else { 1.0 });
             return;
         }
-        self.shared.volume.store(volume_to_gain(slider));
+        self.shared
+            .volume
+            .store(volume_to_gain(slider) * self.sleep_gain);
+    }
+
+    /// Run the sleep timer: bring the volume down over its last stretch,
+    /// then pause. Called every tick.
+    fn run_sleep(&mut self) {
+        use crate::sleep::{FADE, SleepTimer};
+        let Some(timer) = self.sleep else {
+            self.set_sleep_gain(if self.state == PlayState::Playing {
+                1.0
+            } else {
+                self.sleep_gain
+            });
+            return;
+        };
+        if self.state != PlayState::Playing {
+            // Paused or stopped by hand: nothing to fade. A time that
+            // passes meanwhile is simply over.
+            if timer.remaining().is_some_and(|r| r.is_zero()) {
+                self.sleep = None;
+            }
+            return;
+        }
+        let fire = match timer {
+            SleepTimer::At(_) => {
+                let left = timer.remaining().unwrap_or_default();
+                // Bit-perfect doesn't touch the samples, so no fade there.
+                let exclusive = self
+                    .output
+                    .as_ref()
+                    .is_some_and(|o| o.exclusive().is_some());
+                if left < FADE && !exclusive {
+                    self.set_sleep_gain(crate::sleep::fade_gain(left));
+                }
+                left.is_zero()
+            }
+            SleepTimer::EndOfSong => {
+                if self.current_is_live() {
+                    false
+                } else {
+                    let length = self.segments.front().and_then(|s| s.info.duration);
+                    // Stop just short of the end, or where a crossfade into
+                    // the next song would begin, so none of it plays.
+                    let cross = Duration::from_millis(u64::from(
+                        self.shared.crossfade_ms.load(Ordering::Relaxed),
+                    ));
+                    let margin = cross.max(Duration::from_millis(80));
+                    length.is_some_and(|d| self.position() + margin >= d)
+                }
+            }
+        };
+        if fire {
+            self.sleep = None;
+            self.command(Command::Pause);
+            self.emit(Event::SleepEnded);
+        }
+    }
+
+    fn set_sleep_gain(&mut self, g: f64) {
+        if (g - self.sleep_gain).abs() > 1e-9 {
+            self.sleep_gain = g;
+            self.apply_volume();
+        }
     }
 
     /// Start the current entry over from where it is, so a changed output
@@ -814,6 +890,17 @@ impl Core {
                 }
             }
             Command::Stop => self.stop(),
+            Command::SetSleep(t) => {
+                if t == Some(crate::sleep::SleepTimer::EndOfSong) && self.current_is_live() {
+                    self.report("a live stream has no end: pick a time for the sleep timer".into());
+                    return;
+                }
+                self.sleep = t;
+                if self.state == PlayState::Playing {
+                    // A new timer, or none: the volume goes back up now.
+                    self.set_sleep_gain(1.0);
+                }
+            }
             Command::Next => {
                 let Some(cur) = self.current else { return };
                 let next = self.queue.lock().unwrap().step(cur, 1);
@@ -1251,6 +1338,7 @@ impl Core {
                 }
             }
         }
+        self.run_sleep();
         let (shuffle, repeat) = {
             let q = self.queue.lock().unwrap();
             (q.shuffle(), q.repeat)
@@ -1304,6 +1392,7 @@ impl Core {
             self.limit_hold = (gr, now);
         }
         snap.limiting_db = self.limit_hold.0;
+        snap.sleep = self.sleep;
         snap.resample = self
             .segments
             .front()

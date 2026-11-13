@@ -26,6 +26,7 @@ pub mod remote;
 pub mod scrobble;
 pub mod secrets;
 pub mod session;
+pub mod sleep;
 pub mod track;
 
 pub use audio::output::{Backend, OutputConfig};

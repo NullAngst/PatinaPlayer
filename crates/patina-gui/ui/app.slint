@@ -369,6 +369,7 @@ export global Icons {
     out property <string> prev: "M6 5h2v14H6zM20 5v14L9 12z";
     out property <string> next: "M16 5h2v14h-2zM4 5v14l11-7z";
     out property <string> play: "M7 4l13 8-13 8z";
+    out property <string> sleep: "M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z";
     out property <string> now-playing: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M10 8.5v7l5.5-3.5z";
     out property <string> pause: "M5.5 4h5v16h-5zM13.5 4h5v16h-5z";
     out property <string> volume: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11";
@@ -562,6 +563,40 @@ component Badge inherits Rectangle {
         color: root.fg;
         vertical-alignment: center;
         horizontal-alignment: center;
+    }
+}
+
+// The sleep timer: a moon that opens the timer's menu on a click (and on
+// a right-click or long press, like any menu). Lit while a timer runs.
+component SleepButton inherits Rectangle {
+    in property <bool> active;
+    // Time left, or "end of song".
+    in property <string> label;
+    // A live stream has no end, so no "End of this song".
+    in property <bool> live;
+    callback act(string);
+    width: 36px;
+    height: 36px;
+    scm := ContextMenuArea {
+        Menu {
+            if root.active: MenuItem { title: root.label == "end of song" ? "Pausing at the end of this song" : "Pausing in " + root.label; enabled: false; }
+            if root.active: MenuSeparator {}
+            MenuItem { title: "15 minutes"; activated => { root.act("15"); } }
+            MenuItem { title: "30 minutes"; activated => { root.act("30"); } }
+            MenuItem { title: "45 minutes"; activated => { root.act("45"); } }
+            MenuItem { title: "1 hour"; activated => { root.act("60"); } }
+            MenuItem { title: "1 hour 30 minutes"; activated => { root.act("90"); } }
+            if !root.live: MenuItem { title: "End of this song"; activated => { root.act("end"); } }
+            MenuItem { title: "Custom time…"; activated => { root.act("custom"); } }
+            if root.active: MenuSeparator {}
+            if root.active: MenuItem { title: "Turn off"; activated => { root.act("off"); } }
+        }
+        IconButton {
+            icon: Icons.sleep;
+            tip: root.active ? "Sleep timer: " + root.label : "Sleep timer";
+            active: root.active;
+            clicked => { scm.show({ x: 0px, y: 0px }); }
+        }
     }
 }
 
@@ -1968,11 +2003,15 @@ component NowPlayingPage inherits Rectangle {
     in property <int> love-state;
     in property <bool> lyrics-open;
     in property <bool> tight;
+    in property <bool> sleep-on;
+    in property <string> sleep-label;
+    in property <bool> live;
     callback close;
     callback rate(int);
     callback love;
     callback lyrics;
     callback queue;
+    callback sleep(string);
     property <bool> wide: self.width >= 760px;
     property <length> pad: tight ? 16px : 32px;
     background: P.bg;
@@ -1992,6 +2031,8 @@ component NowPlayingPage inherits Rectangle {
                     vertical-alignment: center;
                 }
                 Rectangle { horizontal-stretch: 1; }
+                if root.sleep-on: Badge { y: (parent.height - self.height) / 2; text: root.sleep-label; fg: P.verdigris; }
+                SleepButton { active: root.sleep-on; label: root.sleep-label; live: root.live; act(a) => { root.sleep(a); } }
                 IconButton { icon: Icons.lyrics; tip: "Lyrics"; active: root.lyrics-open; clicked => { root.lyrics(); } }
                 IconButton { icon: Icons.queue-panel; tip: "Queue"; clicked => { root.queue(); } }
                 IconButton { icon: Icons.close; tip: "Close"; clicked => { root.close(); } }
@@ -2665,6 +2706,9 @@ export component AppWindow inherits Window {
     in property <int> lyrics-current: -1;
     in property <bool> lyrics-synced;
     callback lyrics-clicked;
+    // The sleep timer: time left ("41:23", "end of song"), empty when off.
+    in property <string> sleep-label;
+    callback sleep-act(string);
     in property <image> np-art;
     in property <bool> np-has-art;
     // The Now Playing page.
@@ -3500,6 +3544,10 @@ export component AppWindow inherits Window {
                             love-state: root.love-state;
                             lyrics-open: root.lyrics-open;
                             tight: root.tight;
+                            sleep-on: root.sleep-label != "";
+                            sleep-label: root.sleep-label;
+                            live: root.live;
+                            sleep(a) => { root.sleep-act(a); keys.focus(); }
                             close => { root.np-open = false; keys.focus(); }
                             rate(n) => { root.np-rate(n); keys.focus(); }
                             love => { root.love-clicked(); keys.focus(); }
@@ -3849,6 +3897,17 @@ export component AppWindow inherits Window {
                             text: root.output-label;
                             clicked => { root.output-clicked(); }
                         }
+                        // Lit while a timer runs; the time left is in its
+                        // tooltip, at the top of its menu, and on Now
+                        // Playing. A badge here would squeeze the output
+                        // chip.
+                        SleepButton {
+                            y: (parent.height - self.height) / 2;
+                            active: root.sleep-label != "";
+                            label: root.sleep-label;
+                            live: root.live;
+                            act(a) => { root.sleep-act(a); keys.focus(); }
+                        }
                         IconButton {
                             y: (parent.height - self.height) / 2;
                             icon: Icons.lyrics;
@@ -3881,7 +3940,9 @@ export component AppWindow inherits Window {
                             }
                         }
                         if !Ui.touch: Bar {
-                            width: root.tiny ? 64px : (root.tight ? 80px : 96px);
+                            // Tiny: a little shorter, so the sleep timer's
+                            // moon and the percentage both fit.
+                            width: root.tiny ? 48px : (root.tight ? 80px : 96px);
                             y: (parent.height - self.height) / 2;
                             label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
                             value: root.volume-locked ? 1.0 : root.volume;

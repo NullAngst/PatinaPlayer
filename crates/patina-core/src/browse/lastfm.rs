@@ -183,6 +183,8 @@ impl Browser {
                     }
                 }
                 Event::NowPlaying(title) => self.radio_title(title),
+                // Not Last.fm's, but this is where the player's events land.
+                Event::SleepEnded => self.note("Sleep timer: paused"),
                 _ => {}
             }
         }
