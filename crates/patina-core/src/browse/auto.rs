@@ -297,7 +297,7 @@ pub fn children(lib: &Library, parent: &str) -> Vec<AutoItem> {
             .map(album_item)
             .collect(),
         "folders" => {
-            let roots = lib.sources().unwrap_or_default();
+            let roots = lib.browse_roots().unwrap_or_default();
             // One folder: straight into it, rather than a list of one.
             if let [only] = roots.as_slice() {
                 return dir_children(lib, &only.root);

@@ -21,6 +21,10 @@ pub enum Key {
     Watch,
     /// Save a copy of the library database somewhere.
     BackupLibrary,
+    /// Which source browsing shows.
+    Scope,
+    /// Which source an album shared by several comes from.
+    SourceOrder,
     Theme,
     /// The GUI's sidebar with the window wider than it's tall.
     SidebarLandscape,
@@ -359,10 +363,10 @@ pub fn group_of(kind: ServerKind) -> &'static str {
 /// read differently there.
 pub const PLEX_STREAM_CHOICES: [(&str, &str); 6] = [
     ("raw", "Original file"),
-    ("opus:96", "AAC 96 kbps"),
-    ("opus:128", "AAC 128 kbps"),
-    ("opus:192", "AAC 192 kbps"),
-    ("mp3:192", "MP3 192 kbps"),
+    ("opus:96", "Opus 96 kbps"),
+    ("opus:128", "Opus 128 kbps"),
+    ("opus:192", "Opus 192 kbps"),
+    ("opus:256", "Opus 256 kbps"),
     ("mp3:320", "MP3 320 kbps"),
 ];
 
@@ -499,6 +503,36 @@ pub fn rows(
                 label: "Watch for changes".into(),
                 help: "Pick up added, changed and removed files while the player runs.",
                 control: Control::Toggle(cfg.library.watch),
+            },
+        );
+        let picks = super::scope::picks(cfg);
+        push(
+            "Library",
+            Setting {
+                disabled: None,
+                key: Key::Scope,
+                label: "Browse".into(),
+                help: "Which source Artists, Albums, Songs, Genres, Folders, search, smart playlists and mixes show. The queue and playlists always show everything.",
+                control: Control::Choice {
+                    index: picks
+                        .iter()
+                        .position(|p| p == &cfg.library.scope)
+                        .unwrap_or(0),
+                    options: picks.iter().map(|p| (p.to_config(), p.label())).collect(),
+                },
+            },
+        );
+        push(
+            "Library",
+            Setting {
+                disabled: None,
+                key: Key::SourceOrder,
+                label: "Source order".into(),
+                help: "With all sources shown, an album more than one source has shows once, from the first of these. Comma separated: local, a kind of server (plex, subsonic, ampache, dlna) or a server's name. Sources not listed follow.",
+                control: Control::Text {
+                    value: cfg.library.source_order.join(", "),
+                    empty: "local, plex",
+                },
             },
         );
         push(

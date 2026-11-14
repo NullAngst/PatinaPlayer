@@ -158,6 +158,18 @@ pub fn outside_action(a: &str) {
     ACTIONS.lock().unwrap().push(a.to_string());
 }
 
+/// The system bars' sizes in pixels (left, top, right, bottom), from
+/// Android, which tells the window to keep clear of them.
+static INSETS: Mutex<[i32; 4]> = Mutex::new([0; 4]);
+
+pub fn set_insets(px: [i32; 4]) {
+    *INSETS.lock().unwrap() = px.map(|v| v.max(0));
+}
+
+pub fn insets() -> [i32; 4] {
+    *INSETS.lock().unwrap()
+}
+
 pub fn take_outside_actions() -> Vec<String> {
     std::mem::take(&mut *ACTIONS.lock().unwrap())
 }

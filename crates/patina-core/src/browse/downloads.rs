@@ -108,6 +108,7 @@ impl Browser {
             })
             .map(|s| s.name.clone())
             .collect();
+        self.scope_servers_away(offline.iter().cloned().collect());
         let kept = self.cache.as_ref().map(|c| c.stored()).unwrap_or_default();
         let before = self.avail.any_offline();
         self.avail = match &self.lib {

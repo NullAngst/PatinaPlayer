@@ -1056,6 +1056,7 @@ impl App {
                 }
             }
             KeyCode::Char('o') => self.b.cycle_sort(),
+            KeyCode::Char('B') => self.b.cycle_scope(),
             KeyCode::Char('O') => self.b.reverse_songs(),
             KeyCode::Char('t') => self.b.toggle_mode(),
 

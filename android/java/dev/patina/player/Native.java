@@ -130,6 +130,9 @@ final class Native {
      */
     static native void backPressed(int edge);
 
+    /** The system bars' sizes in pixels, as they change. */
+    static native void insets(int left, int top, int right, int bottom);
+
     /** Keeps this class, so Rust's threads can find it. */
     static native void nativeInit();
 

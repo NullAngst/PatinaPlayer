@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.View;
+import android.view.WindowInsets;
 import android.window.BackEvent;
 import android.window.OnBackAnimationCallback;
 import android.window.OnBackInvokedCallback;
@@ -36,6 +38,31 @@ public class MainActivity extends NativeActivity {
         super.onCreate(state);
         askPermissions();
         catchBack();
+        reportInsets();
+    }
+
+    /**
+     * The status and navigation bars' sizes, for the Rust side to keep
+     * buttons out from under them. The app draws edge to edge (Android 15
+     * makes it), and what Slint learns of the bars on its own can come up
+     * short, which put the system's back, home and recents buttons over
+     * Now Playing's lowest row. Sent on every change: rotation, a gesture
+     * bar switched for buttons.
+     */
+    private void reportInsets() {
+        View decor = getWindow().getDecorView();
+        decor.setOnApplyWindowInsetsListener((v, insets) -> {
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets i = insets.getInsets(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                Native.insets(i.left, i.top, i.right, i.bottom);
+            } else {
+                Native.insets(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                    insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            }
+            return v.onApplyWindowInsets(insets);
+        });
+        decor.requestApplyInsets();
     }
 
     /**

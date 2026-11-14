@@ -107,6 +107,12 @@ impl PartReader {
         })
     }
 
+    /// The download this reads from, so a failure to open can say why the
+    /// download stopped rather than what the decoder made of it.
+    pub fn progress(&self) -> Arc<Progress> {
+        self.progress.clone()
+    }
+
     /// The song's length. With it (and the file's size), a stall waits for
     /// seconds of the song instead of a fixed number of bytes, and knows
     /// whether the download keeps up.

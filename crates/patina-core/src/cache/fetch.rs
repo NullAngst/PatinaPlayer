@@ -323,32 +323,57 @@ fn hls_resolve(playlist: &url::Url, line: &str) -> Option<url::Url> {
     Some(u)
 }
 
-/// What a playlist lists: variants (a master playlist) or segments, and
-/// whether it's complete.
-fn hls_parse(base: &url::Url, text: &str) -> (Vec<url::Url>, Vec<url::Url>, bool) {
-    let mut variants = Vec::new();
-    let mut segments = Vec::new();
+/// What a playlist lists.
+#[derive(Debug, Default)]
+struct HlsList {
+    /// A master playlist's playlists.
+    variants: Vec<url::Url>,
+    segments: Vec<url::Url>,
+    /// The init segment (`#EXT-X-MAP`) fragmented MP4 needs first: Opus
+    /// from Plex comes this way.
+    init: Option<url::Url>,
+    /// Complete: the server has finished converting.
+    ended: bool,
+}
+
+/// The URI="..." of a tag's attributes.
+fn hls_uri(attrs: &str) -> Option<&str> {
+    let at = attrs.find("URI=\"")? + 5;
+    let rest = &attrs[at..];
+    Some(&rest[..rest.find('"')?])
+}
+
+fn hls_parse(base: &url::Url, text: &str) -> HlsList {
+    let mut list = HlsList {
+        ended: text.contains("#EXT-X-ENDLIST"),
+        ..HlsList::default()
+    };
     let mut next_is_variant = false;
     for line in text.lines().map(str::trim) {
         if line.starts_with("#EXT-X-STREAM-INF") {
             next_is_variant = true;
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-MAP:") {
+            if list.init.is_none() {
+                list.init = hls_uri(attrs).and_then(|u| hls_resolve(base, u));
+            }
         } else if line.is_empty() || line.starts_with('#') {
             continue;
         } else if let Some(u) = hls_resolve(base, line) {
             if next_is_variant || line.contains(".m3u8") {
-                variants.push(u);
+                list.variants.push(u);
             } else {
-                segments.push(u);
+                list.segments.push(u);
             }
             next_is_variant = false;
         }
     }
-    (variants, segments, text.contains("#EXT-X-ENDLIST"))
+    list
 }
 
 /// Download an HLS stream's segments, in order, into one file. MPEG-TS
-/// segments joined end to end are a file FFmpeg plays. Can't resume: the
-/// server transcodes afresh each time.
+/// segments joined end to end are a file FFmpeg plays, and so are
+/// fragmented MP4 ones after their init segment. Can't resume: the server
+/// transcodes afresh each time.
 fn fetch_hls(
     http: &reqwest::blocking::Client,
     url: &str,
@@ -372,8 +397,7 @@ fn fetch_hls(
     // A master playlist points at the real one.
     for _ in 0..3 {
         let text = get_text(&playlist)?;
-        let (variants, _, _) = hls_parse(&playlist, &text);
-        match variants.into_iter().next() {
+        match hls_parse(&playlist, &text).variants.into_iter().next() {
             Some(v) => playlist = v,
             None => break,
         }
@@ -383,11 +407,23 @@ fn fetch_hls(
     progress.done.store(0, Ordering::Release);
     let mut fetched = 0usize;
     let mut idle = 0;
+    let mut have_init = false;
     loop {
         let text = get_text(&playlist)?;
-        let (_, segments, ended) = hls_parse(&playlist, &text);
+        let HlsList {
+            segments,
+            init,
+            ended,
+            ..
+        } = hls_parse(&playlist, &text);
+        let init = init.filter(|_| !have_init);
+        have_init |= init.is_some();
         let new = segments.len().saturating_sub(fetched);
-        for seg in segments.iter().skip(fetched) {
+        for (is_init, seg) in init
+            .iter()
+            .map(|u| (true, u))
+            .chain(segments.iter().skip(fetched).map(|u| (false, u)))
+        {
             if stop.load(Ordering::Relaxed) {
                 file.flush()?;
                 return Ok(Outcome::Stopped);
@@ -397,7 +433,8 @@ fn fetch_hls(
                 .send()
                 .map_err(|e| FetchError::Http(e.without_url().to_string()))?;
             if !resp.status().is_success() {
-                return Err(FetchError::Http(format!("segment: HTTP {}", resp.status())));
+                let what = if is_init { "init segment" } else { "segment" };
+                return Err(FetchError::Http(format!("{what}: HTTP {}", resp.status())));
             }
             let mut buf = vec![0u8; 64 * 1024];
             loop {
@@ -411,7 +448,7 @@ fn fetch_hls(
                 done += n as u64;
                 progress.done.store(done, Ordering::Release);
             }
-            fetched += 1;
+            fetched += usize::from(!is_init);
         }
         if ended {
             break;
@@ -491,7 +528,12 @@ mod tests {
         )
         .unwrap();
         let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nsession/abc/base/index.m3u8\n";
-        let (v, s, end) = hls_parse(&base, master);
+        let HlsList {
+            variants: v,
+            segments: s,
+            ended: end,
+            ..
+        } = hls_parse(&base, master);
         assert_eq!(v.len(), 1);
         assert!(s.is_empty() && !end);
         assert!(v[0].as_str().starts_with(
@@ -502,10 +544,21 @@ mod tests {
                 .any(|(k, val)| k == "X-Plex-Token" && val == "T")
         );
         let list = "#EXTM3U\n#EXTINF:10,\n00000.ts\n#EXTINF:10,\n00001.ts\n#EXT-X-ENDLIST\n";
-        let (v, s, end) = hls_parse(&v[0], list);
-        assert!(v.is_empty() && end);
-        assert_eq!(s.len(), 2);
-        assert!(s[1].path().ends_with("/session/abc/base/00001.ts"));
+        let l = hls_parse(&v[0], list);
+        assert!(l.variants.is_empty() && l.ended && l.init.is_none());
+        assert_eq!(l.segments.len(), 2);
+        assert!(l.segments[1].path().ends_with("/session/abc/base/00001.ts"));
+        // Fragmented MP4 (Opus): the init segment, with the token carried.
+        let fmp4 = "#EXTM3U\n#EXT-X-MAP:URI=\"header\"\n#EXTINF:10,\n00000.m4s\n";
+        let l = hls_parse(&v[0], fmp4);
+        let init = l.init.unwrap();
+        assert!(init.path().ends_with("/session/abc/base/header"));
+        assert!(
+            init.query_pairs()
+                .any(|(k, val)| k == "X-Plex-Token" && val == "T")
+        );
+        assert_eq!(l.segments.len(), 1);
+        assert!(!l.ended);
         assert!(is_hls(base.as_str()));
         assert!(!is_hls("http://x/library/parts/1/2/file.flac"));
     }

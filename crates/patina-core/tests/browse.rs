@@ -101,6 +101,7 @@ fn browser(fx: &Fixture) -> Browser {
             library: patina_core::config::LibraryConfig {
                 folders: vec![fx.root.clone()],
                 watch: false,
+                ..Default::default()
             },
             ..Config::default()
         },
@@ -130,6 +131,34 @@ fn setting(b: &mut Browser, key: Key) -> String {
             _ => None,
         })
         .unwrap()
+}
+
+#[test]
+fn source_scope() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Albums);
+    assert_eq!(items(&b).len(), 2);
+    assert!(b.select(0));
+    assert!(matches!(b.activate(), Activated::Opened));
+    // A server with nothing synced: the browsing views empty out, and the
+    // album that was open closes back to the list.
+    b.set_scope(patina_core::library::scope::Pick::Server("Nowhere".into()));
+    assert_eq!(b.depth(), 1);
+    assert!(items(&b).is_empty());
+    b.switch(Section::Artists);
+    assert!(items(&b).is_empty());
+    let saved = std::fs::read_to_string(&fx.config).unwrap();
+    assert!(saved.contains("scope = \"server:Nowhere\""), "{saved}");
+    // Local shows the folders again, and Settings says so.
+    b.set_scope(patina_core::library::scope::Pick::Local);
+    assert_eq!(items(&b).len(), 2);
+    assert_eq!(setting(&mut b, Key::Scope), "Local");
+    // Stepping through: all, local, then round again.
+    b.cycle_scope();
+    assert_eq!(*b.scope(), patina_core::library::scope::Pick::All);
+    b.change_setting(&Key::SourceOrder, Change::Set("plex, local".into()));
+    assert_eq!(setting(&mut b, Key::SourceOrder), "plex, local");
 }
 
 #[test]

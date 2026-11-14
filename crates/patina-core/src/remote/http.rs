@@ -12,6 +12,10 @@ pub fn client() -> Result<reqwest::blocking::Client> {
         .connect_timeout(Duration::from_secs(10))
         // Big libraries make for slow first pages on small servers.
         .timeout(Duration::from_secs(60))
+        // Let go of idle connections before a server or a phone's network
+        // drops them: reusing a dead one fails the next request.
+        .pool_idle_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Duration::from_secs(30))
         .build()
         .map_err(|e| RemoteError::Http(e.to_string()))
 }

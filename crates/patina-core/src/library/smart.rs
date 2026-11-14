@@ -1381,7 +1381,7 @@ impl Library {
     /// The songs a query matches, in its order.
     pub fn query_tracks(&self, q: &Query, salt: i64) -> Result<Vec<TrackRow>> {
         let (clause, args) = self.smart_sql(q);
-        let mut rows = self.tracks_where(&clause, rusqlite::params_from_iter(args))?;
+        let mut rows = self.scoped_where(&clause, rusqlite::params_from_iter(args))?;
         if q.sort.is_some_and(|(k, _)| k == SortKey::Random) {
             shuffle(
                 &mut rows,
@@ -1420,7 +1420,7 @@ impl Library {
         };
         let clause = where_clause(&mut sql, q);
         let n: i64 = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks {clause}"),
+            &format!("SELECT COUNT(*) FROM {} {clause}", self.tracks_t()),
             rusqlite::params_from_iter(sql.args),
             |r| r.get(0),
         )?;

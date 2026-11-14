@@ -385,6 +385,12 @@ impl Browser {
             let _ = config::set_listenbrainz_mode(&self.config_path, &cfg.name, m);
             self.config.listenbrainz.servers.insert(cfg.name.clone(), m);
         }
+        // So does the source being browsed.
+        if let Some(old) = replaces.as_ref().filter(|o| **o != cfg.name)
+            && self.config.library.scope == crate::library::scope::Pick::Server(old.clone())
+        {
+            self.set_scope(crate::library::scope::Pick::Server(cfg.name.clone()));
+        }
         if let Some(c) = &self.cache {
             // Kept songs and pins follow a renamed server, before the old
             // name is forgotten.
@@ -457,6 +463,9 @@ impl Browser {
             }
         }
         self.servers.retain(|s| s.name != name);
+        if self.config.library.scope == crate::library::scope::Pick::Server(name.to_string()) {
+            self.set_scope(crate::library::scope::Pick::All);
+        }
         self.note(format!("Removed {name}"));
         self.rebuild_sidebar();
         self.refresh_section(Section::Settings);

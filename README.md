@@ -14,6 +14,7 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 - **DLNA servers** (MiniDLNA, Gerbera, Jellyfin, Plex, Serviio, Twonky, most NAS boxes). Find DLNA servers asks the network who's there. No address to type, no login.
 - **Icecast servers**: give it the address, and every live stream on it plays like a radio station, listed on its page and in Radio, and read again every five minutes so streams that start or stop come and go.
 - Each kind has its own page in the sidebar under Sources (Plex, Subsonic & Ampache, DLNA, Icecast, and Snapcast for the rooms you play to), where they're added, synced, edited and removed. Settings keeps the rest.
+- **One source or all of them.** The picker at the top of the sidebar (in the drawer on a phone) picks what Artists, Albums, Songs, Genres, Folders, search, smart playlists and mixes show: All sources, Local, or one server. The queue and your playlists always show everything. With All sources, an album more than one source has shows once, from the first source in Settings, Library, Source order (local first, then Plex, then the rest, unless you change it). When that source can't be reached, the album shows from the next one that has it. Mixes keep every copy and play whichever can play. Android Auto shows the same source. In the terminal app `B` steps through them and the status bar says which.
 - Server playlists, play queues (Subsonic), radio stations and podcasts come across too. Changes to a server playlist go back to the server.
 - Ratings sync both ways with Subsonic, Ampache and Plex; starred albums and artists with Subsonic and Ampache.
 - Passwords live in the desktop keyring (KWallet, GNOME Keyring) through the Secret Service API, never in the config file. With no keyring (a TTY, SSH, a phone) they go in a file only you can read, and the app says so.
@@ -111,10 +112,12 @@ Plex is a server kind like the others: its music libraries are copied into the i
 
 - **Signing in.** On the Plex page, Sign in shows a four-character code. Enter it at plex.tv/link on any device, signed in to Plex there. The app never sees your Plex password. It then lists the servers on your account (your own and ones shared with you) to add. Following Plex's docs, the app makes its own Ed25519 key, sends the public half with the code, and gets a Plex JWT back. That token lasts 7 days, and the app swaps it for a new one a day before it runs out, signing with the key. Plex allows that even after it has run out, so being away for a month is fine. The key and tokens live in the keyring. Add by hand takes a server address and a classic X-Plex-Token instead, without plex.tv.
 - **Finding the server.** plex.tv lists every address the server has. The app tries the one that worked last, then the local ones, then the internet ones, then Plex's relay, and keeps the first that answers as that server.
-- **Playing.** Songs stream as the original file, so bit-perfect and gapless work as with local files. Set a server's streaming to a conversion and Plex's own transcoder makes it (AAC, or MP3 for the MP3 choices), which the cache downloads and keeps like any other.
+- **Playing.** Songs stream as the original file, so bit-perfect and gapless work as with local files. Set a server's streaming to a conversion and Plex's own transcoder makes it: Opus at 96 to 256 kbps, the codec Plex's own players get, or MP3 320 for older gear. The cache downloads it and keeps it like any other.
+- **When a song won't play,** the note says why the download failed (the server's answer, or the connection dropping) rather than the decoder's "I/O error".
 - **Ratings** go both ways (Plex counts out of ten, so a star is two).
 - **Plays and Now Playing.** While a song plays, the app tells Plex where it is every ten seconds and whenever it pauses, resumes or stops, the way Plex's own players do. That puts PatinaPlayer on Plex's dashboard, and Plex counts the play once the song gets near its end, so "most played" and history in Plex stay right.
-- **Playlists** come across, and changes to yours go back. Plex's smart playlists come across too, read-only, and are read again every half hour since their songs change on their own.
+- **Playlists** come across, and changes to yours go back. One that won't load is skipped, the rest still come across, and the note says which and why.
+- **Staying connected.** The app checks the server every 30 seconds. A missed check is asked again on a fresh connection before the server shows as offline, and a call that drops halfway is tried once more, so a phone moving between Wi-Fi and mobile data doesn't knock it offline. Plex's smart playlists come across too, read-only, and are read again every half hour since their songs change on their own.
 - **Plex Pass features**, a switch per server, off by default: mixes from Plex's sonic analysis (songs that sound alike, rather than Last.fm's or genre tags' idea of alike), lyrics from Plex, and loudness from Plex's analysis, so leveling doesn't have to measure every song. They need Plex Pass on the server's owner's account; the row says when the server doesn't have it. With the switch off, or no Plex Pass, mixes, lyrics and leveling work the way they do for every other server.
 
 ### Servers on a slow line
@@ -323,6 +326,8 @@ Everything is in `~/.config/patinaplayer/config.toml`, and every option can be c
 [library]
 folders = ["~/Music", "/mnt/storage/music"]
 watch = true             # pick up changes while running
+scope = "all"            # what browsing shows: "all", "local" or "server:Name"
+source_order = "local, plex"  # with all shown, who an album shared by sources comes from
 
 [output]
 backend = "auto"         # auto, pipewire, alsa or null
@@ -494,6 +499,7 @@ HEADS UP IF YOU'VE USED THE TERMINAL APP BEFORE: Space in a list now picks the r
 | Ctrl+P | Send the selection, the picked rows or the whole view to the iPod |
 | < / > | Import a playlist file / export the selection or view as M3U8 |
 | o / O | Sort Albums or Songs / reverse Songs |
+| B | Browse the next source: All sources, Local, each server |
 | t | Artists: album or track artist. Genres: albums or songs |
 | f / F | Keep the selection / the whole view offline, or stop |
 | X | Mix from the selection: an artist, album, song, or the marked genres |
@@ -544,6 +550,7 @@ To time indexing on your own collection: `cargo run --release -p patina-core --e
 - Bit-perfect needs the DAC to take the file's own format; nothing is converted to make it fit. Going between songs of different formats reopens the card, so there's a short gap. Same-format songs stay gapless.
 - With the sample rate on Match, the output reopens between albums at different rates, a short gap on purpose. Set a fixed rate if you'd rather never have it.
 - The amp stack costs CPU: about 4% of one core for a typical preset at 4x oversampling, roughly double at 8x.
+- The source picker hides albums by artist and album name. Two copies named differently (a deluxe edition on one server, the plain one locally) both show.
 - A song streaming as a conversion (Opus or MP3) has no known size until it's done, so a seek past what's downloaded waits for the download to get there. The original file seeks straight away.
 - One download runs at a time, so the most urgent one gets the whole line. A big pinned library on a slow line takes a while.
 - DLNA sources are songs only: DLNA has no playlists, queues, ratings or stars to reach, and no way to tell the server about plays. Finding DLNA servers needs multicast, so one on another subnet or behind a VPN has to go in the config by its description address.

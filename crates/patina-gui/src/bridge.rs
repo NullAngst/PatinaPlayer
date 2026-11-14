@@ -59,6 +59,8 @@ enum Dlg {
     RenameServer(String),
     /// Picking one of the DLNA servers a search found.
     Dlna(Vec<patina_core::remote::dlna::Found>),
+    /// Picking the source to browse.
+    Scope(Vec<patina_core::library::scope::Pick>),
     /// The Plex sign-in code, and plex.tv/link with it filled in.
     PlexCode(String),
     /// Servers on the Plex account, by machine id.
@@ -172,6 +174,8 @@ pub struct State {
     dlg: Dlg,
     /// The Plex sign-in as last shown.
     plex_shown: u64,
+    /// Android's system bars as last set, in pixels.
+    insets: [i32; 4],
     /// A backup on its way through the save dialog: a note, or an error.
     backup: Option<crossbeam_channel::Receiver<Result<Option<String>, String>>>,
     /// The Back being handled came from a swipe in from the left.
@@ -462,6 +466,7 @@ impl State {
             follow: true,
             dlg: Dlg::None,
             plex_shown: 0,
+            insets: [0; 4],
             backup: None,
             back_from_left: Rc::default(),
             toast_until: None,
@@ -1433,6 +1438,7 @@ impl State {
     }
 
     fn sync_side(&mut self, ui: &AppWindow) {
+        ui.set_scope_label(ss(self.b.scope().label()));
         let icons = ui.global::<Icons>();
         let kawaii = self.b.config.appearance.theme.is_kawaii();
         let np = ui.get_np_open();
@@ -1934,6 +1940,7 @@ impl State {
             self.open_dlna(ui, found);
         }
         self.sync_plex_sign_in(ui);
+        self.sync_insets(ui);
         self.poll_backup();
         self.sync_window_size(ui);
         let look = &self.b.config.appearance;
@@ -2291,11 +2298,19 @@ impl State {
             value: ui.get_dlg_text1().to_string(),
             secret: false,
         }];
-        if ui.get_dlg_two_fields() || ui.get_dlg_four_fields() {
+        if ui.get_dlg_two_fields() || ui.get_dlg_three_fields() || ui.get_dlg_four_fields() {
             fields.push(PromptField {
                 label: ui.get_dlg_label2().to_string(),
                 value: ui.get_dlg_text2().to_string(),
                 secret: false,
+            });
+        }
+        // Three fields: the third is a token when it's Plex's.
+        if ui.get_dlg_three_fields() && !ui.get_dlg_four_fields() {
+            fields.push(PromptField {
+                label: ui.get_dlg_label3().to_string(),
+                value: ui.get_dlg_text3().to_string(),
+                secret: matches!(self.dlg, Dlg::AddPlex),
             });
         }
         if ui.get_dlg_four_fields() {
@@ -2606,6 +2621,21 @@ impl State {
                 Err(e) => self.b.error(e),
             }
         }
+    }
+
+    /// Android's system bars, in the window's own units.
+    fn sync_insets(&mut self, ui: &AppWindow) {
+        let px = platform::insets();
+        if px == self.insets {
+            return;
+        }
+        self.insets = px;
+        let scale = ui.window().scale_factor().max(0.1);
+        let l = |v: i32| v as f32 / scale;
+        ui.set_sys_left(l(px[0]));
+        ui.set_sys_top(l(px[1]));
+        ui.set_sys_right(l(px[2]));
+        ui.set_sys_bottom(l(px[3]));
     }
 
     fn open_add_plex(&mut self, ui: &AppWindow) {
@@ -2998,6 +3028,24 @@ impl State {
         ui.set_dlg_new_first(false);
         self.dlg = Dlg::RemoteQueue(q.items.iter().map(|i| i.id).collect());
         ui.set_dialog(2);
+    }
+
+    /// The sidebar's source picker: all sources, local, each server.
+    fn pick_scope(&mut self, ui: &AppWindow) {
+        let picks = self.b.scope_choices();
+        let now = self.b.scope().clone();
+        let items = picks.iter().map(|p| {
+            ss(if *p == now {
+                format!("{}   (current)", p.label())
+            } else {
+                p.label()
+            })
+        });
+        set_strings(&self.dlg_items, items);
+        ui.set_dlg_title(ss("Browse which source?"));
+        ui.set_dlg_new_first(false);
+        ui.set_dialog(2);
+        self.dlg = Dlg::Scope(picks);
     }
 
     /// Where the sound goes, from the output chip: the devices there are
@@ -4857,6 +4905,7 @@ impl State {
             Dlg::Pick(..)
             | Dlg::Choose(_)
             | Dlg::Dlna(_)
+            | Dlg::Scope(_)
             | Dlg::Help
             | Dlg::Covers
             | Dlg::Cast(_)
@@ -4924,6 +4973,16 @@ impl State {
                 let id = id.clone();
                 self.b.add_plex_choice(&id);
             }
+            return;
+        }
+        if let Dlg::Scope(picks) = &self.dlg {
+            if let Some(p) = picks.get(i) {
+                let p = p.clone();
+                self.b.set_scope(p);
+            }
+            self.dlg = Dlg::None;
+            ui.set_dialog(0);
+            ui.invoke_focus_root();
             return;
         }
         if let Dlg::Dlna(found) = &self.dlg {
@@ -5549,6 +5608,8 @@ pub fn install(
     // A tap in the sidebar always shows the top of the view, even when the
     // view is the one already open: that's how you get the breadcrumbs back
     // after the page scrolled them away.
+    on!(on_pick_scope, |s, u| s.pick_scope(&u));
+
     on!(on_side_clicked, |s, u, i| {
         if i < SIDE_EXTRA {
             u.set_np_open(true);

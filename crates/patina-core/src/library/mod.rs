@@ -13,6 +13,7 @@ pub mod playlist_io;
 pub mod podcasts;
 pub mod scan;
 mod schema;
+pub mod scope;
 pub mod scrobbles;
 pub mod service;
 pub mod smart;
@@ -509,7 +510,37 @@ pub struct SearchResults {
 
 pub struct Library {
     pub(crate) conn: Connection,
+    /// Whether this connection's browsing is scoped, and to what.
+    scope_own: std::sync::Mutex<ScopeMode>,
+    /// What the albums in scope were last worked out from: the scope's
+    /// generation, the database's version as other connections left it,
+    /// this connection's own changes, and whether anything is hidden.
+    scope_seen: std::sync::Mutex<Option<ScopeSeen>>,
 }
+
+/// Background work (syncs, the cache, scrobbling) sees everything, so a
+/// connection is scoped only when asked.
+#[derive(Clone, Default)]
+enum ScopeMode {
+    #[default]
+    Off,
+    /// The process-wide scope, for the car's browsing.
+    Follow,
+    /// The process-wide pick, without hiding albums shared by sources:
+    /// mixes, which choose one playable copy of each song themselves.
+    FollowPick,
+    Own(scope::Scope),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScopeSeen {
+    generation: u64,
+    data_version: i64,
+    changes: u64,
+    filtered: bool,
+}
+
+static OWN_SCOPE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 40);
 
 /// Sort tracks the way an album plays: disc, track number, then file name.
 pub fn album_order(a: &TrackRow, b: &TrackRow) -> std::cmp::Ordering {
@@ -539,7 +570,125 @@ impl Library {
         let mut conn = Connection::open(path)?;
         schema::configure(&conn)?;
         schema::migrate(&mut conn)?;
-        Ok(Self { conn })
+        Ok(Self::with(conn))
+    }
+
+    fn with(conn: Connection) -> Self {
+        Self {
+            conn,
+            scope_own: std::sync::Mutex::new(ScopeMode::Off),
+            scope_seen: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Scope this connection's browsing to `s`.
+    pub fn set_scope(&self, s: scope::Scope) {
+        self.set_mode(ScopeMode::Own(s));
+    }
+
+    /// Scope this connection's browsing the way the app's window is.
+    pub fn follow_scope(&self) {
+        self.set_mode(ScopeMode::Follow);
+    }
+
+    /// Follow the window's source, but with all sources keep every copy.
+    pub fn follow_scope_pick(&self) {
+        self.set_mode(ScopeMode::FollowPick);
+    }
+
+    fn set_mode(&self, m: ScopeMode) {
+        *self.scope_own.lock().unwrap_or_else(|e| e.into_inner()) = m;
+        *self.scope_seen.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// What this connection browses. Everything, unscoped.
+    pub fn scope(&self) -> scope::Scope {
+        match &*self.scope_own.lock().unwrap_or_else(|e| e.into_inner()) {
+            ScopeMode::Off => scope::Scope::default(),
+            ScopeMode::Follow | ScopeMode::FollowPick => scope::global(),
+            ScopeMode::Own(s) => s.clone(),
+        }
+    }
+
+    /// Whether browsing reads through the scoped views, working out what's
+    /// in scope again first if the scope or the library changed.
+    fn scoped(&self) -> bool {
+        let generation = match &*self.scope_own.lock().unwrap_or_else(|e| e.into_inner()) {
+            ScopeMode::Off => return false,
+            ScopeMode::Own(_) => OWN_SCOPE_GEN.load(std::sync::atomic::Ordering::Relaxed),
+            ScopeMode::Follow => scope::global_gen(),
+            ScopeMode::FollowPick if scope::global().pick == scope::Pick::All => return false,
+            ScopeMode::FollowPick => scope::global_gen(),
+        };
+        let data_version: i64 = self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        let mut seen = self.scope_seen.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = *seen
+            && s.generation == generation
+            && s.data_version == data_version
+            && s.changes == self.conn.total_changes()
+        {
+            return s.filtered;
+        }
+        let sc = self.scope();
+        let filtered = match scope::prepare(&self.conn).and_then(|()| scope::fill(&self.conn, &sc))
+        {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("couldn't work out what's in {}: {e}", sc.pick.label());
+                false
+            }
+        };
+        *seen = Some(ScopeSeen {
+            generation,
+            data_version,
+            changes: self.conn.total_changes(),
+            filtered,
+        });
+        filtered
+    }
+
+    /// The tracks table to browse: all of it, or what's in scope.
+    pub(crate) fn tracks_t(&self) -> &'static str {
+        // Under the plain table's name, so columns written as tracks.x
+        // (the rating in every row) still resolve.
+        if self.scoped() {
+            "s_tracks AS tracks"
+        } else {
+            "tracks"
+        }
+    }
+
+    pub(crate) fn albums_t(&self) -> &'static str {
+        if self.scoped() {
+            "s_albums AS albums"
+        } else {
+            "albums"
+        }
+    }
+
+    /// The folders to show at the top of Folders: the sources in scope.
+    pub fn browse_roots(&self) -> Result<Vec<SourceRow>> {
+        let all = self.sources()?;
+        if matches!(
+            &*self.scope_own.lock().unwrap_or_else(|e| e.into_inner()),
+            ScopeMode::Off
+        ) {
+            return Ok(all);
+        }
+        Ok(match self.scope().pick {
+            scope::Pick::All => all,
+            scope::Pick::Local => all
+                .into_iter()
+                .filter(|s| !crate::remote::is_remote(&s.root))
+                .collect(),
+            scope::Pick::Server(n) => {
+                let root = crate::remote::root(&n);
+                all.into_iter().filter(|s| s.root == root).collect()
+            }
+        })
     }
 
     /// In-memory database, for tests.
@@ -547,7 +696,7 @@ impl Library {
         let mut conn = Connection::open_in_memory()?;
         schema::configure(&conn)?;
         schema::migrate(&mut conn)?;
-        Ok(Self { conn })
+        Ok(Self::with(conn))
     }
 
     /// Point the index at these roots and scan them once, on this thread.
@@ -572,7 +721,25 @@ impl Library {
     }
 
     fn tracks_where(&self, clause: &str, args: impl rusqlite::Params) -> Result<Vec<TrackRow>> {
-        let sql = format!("SELECT {} FROM tracks {clause}", TrackRow::COLS);
+        self.tracks_in("tracks", clause, args)
+    }
+
+    /// Tracks in scope, for browsing.
+    pub(crate) fn scoped_where(
+        &self,
+        clause: &str,
+        args: impl rusqlite::Params,
+    ) -> Result<Vec<TrackRow>> {
+        self.tracks_in(self.tracks_t(), clause, args)
+    }
+
+    fn tracks_in(
+        &self,
+        table: &str,
+        clause: &str,
+        args: impl rusqlite::Params,
+    ) -> Result<Vec<TrackRow>> {
+        let sql = format!("SELECT {} FROM {table} {clause}", TrackRow::COLS);
         let mut st = self.conn.prepare_cached(&sql)?;
         let rows = st.query_map(args, TrackRow::from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -721,9 +888,10 @@ impl Library {
     /// Subfolders that contain music, and the tracks directly in `dir`.
     pub fn folder(&self, dir: &Path) -> Result<Vec<DirEntry>> {
         let (lo, hi) = subtree_range(dir);
-        let mut st = self
-            .conn
-            .prepare_cached("SELECT DISTINCT dir FROM tracks WHERE dir >= ?1 AND dir < ?2")?;
+        let t = self.tracks_t();
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT DISTINCT dir FROM {t} WHERE dir >= ?1 AND dir < ?2"
+        ))?;
         let dirs: Vec<Vec<u8>> = st
             .query_map(params![lo, hi], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
@@ -744,7 +912,7 @@ impl Library {
                 name,
             })
             .collect();
-        let mut tracks = self.tracks_where("WHERE dir = ?1", [path_bytes(dir)])?;
+        let mut tracks = self.scoped_where("WHERE dir = ?1", [path_bytes(dir)])?;
         tracks.sort_by(|a, b| {
             natural_cmp(
                 &a.path.file_name().unwrap_or_default().to_string_lossy(),
@@ -758,7 +926,7 @@ impl Library {
     /// Every track under `dir`, in folder order. What "play this folder" plays.
     pub fn tracks_under(&self, dir: &Path) -> Result<Vec<TrackRow>> {
         let (lo, hi) = subtree_range(dir);
-        let mut t = self.tracks_where(
+        let mut t = self.scoped_where(
             "WHERE dir = ?1 OR (dir >= ?2 AND dir < ?3)",
             params![path_bytes(dir), lo, hi],
         )?;
@@ -769,31 +937,33 @@ impl Library {
     // ----- Artists -----
 
     pub fn artists(&self, mode: ArtistMode) -> Result<Vec<ArtistRow>> {
+        let (a, t) = (self.albums_t(), self.tracks_t());
         let sql = match mode {
-            ArtistMode::AlbumArtist => {
-                "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM albums \
+            ArtistMode::AlbumArtist => format!(
+                "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM {a} \
                  GROUP BY artist COLLATE NOCASE ORDER BY artist COLLATE NOCASE"
-            }
-            ArtistMode::TrackArtist => {
-                "SELECT artist, COUNT(DISTINCT album_key), COUNT(*), SUM(play_count) FROM tracks \
+            ),
+            ArtistMode::TrackArtist => format!(
+                "SELECT artist, COUNT(DISTINCT album_key), COUNT(*), SUM(play_count) FROM {t} \
                  WHERE artist IS NOT NULL GROUP BY artist COLLATE NOCASE ORDER BY artist COLLATE NOCASE"
-            }
+            ),
         };
-        let mut st = self.conn.prepare_cached(sql)?;
+        let mut st = self.conn.prepare_cached(&sql)?;
         let rows = st.query_map([], ArtistRow::from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn artist_albums(&self, name: &str, mode: ArtistMode) -> Result<Vec<AlbumRow>> {
+        let (a, t) = (self.albums_t(), self.tracks_t());
         let sql = match mode {
             ArtistMode::AlbumArtist => format!(
-                "SELECT {} FROM albums WHERE artist = ?1 COLLATE NOCASE \
+                "SELECT {} FROM {a} WHERE artist = ?1 COLLATE NOCASE \
                  ORDER BY year IS NULL, year, name COLLATE NOCASE",
                 AlbumRow::COLS
             ),
             ArtistMode::TrackArtist => format!(
-                "SELECT {} FROM albums WHERE key IN \
-                 (SELECT album_key FROM tracks WHERE artist = ?1 COLLATE NOCASE) \
+                "SELECT {} FROM {a} WHERE key IN \
+                 (SELECT album_key FROM {t} WHERE artist = ?1 COLLATE NOCASE) \
                  ORDER BY year IS NULL, year, name COLLATE NOCASE",
                 AlbumRow::COLS
             ),
@@ -825,8 +995,9 @@ impl Library {
 
     pub fn albums(&self, sort: AlbumSort) -> Result<Vec<AlbumRow>> {
         let sql = format!(
-            "SELECT {} FROM albums ORDER BY {}",
+            "SELECT {} FROM {} ORDER BY {}",
             AlbumRow::COLS,
+            self.albums_t(),
             sort.order_by()
         );
         let mut st = self.conn.prepare(&sql)?;
@@ -851,21 +1022,31 @@ impl Library {
     // ----- Songs -----
 
     pub fn songs(&self, sort: SongSort, desc: bool) -> Result<Vec<TrackRow>> {
-        self.tracks_where(&format!("ORDER BY {}", sort.order_by(desc)), [])
+        self.scoped_where(&format!("ORDER BY {}", sort.order_by(desc)), [])
     }
 
     // ----- Genres -----
 
     pub fn genres(&self) -> Result<Vec<GenreRow>> {
         // Display name = the most common spelling of each normalized genre.
-        let mut st = self.conn.prepare_cached(
+        let sql = if self.scoped() {
+            "SELECT g.genre_norm, \
+               (SELECT genre FROM track_genres x WHERE x.genre_norm = g.genre_norm \
+                  GROUP BY genre ORDER BY COUNT(*) DESC, genre LIMIT 1), \
+               (SELECT COUNT(*) FROM album_genres a WHERE a.genre_norm = g.genre_norm \
+                  AND a.album_key IN (SELECT key FROM temp.scope_keys)), \
+               COUNT(*) \
+             FROM track_genres g WHERE g.track_id IN (SELECT id FROM s_tracks) \
+             GROUP BY g.genre_norm"
+        } else {
             "SELECT g.genre_norm, \
                (SELECT genre FROM track_genres x WHERE x.genre_norm = g.genre_norm \
                   GROUP BY genre ORDER BY COUNT(*) DESC, genre LIMIT 1), \
                (SELECT COUNT(*) FROM album_genres a WHERE a.genre_norm = g.genre_norm), \
                COUNT(*) \
-             FROM track_genres g GROUP BY g.genre_norm",
-        )?;
+             FROM track_genres g GROUP BY g.genre_norm"
+        };
+        let mut st = self.conn.prepare_cached(sql)?;
         let mut rows: Vec<GenreRow> = st
             .query_map([], |r| {
                 Ok(GenreRow {
@@ -883,9 +1064,10 @@ impl Library {
     /// Albums tagged with a genre (by album genre: any of its tracks).
     pub fn genre_albums(&self, norm: &str) -> Result<Vec<AlbumRow>> {
         let sql = format!(
-            "SELECT {} FROM albums WHERE key IN (SELECT album_key FROM album_genres WHERE genre_norm = ?1) \
+            "SELECT {} FROM {} WHERE key IN (SELECT album_key FROM album_genres WHERE genre_norm = ?1) \
              ORDER BY artist COLLATE NOCASE, year, name COLLATE NOCASE",
-            AlbumRow::COLS
+            AlbumRow::COLS,
+            self.albums_t()
         );
         let mut st = self.conn.prepare_cached(&sql)?;
         let rows = st.query_map([norm], AlbumRow::from_row)?;
@@ -894,7 +1076,7 @@ impl Library {
 
     /// Tracks whose own genre tag includes this genre.
     pub fn genre_tracks(&self, norm: &str) -> Result<Vec<TrackRow>> {
-        let mut t = self.tracks_where(
+        let mut t = self.scoped_where(
             "WHERE id IN (SELECT track_id FROM track_genres WHERE genre_norm = ?1)",
             [norm],
         )?;
@@ -943,9 +1125,10 @@ impl Library {
                 .join(" AND ")
         };
         let args = rusqlite::params_from_iter(words.iter());
+        let albums_t = self.albums_t();
 
         let artist_sql = format!(
-            "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM albums WHERE {} \
+            "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM {albums_t} WHERE {} \
              GROUP BY artist COLLATE NOCASE ORDER BY artist COLLATE NOCASE LIMIT {limit}",
             build(&["artist"])
         );
@@ -955,7 +1138,7 @@ impl Library {
             .collect::<rusqlite::Result<_>>()?;
 
         let album_sql = format!(
-            "SELECT {} FROM albums WHERE {} ORDER BY name COLLATE NOCASE LIMIT {limit}",
+            "SELECT {} FROM {albums_t} WHERE {} ORDER BY name COLLATE NOCASE LIMIT {limit}",
             AlbumRow::COLS,
             build(&["name", "artist"])
         );
@@ -964,7 +1147,7 @@ impl Library {
             .query_map(rusqlite::params_from_iter(words.iter()), AlbumRow::from_row)?
             .collect::<rusqlite::Result<_>>()?;
 
-        let tracks = self.tracks_where(
+        let tracks = self.scoped_where(
             &format!(
                 "WHERE {} ORDER BY COALESCE(title, filename) COLLATE NOCASE LIMIT {limit}",
                 build(&["title", "filename", "artist", "album"])
@@ -1003,7 +1186,7 @@ impl Library {
     /// The most played tracks, most first. Tracks never played are left
     /// out, so a fresh library gives an empty list.
     pub fn top_tracks(&self, limit: usize) -> Result<Vec<TrackRow>> {
-        self.tracks_where(
+        self.scoped_where(
             &format!(
                 "WHERE play_count > 0 \
                  ORDER BY play_count DESC, last_played DESC, COALESCE(title, filename) LIMIT {limit}"
@@ -1015,9 +1198,10 @@ impl Library {
     /// Albums by the plays of all their songs added up.
     pub fn top_albums(&self, limit: usize) -> Result<Vec<AlbumRow>> {
         let sql = format!(
-            "SELECT {} FROM albums WHERE play_count > 0 \
+            "SELECT {} FROM {} WHERE play_count > 0 \
              ORDER BY play_count DESC, name COLLATE NOCASE LIMIT {limit}",
-            AlbumRow::COLS
+            AlbumRow::COLS,
+            self.albums_t()
         );
         let mut st = self.conn.prepare_cached(&sql)?;
         let rows = st.query_map([], AlbumRow::from_row)?;
@@ -1027,14 +1211,15 @@ impl Library {
     /// Artists by the plays of all their songs added up, counted the same
     /// way the Artists view groups them.
     pub fn top_artists(&self, mode: ArtistMode, limit: usize) -> Result<Vec<ArtistRow>> {
+        let (a, t) = (self.albums_t(), self.tracks_t());
         let sql = match mode {
             ArtistMode::AlbumArtist => format!(
-                "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM albums \
+                "SELECT artist, COUNT(*), SUM(track_count), SUM(play_count) FROM {a} \
                  GROUP BY artist COLLATE NOCASE HAVING SUM(play_count) > 0 \
                  ORDER BY SUM(play_count) DESC, artist COLLATE NOCASE LIMIT {limit}"
             ),
             ArtistMode::TrackArtist => format!(
-                "SELECT artist, COUNT(DISTINCT album_key), COUNT(*), SUM(play_count) FROM tracks \
+                "SELECT artist, COUNT(DISTINCT album_key), COUNT(*), SUM(play_count) FROM {t} \
                  WHERE artist IS NOT NULL GROUP BY artist COLLATE NOCASE HAVING SUM(play_count) > 0 \
                  ORDER BY SUM(play_count) DESC, artist COLLATE NOCASE LIMIT {limit}"
             ),

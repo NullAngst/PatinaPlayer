@@ -692,6 +692,11 @@ pub struct LibraryConfig {
     pub folders: Vec<PathBuf>,
     /// Watch the folders for changes while running.
     pub watch: bool,
+    /// Which source browsing shows: all of them, local, or one server.
+    pub scope: crate::library::scope::Pick,
+    /// Which source wins when more than one has an album: "local", a kind
+    /// of server, or a server's name, first wins.
+    pub source_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -707,6 +712,8 @@ impl Default for Config {
             library: LibraryConfig {
                 folders: Vec::new(),
                 watch: true,
+                scope: Default::default(),
+                source_order: crate::library::scope::default_order(),
             },
             output: OutputConfig::default(),
             playback: PlaybackConfig {
@@ -924,6 +931,8 @@ struct RawPodcasts {
 struct RawLibrary {
     folders: Option<Vec<String>>,
     watch: Option<bool>,
+    scope: Option<String>,
+    source_order: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1250,6 +1259,16 @@ impl Config {
                     .map(|f| expand_tilde(f))
                     .collect(),
                 watch: lib.watch.unwrap_or(d.library.watch),
+                scope: lib
+                    .scope
+                    .as_deref()
+                    .map(crate::library::scope::Pick::from_config)
+                    .unwrap_or_default(),
+                source_order: lib
+                    .source_order
+                    .as_deref()
+                    .map(crate::library::scope::parse_order)
+                    .unwrap_or(d.library.source_order),
             },
             output: OutputConfig {
                 backend,
@@ -1391,6 +1410,12 @@ pub fn default_text() -> String {
 folders = [{folder}]
 # Pick up added, changed and removed files while the player runs.
 watch = true
+# What browsing shows: "all", "local", or one server as "server:Name".
+scope = "all"
+# With all sources shown, an album more than one has comes from the first
+# of these: "local", a kind of server (plex, subsonic, ampache, dlna) or a
+# server's name. Sources not listed follow.
+source_order = "local, plex"
 
 [output]
 # auto tries PipeWire, then ALSA. Also: pipewire, alsa, null.

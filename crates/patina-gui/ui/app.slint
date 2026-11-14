@@ -3992,6 +3992,10 @@ export component AppWindow inherits Window {
 
     // Sidebar
     in property <[SideItem]> side;
+    // The source browsing shows ("All sources", "Local", a server), and
+    // its picker.
+    in property <string> scope-label: "All sources";
+    callback pick-scope();
     in property <int> side-sel: -1;
     callback side-clicked(int);
 
@@ -4227,6 +4231,11 @@ export component AppWindow inherits Window {
     // Driving, with Minimal UX while driving on: the Drive screen shows,
     // unless Full app was tapped (until driving ends).
     in property <bool> drive;
+    // The system bars, as Android reports them.
+    in property <length> sys-left;
+    in property <length> sys-top;
+    in property <length> sys-right;
+    in property <length> sys-bottom;
     in-out property <bool> drive-hidden;
     // Playing on another device, and its name.
     in property <bool> casting;
@@ -4370,12 +4379,17 @@ export component AppWindow inherits Window {
     }
 
     // Phones draw under the status and navigation bars: keep everything
-    // inside the part of the screen that's safe to touch.
+    // inside the part of the screen that's safe to touch. Android reports
+    // the bars itself too (sys-*), and the bigger of the two wins.
+    property <length> inset-left: max(root.safe-area-insets.left, root.sys-left);
+    property <length> inset-top: max(root.safe-area-insets.top, root.sys-top);
+    property <length> inset-right: max(root.safe-area-insets.right, root.sys-right);
+    property <length> inset-bottom: max(root.safe-area-insets.bottom, root.sys-bottom);
     keys := FocusScope {
-        x: root.safe-area-insets.left;
-        y: root.safe-area-insets.top;
-        width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
-        height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
+        x: root.inset-left;
+        y: root.inset-top;
+        width: root.width - root.inset-left - root.inset-right;
+        height: root.height - root.inset-top - root.inset-bottom;
         key-pressed(e) => {
             // A text shown whole closes first.
             if Peek.open && (e.text == Key.Escape || e.text == Key.Back) {
@@ -5629,6 +5643,55 @@ export component AppWindow inherits Window {
                         color: P.muted;
                     }
                 }
+                // The source picker: what Artists, Albums and the rest show.
+                if sidebar.folded: IconButton {
+                    height: 34px;
+                    icon: Icons.servers;
+                    tip: "Source: " + root.scope-label;
+                    clicked => {
+                        root.pick-scope();
+                    }
+                }
+                if !sidebar.folded: Rectangle {
+                    height: 34px;
+                    border-radius: 6px * P.round;
+                    border-width: 1px;
+                    border-color: P.border;
+                    background: scope-ta.has-hover ? P.raised : transparent;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 8px;
+                        spacing: 8px;
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            d: Icons.servers;
+                            size: 16px;
+                            stroke: P.muted;
+                        }
+                        Text {
+                            text: root.scope-label;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            font-size: 13px;
+                            color: P.text;
+                            horizontal-stretch: 1;
+                        }
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            d: Icons.chevron-down;
+                            size: 14px;
+                            stroke: P.muted;
+                        }
+                    }
+                    scope-ta := TouchArea {
+                        clicked => {
+                            root.pick-scope();
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 6px;
+                }
                 Flickable {
                     VerticalLayout {
                         alignment: start;
@@ -6568,8 +6631,8 @@ export component AppWindow inherits Window {
             peek-bubble := Rectangle {
                 property <length> pad: 12px;
                 // Where the press was, in this overlay's coordinates.
-                property <length> px: Peek.at-x - root.safe-area-insets.left;
-                property <length> py: Peek.at-y - root.safe-area-insets.top;
+                property <length> px: Peek.at-x - root.inset-left;
+                property <length> py: Peek.at-y - root.inset-top;
                 width: min(peek-measure.preferred-width + 2 * self.pad + 2px, 440px, parent.width - 16px);
                 height: peek-text.preferred-height + 2 * self.pad - 4px;
                 // Just under and right of the pointer; flipped above it, or

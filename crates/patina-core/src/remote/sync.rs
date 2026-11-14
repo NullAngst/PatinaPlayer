@@ -532,6 +532,9 @@ pub fn sync_playlists(
             .collect::<rusqlite::Result<_>>()?
     };
     let mut changed = false;
+    // One playlist that won't load doesn't hold up the rest; the first
+    // such error is reported once they're done.
+    let mut failed: Option<(String, RemoteError)> = None;
     let listed: HashSet<&str> = lists.iter().map(|p| p.id.as_str()).collect();
     for (rid, (id, _)) in &known {
         if !listed.contains(rid.as_str()) {
@@ -546,7 +549,14 @@ pub fn sync_playlists(
         if local.is_some_and(|(_, s)| s.as_deref() == Some(sig.as_str())) {
             continue;
         }
-        let songs = client.playlist_songs(&p.id)?;
+        let songs = match client.playlist_songs(&p.id) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("{server}: playlist {}: {e}", p.name);
+                failed.get_or_insert((p.name.clone(), e));
+                continue;
+            }
+        };
         let uris: Vec<Vec<u8>> = songs.iter().map(|s| song_uri(server, &s.id)).collect();
         let now = now_secs();
         let id = match local {
@@ -570,7 +580,17 @@ pub fn sync_playlists(
         lib.set_playlist_items(id, &uris)?;
         changed = true;
     }
-    Ok(changed)
+    match failed {
+        Some((name, e)) if !changed => Err(SyncError::Remote(RemoteError::Server {
+            code: 0,
+            message: format!("\"{name}\" wouldn't load: {e}"),
+        })),
+        Some((name, e)) => {
+            log::warn!("{server}: the rest of the playlists came across; \"{name}\" didn't: {e}");
+            Ok(changed)
+        }
+        None => Ok(changed),
+    }
 }
 
 /// Copy the server's podcasts and the episodes it has on hand. Their

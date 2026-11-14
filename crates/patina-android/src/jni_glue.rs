@@ -149,6 +149,19 @@ pub extern "system" fn Java_dev_patina_player_Native_backPressed<'local>(
     });
 }
 
+/// The system bars' sizes, in pixels. The window keeps clear of them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_patina_player_Native_insets<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    left: jint,
+    top: jint,
+    right: jint,
+    bottom: jint,
+) {
+    platform::set_insets([left, top, right, bottom]);
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_patina_player_Native_command<'local>(
     _env: JNIEnv<'local>,
@@ -306,7 +319,11 @@ fn auto_children(parent: &str) -> Vec<patina_core::browse::auto::AutoItem> {
     let mut guard = AUTO_LIB.lock().unwrap();
     if guard.is_none() {
         match patina_core::library::Library::open(&patina_core::config::library_db_path()) {
-            Ok(l) => *guard = Some(l),
+            Ok(l) => {
+                // The car shows the source the app is browsing.
+                l.follow_scope();
+                *guard = Some(l)
+            }
             Err(e) => {
                 log::warn!("car browsing can't open the library: {e}");
                 return Vec::new();

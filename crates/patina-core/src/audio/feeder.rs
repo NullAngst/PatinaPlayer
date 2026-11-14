@@ -516,7 +516,13 @@ impl Feeder {
                     original: o,
                 })) => {
                     original &= o;
-                    Source::open_reader(reader, &name, opts).map_err(|e| e.to_string())
+                    // When the download fails, the decoder only sees a read
+                    // error ("I/O error"); the download knows the reason.
+                    let progress = reader.progress();
+                    Source::open_reader(reader, &name, opts).map_err(|e| match progress.error() {
+                        Some(why) => format!("couldn't download it: {why}"),
+                        None => e.to_string(),
+                    })
                 }
                 Some(Err(e)) => Err(e),
                 None => crate::remote::registry()

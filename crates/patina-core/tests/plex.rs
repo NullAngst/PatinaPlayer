@@ -352,6 +352,16 @@ fn connecting_finds_a_working_address_and_reads_the_library() {
     );
     assert!(u.contains("protocol=hls") && u.contains("musicBitrate=320"));
     assert!(u.contains("path=%2Flibrary%2Fmetadata%2F101"));
+    // Plex won't pick a profile without a platform.
+    assert!(u.contains("X-Plex-Platform="), "{u}");
+    // Opus, the way Plex's own players get it: one Matroska file.
+    let (u, _) = c.stream_url_as("101", StreamFormat::Opus, 128).unwrap();
+    assert!(u.contains("/music/:/transcode/universal/start?"), "{u}");
+    assert!(u.contains("protocol=http") && u.contains("musicBitrate=128"));
+    assert!(
+        u.contains("audioCodec%3Dopus") && u.contains("container%3Dmkv"),
+        "{u}"
+    );
 
     // Ratings are out of ten, by PUT.
     c.set_rating(remote::Rated::Song, "101", 4).unwrap();

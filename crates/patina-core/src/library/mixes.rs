@@ -41,13 +41,13 @@ impl Library {
                  GROUP BY album_key HAVING COUNT(DISTINCT genre_norm) = {n})"
             )
         };
-        self.tracks_where(&clause, params_from_iter(norms.iter()))
+        self.scoped_where(&clause, params_from_iter(norms.iter()))
     }
 
     /// Every song credited to an artist, as the track artist or the album
     /// artist, on every source.
     pub fn tracks_by_artist(&self, name: &str) -> Result<Vec<TrackRow>> {
-        self.tracks_where(
+        self.scoped_where(
             "WHERE artist = ?1 COLLATE NOCASE OR album_artist = ?1 COLLATE NOCASE",
             [name],
         )
@@ -55,7 +55,7 @@ impl Library {
 
     /// Songs with this artist and title, on any source.
     pub fn find_tracks(&self, artist: &str, title: &str) -> Result<Vec<TrackRow>> {
-        self.tracks_where(
+        self.scoped_where(
             "WHERE title = ?2 COLLATE NOCASE \
              AND (artist = ?1 COLLATE NOCASE OR album_artist = ?1 COLLATE NOCASE)",
             [artist, title],

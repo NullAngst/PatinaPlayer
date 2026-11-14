@@ -214,6 +214,8 @@ impl MixService {
     /// With a given Last.fm (a stand-in, in tests), or none.
     pub fn start_with(db: &Path, lastfm: Option<LastFm>) -> Result<Self, LibError> {
         let lib = Library::open(db)?;
+        // Mixes pick from the source being browsed.
+        lib.follow_scope_pick();
         let (tx, rx) = unbounded();
         let (ev_tx, ev_rx) = unbounded();
         let mut w = Mixer {

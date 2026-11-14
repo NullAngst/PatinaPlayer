@@ -467,10 +467,21 @@ impl Plex {
                 page,
             )
         };
-        match once() {
+        // A dropped connection (a phone between networks, a socket the
+        // server closed) gets one more try for anything safe to repeat.
+        // Creating a playlist isn't, so a POST goes once.
+        let again = |r: Result<Value>| match r {
+            Err(RemoteError::Http(e)) if method != Method::POST => {
+                log::info!("Plex {path}: {e}; trying again");
+                std::thread::sleep(Duration::from_millis(800));
+                once()
+            }
+            other => other,
+        };
+        match again(once()) {
             Err(RemoteError::Auth) => {
                 self.reauth()?;
-                once()
+                again(once())
             }
             other => other,
         }
@@ -842,16 +853,18 @@ impl Client for Plex {
                 Err(e) => log::info!("Plex sign-in refresh waits: {e}"),
             }
         }
-        let resp = self
-            .http
-            .get(format!("{}/identity", self.base()))
-            .header("Accept", "application/json")
-            .send()
-            .map_err(http::http_err)?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(RemoteError::Http(format!("HTTP {}", resp.status())))
+        // The server's identity, asked like any other call (headers and
+        // token), and checked to be the same server.
+        let v = self.get("/identity", &[])?;
+        match container(&v)
+            .get("machineIdentifier")
+            .and_then(Value::as_str)
+        {
+            Some(id) if id != self.machine => Err(RemoteError::Http(format!(
+                "a different Plex server answers at {} now",
+                self.base()
+            ))),
+            _ => Ok(()),
         }
     }
 
@@ -921,37 +934,57 @@ impl Client for Plex {
             let key = self.part_key(song_id)?;
             return Ok((self.url(&key, &[])?, true));
         }
-        // The universal transcoder, as the docs describe it: HLS, with the
-        // music bitrate to aim for. Plex makes AAC by default; MP3 is
-        // asked for through the client profile.
+        // The universal transcoder. Opus is what Plex's own players get:
+        // in Matroska, over plain HTTP, the target Plex's Chromecast
+        // profile uses, so it comes as one file. MP3 stays on HLS in
+        // MPEG-TS, as the forum examples for music clients ask for it.
+        // Plex picks a client profile by platform, and with none it won't
+        // transcode at all ("unable to find a matching profile"), so the
+        // client's headers go along as arguments.
         let session = session_id();
-        let mut q = vec![
+        let (protocol, target) = match format {
+            StreamFormat::Mp3 => (
+                "hls",
+                "add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=mp3&replace=true)",
+            ),
+            _ => (
+                "http",
+                "add-transcode-target(type=musicProfile&context=streaming&protocol=http&container=mkv&audioCodec=opus&replace=true)",
+            ),
+        };
+        let mut q: Vec<(&str, String)> = plex_tv::headers(&self.client_id())
+            .into_iter()
+            .filter(|(k, _)| {
+                k.starts_with("X-Plex-")
+                    && *k != "X-Plex-Client-Identifier"
+                    && *k != "X-Plex-Product"
+            })
+            .collect();
+        q.extend([
             ("path", format!("/library/metadata/{song_id}")),
             ("mediaIndex", "0".into()),
             ("partIndex", "0".into()),
-            ("protocol", "hls".into()),
+            ("protocol", protocol.into()),
             ("directPlay", "0".into()),
             ("directStream", "0".into()),
             ("directStreamAudio", "0".into()),
+            ("hasMDE", "1".into()),
+            ("download", "0".into()),
             ("musicBitrate", kbps.clamp(32, 512).to_string()),
             ("transcodeSessionId", session.clone()),
             ("X-Plex-Session-Identifier", session),
+            ("X-Plex-Client-Profile-Extra", target.into()),
             (
                 "location",
                 if is_local(&self.base()) { "lan" } else { "wan" }.into(),
             ),
-        ];
-        if format == StreamFormat::Mp3 {
-            q.push((
-                "X-Plex-Client-Profile-Extra",
-                "add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=mp3)"
-                    .into(),
-            ));
-        }
-        Ok((
-            self.url("/music/:/transcode/universal/start.m3u8", &q)?,
-            false,
-        ))
+        ]);
+        let path = if protocol == "hls" {
+            "/music/:/transcode/universal/start.m3u8"
+        } else {
+            "/music/:/transcode/universal/start"
+        };
+        Ok((self.url(path, &q)?, false))
     }
 
     fn stream_setting(&self) -> (StreamFormat, u32) {

@@ -109,6 +109,7 @@ fn browser(fx: &Fixture) -> Browser {
             library: patina_core::config::LibraryConfig {
                 folders: vec![fx.root.clone()],
                 watch: false,
+                ..Default::default()
             },
             ..Config::default()
         },

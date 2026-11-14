@@ -601,7 +601,14 @@ impl Worker {
     fn ping(&mut self) {
         self.next_ping = Instant::now() + PING_EVERY;
         let Some(c) = self.client.clone() else { return };
-        let res = c.ping();
+        let mut res = c.ping();
+        // One miss isn't a server gone: a phone's network hiccups. Ask
+        // again, on a fresh connection, before saying it's offline.
+        if let Err(RemoteError::Http(e)) = &res {
+            log::info!("{} missed a ping ({e}); asking again", self.name());
+            std::thread::sleep(Duration::from_secs(2));
+            res = c.ping();
+        }
         self.save_fresh(c.as_ref());
         match res {
             Ok(()) => {}
@@ -705,7 +712,13 @@ impl Worker {
                 let _ = self.ctx.events.send(RemoteEvent::Changed);
             }
             Ok(false) => {}
-            Err(e) => log::warn!("{name} playlists: {e}"),
+            Err(e) => {
+                log::warn!("{name} playlists: {e}");
+                let _ = self
+                    .ctx
+                    .events
+                    .send(RemoteEvent::Error(format!("{name}'s playlists: {e}")));
+            }
         }
         // Your marks: what's waiting goes first, so the server's answer
         // already has it.

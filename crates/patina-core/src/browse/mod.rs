@@ -16,6 +16,7 @@ pub mod marks;
 mod mixes;
 pub mod model;
 pub mod offline;
+mod scope;
 mod select;
 mod servers;
 pub mod settings;
@@ -241,6 +242,8 @@ pub struct Browser {
     pub listenbrainz: Option<crate::listenbrainz::ListenBrainz>,
     /// A connected iPod, as last looked for.
     pub ipod: crate::ipod::IpodState,
+    /// Servers away, as the source scope last heard.
+    scope_away: Vec<String>,
 }
 
 fn plural(n: usize) -> &'static str {
@@ -373,7 +376,9 @@ impl Browser {
             queue_anchor: None,
             listenbrainz: s.listenbrainz,
             ipod: crate::ipod::IpodState::default(),
+            scope_away: Vec::new(),
         };
+        b.apply_scope();
         b.rebuild_sidebar();
         b.apply_remote_control();
         b
@@ -2037,6 +2042,26 @@ impl Browser {
                     w(config::set_value(&path, "library", "watch", *on))?;
                     self.config.library.watch = *on;
                     self.apply_folders();
+                }
+                (Key::Scope, Control::Choice { options, index }) => {
+                    let pick = crate::library::scope::Pick::from_config(&options[*index].0);
+                    self.set_scope(pick);
+                }
+                (Key::SourceOrder, Control::Text { value, .. }) => {
+                    let order = crate::library::scope::parse_order(value);
+                    let order = if order.is_empty() {
+                        crate::library::scope::default_order()
+                    } else {
+                        order
+                    };
+                    w(config::set_value(
+                        &path,
+                        "library",
+                        "source_order",
+                        order.join(", "),
+                    ))?;
+                    self.config.library.source_order = order;
+                    self.scope_changed();
                 }
                 (Key::Theme, Control::Choice { options, index }) => {
                     let v = &options[*index].0;

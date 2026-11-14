@@ -1752,6 +1752,21 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let mut right = Vec::new();
+    // The source being browsed; B steps through them.
+    if app.b.lib.is_some() {
+        let scope = app.b.scope();
+        right.push(Span::styled(
+            format!(" {} ", scope.label()),
+            Style::default()
+                .fg(if *scope == patina_core::library::scope::Pick::All {
+                    t.muted
+                } else {
+                    t.verdigris
+                })
+                .bg(t.raised),
+        ));
+        right.push(Span::raw(" "));
+    }
     if let Some(info) = s
         .track
         .as_ref()
@@ -2296,6 +2311,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "Genres: mark one for a genre mix. Queue: save the mix playing",
         ),
         ("o / O", "Sort Albums or Songs / reverse Songs"),
+        ("B", "Browse the next source: all, local, each server"),
         (
             "t",
             "Artists: album or track artist. Genre: albums or songs",

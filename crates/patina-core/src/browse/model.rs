@@ -958,7 +958,7 @@ fn build_library(
             ))
         }
         Source::Section(Section::Folders) => {
-            let roots = lib.sources().map_err(err)?;
+            let roots = lib.browse_roots().map_err(err)?;
             if roots.is_empty() {
                 return Err(NO_FOLDERS.into());
             }

@@ -313,7 +313,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
         _ if lib.is_none() => none(),
         Source::Section(Section::Folders) => {
             let lib = lib.unwrap();
-            let roots = lib.sources().map_err(err)?;
+            let roots = lib.browse_roots().map_err(err)?;
             if roots.is_empty() {
                 return none();
             }
