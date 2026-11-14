@@ -68,6 +68,13 @@ pub trait Hooks: Send + Sync {
     fn pick_image(&self) -> Picked {
         Picked::Unavailable("No picker for images here".into())
     }
+    /// Save a copy of the file at `src` wherever the person picks, offered
+    /// under `name`: the system's save dialog. Blocks, like
+    /// [`Hooks::pick_folder`]; `Picked::Path` is where it went, as the
+    /// system names it.
+    fn save_file(&self, _src: &std::path::Path, _name: &str) -> Picked {
+        Picked::Unavailable("No save dialog here".into())
+    }
     /// Show a prompt. Its answer comes back through [`prompt_event`] under
     /// `id`. False if it couldn't be shown, and the window's own dialog is
     /// used instead.

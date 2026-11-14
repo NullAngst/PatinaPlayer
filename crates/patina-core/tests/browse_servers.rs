@@ -157,6 +157,7 @@ fn a_server_is_added_synced_used_and_removed() {
     // Settings doesn't have it any more: its Sources page does, with its
     // streaming choice.
     b.switch(Section::Settings);
+    b.set_settings_groups(true);
     assert!(!b.level().unwrap().items.iter().any(|i| matches!(
         i,
         Item::Setting(s) if matches!(s.key, Key::Server(_) | Key::AddServer)
@@ -352,6 +353,7 @@ fn sources_pages_hold_their_own_kind() {
     );
     // None of it in Settings.
     b.switch(Section::Settings);
+    b.set_settings_groups(true);
     assert!(!b.level().unwrap().items.iter().any(|i| matches!(
         i,
         Item::Setting(s) if matches!(

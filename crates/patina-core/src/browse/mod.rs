@@ -153,6 +153,9 @@ pub struct Browser {
     queue_sync: servers::QueueSync,
     timeline: servers::TimelineSync,
     plex: sources::PlexState,
+    backup_job: Option<Receiver<Result<String, String>>>,
+    /// Settings groups opened this session.
+    settings_open: std::collections::HashSet<String>,
     snap: sources::SnapState,
     /// Where "Find DLNA servers" asks. The local network when unset.
     pub dlna_probe: Option<std::net::SocketAddr>,
@@ -320,6 +323,8 @@ impl Browser {
             queue_sync: servers::QueueSync::default(),
             timeline: servers::TimelineSync::default(),
             plex: sources::PlexState::default(),
+            settings_open: std::collections::HashSet::new(),
+            backup_job: None,
             snap: sources::SnapState::default(),
             dlna_probe: None,
             dlna: servers::DlnaSearch::default(),
@@ -459,6 +464,7 @@ impl Browser {
         self.poll_ipod();
         self.poll_cast();
         self.poll_sources();
+        self.poll_backup();
         for ev in &events {
             if let Event::Played(path) = ev {
                 self.after_played(path);
@@ -782,6 +788,7 @@ impl Browser {
                 outputs: &self.outputs,
                 remote_port: self.remote_server.as_ref().map(|s| s.port()),
                 snap: self.snap.live.clone(),
+                open_groups: &self.settings_open,
             },
             stations: &self.stations,
             checks: &self.checks,
@@ -1182,6 +1189,10 @@ impl Browser {
         };
         if let Some(src) = open(&item) {
             self.push(src);
+            return Activated::Opened;
+        }
+        if let Item::Group { name, .. } = &item {
+            self.toggle_settings_group(name);
             return Activated::Opened;
         }
         if matches!(
@@ -1837,6 +1848,71 @@ impl Browser {
 
     // ----- Settings -----
 
+    /// Where the library database is, while there is one.
+    pub fn library_db(&self) -> Option<PathBuf> {
+        (self.lib.is_some() && !self.settings_info.db_path.as_os_str().is_empty())
+            .then(|| self.settings_info.db_path.clone())
+    }
+
+    /// Save a copy of the library database, off this thread: to `dest`, or
+    /// to Downloads (the home folder without one) under a dated name. How
+    /// it went comes as a note.
+    pub fn backup_library(&mut self, dest: Option<PathBuf>) {
+        let Some(db) = self.library_db() else {
+            return self.error("There's no library to back up (--no-library)");
+        };
+        let dest = dest.unwrap_or_else(crate::library::backup_dest);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                crate::library::backup(&db, &dest)
+                    .map(|n| {
+                        format!(
+                            "Saved a copy of the library to {} ({})",
+                            dest.display(),
+                            fmt_bytes(n)
+                        )
+                    })
+                    .map_err(|e| format!("Couldn't back up the library: {e}")),
+            );
+        });
+        self.backup_job = Some(rx);
+        self.note("Backing up the library…");
+    }
+
+    fn poll_backup(&mut self) {
+        if let Some(rx) = &self.backup_job
+            && let Ok(r) = rx.try_recv()
+        {
+            self.backup_job = None;
+            match r {
+                Ok(m) => self.note(m),
+                Err(e) => self.error(e),
+            }
+        }
+    }
+
+    /// Open a Settings group, or fold it again.
+    pub fn toggle_settings_group(&mut self, name: &str) {
+        if !self.settings_open.remove(name) {
+            self.settings_open.insert(name.to_string());
+        }
+        self.refresh_section(Section::Settings);
+    }
+
+    /// Open or fold every Settings group at once.
+    pub fn set_settings_groups(&mut self, open: bool) {
+        self.settings_open.clear();
+        if open && let Some(l) = self.stacks.get(&Section::Settings).and_then(|v| v.first()) {
+            for i in &l.items {
+                if let Item::Group { name, .. } = i {
+                    self.settings_open.insert(name.clone());
+                }
+            }
+        }
+        self.refresh_section(Section::Settings);
+    }
+
     /// The setting a row stands for, in the open Settings view.
     pub fn selected_setting(&self) -> Option<Setting> {
         match self.selected_item() {
@@ -1945,6 +2021,7 @@ impl Browser {
         }
         // Buttons on the Sources pages.
         match key {
+            Key::BackupLibrary => return self.backup_library(None),
             Key::SnapRefresh => return self.refresh_snap_rooms(),
             Key::PlexSignIn => return self.plex_sign_in(),
             _ => {}

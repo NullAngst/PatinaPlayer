@@ -47,6 +47,7 @@ pub const PAUSED: jint = 2;
 const PICK_FOLDER: jint = 1;
 const PICK_EQ_FILE: jint = 2;
 const PICK_IMAGE: jint = 3;
+const PICK_SAVE: jint = 4;
 
 /// How long a picker may stay open before the wait for it is given up.
 const PICK_PATIENCE: Duration = Duration::from_secs(15 * 60);
@@ -489,6 +490,31 @@ pub fn pick_folder() -> Picked {
 /// The system's file picker, the file copied where the app can read it.
 pub fn pick_eq_file() -> Picked {
     pick(PICK_EQ_FILE, "pickFile")
+}
+
+/// The system's save dialog, for a copy of `src` offered as `name`.
+/// Java copies the file to where it's saved. The answer is that place.
+pub fn save_copy(src: &std::path::Path, name: &str) -> Picked {
+    let (tx, rx) = mpsc::channel();
+    *PICK.lock().unwrap() = Some((PICK_SAVE, tx));
+    let src = src.to_string_lossy().into_owned();
+    let name = name.to_string();
+    let started = with_java(|env, class| {
+        let s = env.new_string(&src)?;
+        let n = env.new_string(&name)?;
+        env.call_static_method(
+            class,
+            "saveCopy",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(&s), JValue::Object(&n)],
+        )?;
+        Ok(())
+    });
+    if started.is_none() {
+        PICK.lock().unwrap().take();
+        return Picked::Unavailable("The system's save dialog couldn't be opened".into());
+    }
+    rx.recv_timeout(PICK_PATIENCE).unwrap_or(Picked::Cancelled)
 }
 
 /// The system's picker for an image, copied where the app can read it:

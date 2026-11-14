@@ -122,6 +122,7 @@ fn index_of(b: &Browser, f: impl Fn(&Item) -> bool) -> usize {
 /// The value a Settings row shows.
 fn setting(b: &mut Browser, key: Key) -> String {
     b.switch(Section::Settings);
+    b.set_settings_groups(true);
     items(b)
         .iter()
         .find_map(|i| match i {
@@ -477,6 +478,7 @@ fn settings_are_saved_and_applied() {
     let fx = fixture();
     let mut b = browser(&fx);
     b.switch(Section::Settings);
+    b.set_settings_groups(true);
     // Every group is there.
     for h in [
         "Library",
@@ -490,7 +492,7 @@ fn settings_are_saved_and_applied() {
         assert!(
             items(&b)
                 .iter()
-                .any(|i| matches!(i, Item::Header(x) if *x == h)),
+                .any(|i| matches!(i, Item::Group { name, open: true, .. } if name == h)),
             "{h}"
         );
     }
@@ -565,6 +567,8 @@ fn folders_are_added_and_removed_from_the_app() {
     assert!(cfg.library.folders.contains(&extra_path));
 
     b.switch(Section::Settings);
+
+    b.set_settings_groups(true);
     assert!(items(&b).iter().any(|i| matches!(
         i,
         Item::Setting(s) if s.key == Key::Folder(extra_path.clone())
@@ -634,8 +638,77 @@ fn a_section_opened_soon_is_read_on_the_next_frame() {
     b.switch_soon(Section::Genres);
     assert!(b.loading());
     b.switch(Section::Settings);
+    b.set_settings_groups(true);
     assert!(!b.loading());
     b.finish_pending();
     b.switch(Section::Genres);
     assert!(b.level().is_some());
+}
+
+#[test]
+fn settings_groups_start_folded_and_open_one_at_a_time() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Settings);
+    let groups: Vec<(String, bool)> = items(&b)
+        .iter()
+        .map(|i| match i {
+            Item::Group { name, open, .. } => (name.clone(), *open),
+            other => panic!("only groups while folded, got {other:?}"),
+        })
+        .collect();
+    assert!(groups.len() > 5);
+    assert!(groups.iter().all(|(_, open)| !open));
+    assert!(groups.iter().any(|(n, _)| n == "Library"));
+    // Sources rows live on their own pages, not here.
+    assert!(!groups.iter().any(|(n, _)| n == "Plex" || n == "Snapcast"));
+    // Open Library: its rows show under it, and nothing else opens.
+    let i = index_of(
+        &b,
+        |i| matches!(i, Item::Group { name, .. } if name == "Library"),
+    );
+    b.select(i);
+    b.activate();
+    let open: Vec<&Item> = items(&b)
+        .iter()
+        .filter(|i| matches!(i, Item::Setting(_)))
+        .collect();
+    assert!(
+        open.iter()
+            .any(|i| matches!(i, Item::Setting(s) if s.key == Key::BackupLibrary))
+    );
+    assert!(matches!(&items(&b)[i], Item::Group { open: true, .. }));
+    assert_eq!(
+        items(&b)
+            .iter()
+            .filter(|i| matches!(i, Item::Group { open: true, .. }))
+            .count(),
+        1
+    );
+    // And folds again.
+    b.activate();
+    assert!(!items(&b).iter().any(|i| matches!(i, Item::Setting(_))));
+}
+
+#[test]
+fn the_library_backs_up_to_a_working_copy() {
+    let fx = fixture();
+    let d = tempfile::tempdir().unwrap();
+    let db = d.path().join("lib.db");
+    let mut lib = Library::open(&db).unwrap();
+    lib.index_folders(std::slice::from_ref(&fx.root)).unwrap();
+    let tracks = lib.track_count().unwrap();
+    assert!(tracks > 0);
+    // While the library is open and in use.
+    let dest = d
+        .path()
+        .join("backup")
+        .join(patina_core::library::backup_name());
+    let size = patina_core::library::backup(&db, &dest).unwrap();
+    assert!(size > 0);
+    let copy = Library::open(&dest).unwrap();
+    assert_eq!(copy.track_count().unwrap(), tracks);
+    // Again over the top of it.
+    patina_core::library::backup(&db, &dest).unwrap();
+    drop(lib);
 }

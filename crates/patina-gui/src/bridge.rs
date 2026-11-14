@@ -65,6 +65,8 @@ enum Dlg {
     PlexChoose(Vec<String>),
     /// A Plex server by address and token.
     AddPlex,
+    /// Where to save a copy of the library.
+    Backup,
     AddIcecast,
     /// A new smart playlist: its name and its query.
     SmartNew,
@@ -170,6 +172,8 @@ pub struct State {
     dlg: Dlg,
     /// The Plex sign-in as last shown.
     plex_shown: u64,
+    /// A backup on its way through the save dialog: a note, or an error.
+    backup: Option<crossbeam_channel::Receiver<Result<Option<String>, String>>>,
     /// The Back being handled came from a swipe in from the left.
     back_from_left: Rc<std::cell::Cell<bool>>,
     toast_until: Option<Instant>,
@@ -458,6 +462,7 @@ impl State {
             follow: true,
             dlg: Dlg::None,
             plex_shown: 0,
+            backup: None,
             back_from_left: Rc::default(),
             toast_until: None,
             row_art: Vec::new(),
@@ -693,6 +698,16 @@ impl State {
                 r.kind = 9;
                 r.title = ss(h.to_uppercase());
             }
+            Item::Group { name, open, count } => {
+                r.kind = 19;
+                r.num = SharedString::new();
+                r.title = ss(name);
+                r.sub = ss(format!(
+                    "{count} setting{}",
+                    if *count == 1 { "" } else { "s" }
+                ));
+                r.on = *open;
+            }
             Item::Info { label, value } => {
                 r.kind = 10;
                 r.num = SharedString::new();
@@ -716,6 +731,7 @@ impl State {
                     Control::Action(_) if st.key == SettingKey::MeasureLibrary => (11, false),
                     Control::Action(_) if st.key.is_eq() || st.key.is_amp() => (11, false),
                     Control::Action(_) if st.key == SettingKey::LastFmLink => (11, false),
+                    Control::Action(_) if st.key == SettingKey::BackupLibrary => (11, false),
                     Control::Action(_)
                         if matches!(
                             st.key,
@@ -990,6 +1006,14 @@ impl State {
                 vec![("refresh", "Refresh".into())],
             ),
             (Section::Downloads, _) => (0, vec![], vec![]),
+            (Section::Settings, _) => (
+                0,
+                vec![],
+                vec![
+                    ("open-groups", "Open all".into()),
+                    ("fold-groups", "Fold all".into()),
+                ],
+            ),
             (s, _) if s.is_settings_page() => (0, vec![], vec![]),
             // Mixed artists, albums and songs: the group headings label them.
             (_, Some(Source::Search(_))) => (0, vec![], vec![]),
@@ -1910,6 +1934,7 @@ impl State {
             self.open_dlna(ui, found);
         }
         self.sync_plex_sign_in(ui);
+        self.poll_backup();
         self.sync_window_size(ui);
         let look = &self.b.config.appearance;
         ui.set_side_land(look.sidebar_landscape.index());
@@ -2414,6 +2439,8 @@ impl State {
                 );
             }
             "refresh" => self.b.rescan(),
+            "open-groups" => self.b.set_settings_groups(true),
+            "fold-groups" => self.b.set_settings_groups(false),
             "eq-toggle" => self.b.eq_toggle(),
             "eq-flat" => self.b.eq_flat(),
             "eq-import" => self.pick_eq_file(),
@@ -2521,6 +2548,64 @@ impl State {
         ui.set_dlg_text4(SharedString::new());
         ui.set_dlg_four_fields(true);
         self.dlg = Dlg::Server(edit);
+    }
+
+    /// Back up the library. On Android the copy goes to the app's cache
+    /// first and the system's save dialog takes it from there; elsewhere
+    /// it's saved to the path typed, Downloads to start with.
+    fn start_backup(&mut self, ui: &AppWindow) {
+        let Some(db) = self.b.library_db() else {
+            return self.b.error("There's no library to back up");
+        };
+        let name = patina_core::library::backup_name();
+        let Some(hooks) = platform::hooks() else {
+            let dest = patina_core::library::backup_dest();
+            open_text(
+                ui,
+                "Back up the library",
+                "Save a copy to",
+                &dest.display().to_string(),
+                None,
+                "Save",
+            );
+            self.dlg = Dlg::Backup;
+            return;
+        };
+        if self.backup.is_some() {
+            return;
+        }
+        let tmp = patina_core::library::backup_scratch(&name);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let r = match patina_core::library::backup(&db, &tmp) {
+                Ok(_) => match hooks.save_file(&tmp, &name) {
+                    Picked::Path(p) => Ok(Some(format!(
+                        "Saved a copy of the library as {}",
+                        p.display()
+                    ))),
+                    Picked::Cancelled => Ok(None),
+                    Picked::Unavailable(why) => Err(why),
+                },
+                Err(e) => Err(format!("Couldn't back up the library: {e}")),
+            };
+            let _ = std::fs::remove_file(&tmp);
+            let _ = tx.send(r);
+        });
+        self.backup = Some(rx);
+        self.b.note("Backing up the library…");
+    }
+
+    fn poll_backup(&mut self) {
+        if let Some(rx) = &self.backup
+            && let Ok(r) = rx.try_recv()
+        {
+            self.backup = None;
+            match r {
+                Ok(Some(m)) => self.b.note(m),
+                Ok(None) => {}
+                Err(e) => self.b.error(e),
+            }
+        }
     }
 
     fn open_add_plex(&mut self, ui: &AppWindow) {
@@ -2960,6 +3045,7 @@ impl State {
             Control::Action(_) if st.key == SettingKey::MeasureLibrary => "measure",
             Control::Action(_) if st.key.is_eq() || st.key.is_amp() => "measure",
             Control::Action(_) if st.key == SettingKey::LastFmLink => "measure",
+            Control::Action(_) if st.key == SettingKey::BackupLibrary => "measure",
             Control::Action(_)
                 if matches!(
                     st.key,
@@ -3008,6 +3094,7 @@ impl State {
                 return self.b.change_setting(&key, Change::Toggle);
             }
             SettingKey::AddPlex => return self.open_add_plex(ui),
+            SettingKey::BackupLibrary => return self.start_backup(ui),
             SettingKey::AddIcecast => return self.open_add_icecast(ui),
             _ => {}
         }
@@ -3610,7 +3697,14 @@ impl State {
             self.driving = (platform::driving(), Some(Instant::now()));
         }
         let look = &self.b.config.appearance;
-        ui.set_minimal(look.minimal || (look.minimal_driving && self.driving.0));
+        let drive = look.minimal_driving && self.driving.0;
+        ui.set_minimal(look.minimal || drive);
+        if ui.get_drive() != drive {
+            ui.set_drive(drive);
+            // Full app lasts until driving ends; the next drive starts on
+            // the Drive screen again.
+            ui.set_drive_hidden(false);
+        }
         ui.set_backdrop(look.backdrop.index());
         ui.set_backdrop_strength(f32::from(look.backdrop_strength) / 100.0);
         let want_blur = look.backdrop != patina_core::config::Backdrop::Off;
@@ -4618,6 +4712,10 @@ impl State {
             return;
         }
         match std::mem::replace(&mut self.dlg, Dlg::None) {
+            Dlg::Backup => {
+                let p = patina_core::config::expand_tilde(&t1);
+                self.b.backup_library(Some(p));
+            }
             Dlg::AddPlex => {
                 let t3 = ui.get_dlg_text3().trim().to_string();
                 self.b.add_plex_by_token(&t1, &t2, &t3);
@@ -5917,7 +6015,11 @@ fn count_label(items: &[Item]) -> String {
                 patina_core::browse::ipod::IpodKind::Playlist(_) => "playlist",
                 patina_core::browse::ipod::IpodKind::Album { .. } => "album",
             },
-            Item::Header(_) | Item::Info { .. } | Item::Setting(_) | Item::Action { .. } => {
+            Item::Header(_)
+            | Item::Info { .. }
+            | Item::Setting(_)
+            | Item::Group { .. }
+            | Item::Action { .. } => {
                 continue;
             }
         };

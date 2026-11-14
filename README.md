@@ -186,7 +186,8 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 - A home screen widget with the cover, the song, and back, play or pause, and next, in the app's theme. It keeps the theme after a restart.
 - The System theme (Android 12 and later) follows your wallpaper's Material You colors and the phone's light or dark mode.
 - The volume button opens a tall slider, easier to hit with a thumb than the bar's.
-- Minimal UX while driving (Settings, Appearance, on by default): when the phone goes into car mode, which Android Auto turns on and so do driving modes built on it, the app switches to Minimal UX by itself, and back after.
+- The Drive screen (Minimal UX while driving, in Settings, Appearance, on by default): when the phone goes into car mode, which Android Auto turns on and so do driving modes built on it, the app shows a car-style screen instead of the usual one. The cover, the song in big type, a thick progress bar, huge previous, play and next buttons, and the heart, shuffle and volume under them. Swipe anywhere left or right for the next or previous song. On a landscape screen the cover sits beside the buttons. Full app goes back to the whole app until driving ends, and a Drive button in the corner brings the Drive screen back. When the phone leaves car mode it all goes back to normal.
+- Back up the library (Settings, Library) saves a copy of the library database through Android's save dialog, to Downloads, Drive or wherever you pick. It's the database the app keeps in its private folder: play counts, ratings, playlists, smart playlists, listening history and podcast positions. Passwords and tokens aren't in it; they're in the keyring.
 - Gestures: swipe up on the bottom bar to open Now Playing, swipe down anywhere on Now Playing to close it (the page follows your finger), and swipe the cover left or right for the next or previous song.
 - Back (the edge swipe or the button) closes what's open first (a dialog, the sidebar, a panel, Now Playing), then goes up a level, from an album back to its artist. At the top, a swipe in from the left edge pulls the sidebar out; from the right, or the button, leaves the app with the music playing. Telling the edges apart needs Android 14; on 13 both edges do what the right does.
 - Android Auto has a queue screen: what's coming up, with covers, and tapping a song plays it.
@@ -316,7 +317,7 @@ To play files without the library: `patinaplayer song.flac ~/Downloads/SomeAlbum
 
 ## Config
 
-Everything is in `~/.config/patinaplayer/config.toml`, and every option can be changed from Settings in either app. Settings writes straight back to the file and keeps your comments. A typo in a key name is an error, not a silent default, so you find out right away.
+Everything is in `~/.config/patinaplayer/config.toml`, and every option can be changed from Settings in either app. Settings is folded into groups (Library, Appearance, Playback and the rest), all closed when it opens; tap or press Enter on one to open it, and Open all or Fold all at the top does the lot. Settings writes straight back to the file and keeps your comments. A typo in a key name is an error, not a silent default, so you find out right away.
 
 ```toml
 [library]
@@ -447,12 +448,14 @@ Where everything else goes:
 |---|---|
 | Settings | `~/.config/patinaplayer/config.toml` |
 | EQ and amp stack presets | `~/.config/patinaplayer/presets/eq/` and `presets/amp/` |
-| Library index, playlists, smart playlists, play counts, listening history, ratings, podcast positions, loudness, waiting scrobbles and listens | `~/.local/share/patinaplayer/library.db` |
+| Library index, playlists, smart playlists, play counts, listening history, ratings, podcast positions, loudness, waiting scrobbles and listens | `~/.local/share/patinaplayer/library.db` (Settings, Library, Back up the library saves a copy; on the desktop it goes to Downloads, under a dated name) |
 | Songs kept offline, downloaded episodes | `~/.local/share/patinaplayer/offline/` |
 | Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
 | Cover art at the sizes the app draws | `~/.cache/patinaplayer/art/` |
 | Artist pictures, and which artists have none | `~/.cache/patinaplayer/artists/` |
 | Server passwords, the Last.fm session, the ListenBrainz token | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
+
+To restore a backup on the desktop, quit the app and copy it over `library.db`. On Android the app's folder is private to it, so a backup can't be put back from outside the app; there's no restore button yet.
 
 The index and the offline songs live in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists or a pinned library to that. The two caches are safe to wipe. They refill as you play.
 
@@ -552,6 +555,7 @@ To time indexing on your own collection: `cargo run --release -p patina-core --e
 - Icecast needs 2.4 or newer for its JSON status page. A stream that needs a password to listen won't play.
 - Metered connections are only detected through NetworkManager.
 - inotify needs one watch per folder, so a very large library can run past `fs.inotify.max_user_watches`. The app says so if it does, and raising the limit with `sysctl` fixes it.
+- On Android, a library backup can be saved but not restored from the app yet.
 - On Android, folders are added by path, so a folder from a cloud app's storage provider can't go in. Add that music through a server instead. Bit-perfect depends on the phone's maker offering it.
 - Covers are found by the album's tags, so an album tagged wrong turns up wrong covers or none. Fix the tags, or use an image file. Android Auto has been tried in one car so far, and its queue screen not yet in a car. The heart and shuffle icons come from Android Auto itself on newer versions; an older version draws the app's own.
 - The home screen widget's buttons control the player while the app is running. After the phone restarts, or Android stops the app, they open it instead, since there's no player to tell until it starts. With the System theme, the widget picks up a new wallpaper or a switch between light and dark mode the next time the app runs, since only the app can work out the colors.

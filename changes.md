@@ -1,5 +1,14 @@
 # Changes
 
+2026.11.14 - UX overhaul (Drive screen, folded Settings) / Feature addition (library backup)
+
+* The Drive screen: with Minimal UX while driving on (the default) and the phone in car mode, the app shows a car-style screen in place of the usual one, the way Android Auto lays things out. The cover, the song in big type, a thick progress bar, previous and next at 92 px and play at 124 px, and the heart, shuffle and volume down and up under them. A swipe left or right anywhere on it skips. Landscape puts the cover beside the buttons. Full app shows the whole app until driving ends; a Drive button in the corner brings the Drive screen back.
+* Settings is folded into its groups (Library, Appearance, Playback, Output, Bit-perfect, Leveling and the rest), all closed when it opens, each showing how many settings it holds. Tap one, or press Enter on it, to open or fold it. Open all and Fold all sit at the top. The Sources pages and the EQ and Amp views stay as they were.
+* Back up the library, in Settings, Library: a copy of the library database made with SQLite's VACUUM INTO, consistent even while the app is using it. On Android it's written to the app's cache and handed to the system's save dialog (ACTION_CREATE_DOCUMENT), so it can go to Downloads, a cloud drive or a USB stick, then the scratch copy is deleted. On the desktop and in the terminal app it saves to Downloads (or the path typed) as patinaplayer-library-YYYY-MM-DD-HHMM.db.
+* Tests: Settings opens folded with only groups, opening one shows its rows and only its rows, and it folds again; a backup made while the library is open opens as a library with the same songs, and a second one replaces the first.
+
+Reasons for changes: asked for Minimal UX while driving to look like Android Auto's simple screen with big buttons and swiping, a way to back up the library database out of the app's private folder on Android, and Settings to be collapsible groups that start collapsed now that it's grown busy.
+
 2026.11.14 - Feature addition (Plex, Icecast, Snapcast rooms, Sources pages) / Bug fixes (Android back gesture)
 
 * Plex Media Server as a fourth kind of server, written to Plex's published API (developer.plex.tv/pms) and checked call by call against it and the community OpenAPI spec. Music libraries sync into the index like the other servers, songs stream as the original file, ratings go both ways (out of ten in Plex), playlists come across and changes go back, and Plex's smart playlists come across read-only.

@@ -35,7 +35,67 @@ final class Picker {
     private static final String STORAGE = "com.android.externalstorage.documents";
     private static final String DOWNLOADS = "com.android.providers.downloads.documents";
 
+    /** The file a save dialog is open for. */
+    private static String saving;
+
     private Picker() {}
+
+    /**
+     * The system's save dialog (ACTION_CREATE_DOCUMENT), for a copy of the
+     * file at src. Where it's saved, Downloads or a cloud drive, is up to
+     * the person; the copy is written there in onResult.
+     */
+    static void save(Activity a, String src, String name) {
+        if (a == null || a.isFinishing()) {
+            Native.pickDone(Native.PICK_SAVE, null, "The app isn't on screen to open the save dialog");
+            return;
+        }
+        saving = src;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/vnd.sqlite3");
+        i.putExtra(Intent.EXTRA_TITLE, name);
+        try {
+            a.startActivityForResult(i, REQUEST_BASE + Native.PICK_SAVE);
+        } catch (ActivityNotFoundException e) {
+            saving = null;
+            Native.pickDone(Native.PICK_SAVE, null, "This phone has no save dialog");
+        }
+    }
+
+    /** Copy the file being saved to where the dialog said. */
+    private static void finishSave(Activity a, Uri uri) {
+        String src = saving;
+        saving = null;
+        if (src == null) {
+            Native.pickDone(Native.PICK_SAVE, null, "Nothing to save");
+            return;
+        }
+        try (InputStream in = new java.io.FileInputStream(src);
+             OutputStream out = a.getContentResolver().openOutputStream(uri, "w")) {
+            if (out == null) {
+                throw new java.io.IOException("no stream");
+            }
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        } catch (Exception e) {
+            Native.pickDone(Native.PICK_SAVE, null, "Couldn't save the copy: " + e.getMessage());
+            return;
+        }
+        String name = null;
+        try (Cursor cur = a.getContentResolver().query(uri,
+                new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cur != null && cur.moveToFirst() && !cur.isNull(0)) {
+                name = cur.getString(0);
+            }
+        } catch (Exception e) {
+            // The name is only for the message.
+        }
+        Native.pickDone(Native.PICK_SAVE, name != null ? name : uri.toString(), null);
+    }
 
     static void start(Activity a, int what) {
         if (a == null || a.isFinishing()) {
@@ -73,12 +133,19 @@ final class Picker {
     static boolean onResult(Activity a, int request, int result, Intent data) {
         int what = request - REQUEST_BASE;
         if (what != Native.PICK_FOLDER && what != Native.PICK_EQ_FILE
-                && what != Native.PICK_IMAGE) {
+                && what != Native.PICK_IMAGE && what != Native.PICK_SAVE) {
             return false;
         }
         Uri uri = result == Activity.RESULT_OK && data != null ? data.getData() : null;
         if (uri == null) {
+            if (what == Native.PICK_SAVE) {
+                saving = null;
+            }
             Native.pickDone(what, null, null);
+            return true;
+        }
+        if (what == Native.PICK_SAVE) {
+            finishSave(a, uri);
             return true;
         }
         if (what == Native.PICK_FOLDER) {

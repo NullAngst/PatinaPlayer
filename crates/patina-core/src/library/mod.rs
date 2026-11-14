@@ -39,6 +39,52 @@ pub enum LibError {
 
 pub type Result<T> = std::result::Result<T, LibError>;
 
+/// Copy the library database at `db` to `dest`, whole and consistent, while
+/// the app keeps using it: SQLite's `VACUUM INTO` writes a fresh, compacted
+/// copy from one snapshot. A file already at `dest` is replaced. Returns the
+/// copy's size in bytes.
+pub fn backup(db: &Path, dest: &Path) -> Result<u64> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    match std::fs::remove_file(dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
+    Ok(std::fs::metadata(dest)?.len())
+}
+
+/// Where a backup goes unless told: Downloads, else the home folder.
+pub fn backup_dest() -> PathBuf {
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(backup_name())
+}
+
+/// Where a backup waits for a save dialog to take it: the app's cache.
+pub fn backup_scratch(name: &str) -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("patinaplayer")
+        .join(name)
+}
+
+/// A backup's file name: `patinaplayer-library-2026-11-14-0352.db`.
+pub fn backup_name() -> String {
+    format!(
+        "patinaplayer-library-{}.db",
+        chrono::Local::now().format("%Y-%m-%d-%H%M")
+    )
+}
+
 pub(crate) fn path_bytes(p: &Path) -> &[u8] {
     p.as_os_str().as_bytes()
 }

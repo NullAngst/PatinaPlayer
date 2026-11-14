@@ -420,12 +420,14 @@ fn level_kind(items: &[Item]) -> Kind {
             .any(|i| matches!(i, Item::Album(_) | Item::Artist { .. }))
     {
         Kind::Tracks
-    } else if items
+    } else if items.iter().all(|i| {
+        matches!(
+            i,
+            Item::Info { .. } | Item::Setting(_) | Item::Header(_) | Item::Group { .. }
+        )
+    }) && items
         .iter()
-        .all(|i| matches!(i, Item::Info { .. } | Item::Setting(_) | Item::Header(_)))
-        && items
-            .iter()
-            .any(|i| matches!(i, Item::Info { .. } | Item::Setting(_)))
+        .any(|i| matches!(i, Item::Info { .. } | Item::Setting(_)))
     {
         Kind::Info
     } else if items.iter().all(|i| matches!(i, Item::Station { .. })) {
@@ -1061,6 +1063,20 @@ fn item_row<'a>(
                 )),
             ]
         }
+        Item::Group { name, open, count } => vec![
+            Cell::from(Span::styled(
+                if *open { "▾" } else { "▸" },
+                Style::default().fg(t.verdigris),
+            )),
+            Cell::from(""),
+            Cell::from(Span::styled(
+                name.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(format!("{count} settings"), dim)),
+            Cell::from(""),
+            Cell::from(""),
+        ],
         Item::Header(h) => vec![
             Cell::from(""),
             Cell::from(""),

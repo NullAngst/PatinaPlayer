@@ -224,6 +224,14 @@ pub enum Item {
     Header(std::borrow::Cow<'static, str>),
     /// One option in Settings.
     Setting(super::settings::Setting),
+    /// A group of Settings rows, folded or open. Opening it shows the rows
+    /// under it.
+    Group {
+        name: String,
+        open: bool,
+        /// Rows in it.
+        count: usize,
+    },
     /// Label and value, for Downloads.
     Info {
         label: String,
@@ -374,6 +382,7 @@ impl Item {
             Item::Podcast(p) => format!("pc:{}", p.id),
             Item::Episode(e) => format!("e:{}", e.id),
             Item::Header(h) => format!("h:{h}"),
+            Item::Group { name, .. } => format!("grp:{name}"),
             Item::Info { label, .. } => format!("i:{label}"),
             Item::Setting(s) => format!("s:{:?}", s.key),
             Item::Pinned(p) => format!("pin:{}", p.pin.id),
@@ -502,6 +511,8 @@ pub struct SettingsState<'a> {
     /// The remote control's port while other players can control this one.
     pub remote_port: Option<u16>,
     pub snap: super::settings::SnapLive,
+    /// Settings groups that are open; the rest are folded.
+    pub open_groups: &'a std::collections::HashSet<String>,
 }
 
 /// Everything a view can draw from besides the library itself.
@@ -641,6 +652,32 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             );
             let only = page.source_group();
             let mut items = Vec::new();
+            // Settings itself: each group folds, and starts folded.
+            if only.is_none() {
+                let mut groups: Vec<(&'static str, Vec<super::settings::Setting>)> = Vec::new();
+                for (group, setting) in rows {
+                    let g = group.unwrap_or("Other");
+                    if super::settings::SOURCE_GROUPS.contains(&g) {
+                        continue;
+                    }
+                    match groups.iter_mut().find(|(n, _)| *n == g) {
+                        Some((_, v)) => v.push(setting),
+                        None => groups.push((g, vec![setting])),
+                    }
+                }
+                for (g, list) in groups {
+                    let open = st.open_groups.contains(g);
+                    items.push(Item::Group {
+                        name: g.to_string(),
+                        open,
+                        count: list.len(),
+                    });
+                    if open {
+                        items.extend(list.into_iter().map(Item::Setting));
+                    }
+                }
+                return Ok((page.label().into(), items));
+            }
             let mut last = None;
             for (group, setting) in rows {
                 let source_row = group.is_some_and(|g| super::settings::SOURCE_GROUPS.contains(&g));

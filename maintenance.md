@@ -79,6 +79,12 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 6. Snapcast rooms use `Server.GetStatus`, `Group.SetClients`, `Group.SetStream` and `Client.SetVolume` from the control API doc in the Snapcast repo. Turn a room on that shares a group with another, check only it moves to the Patina stream, then turn it off and check it goes back.
 7. Android: on a phone with Android 14 or later, open an album and swipe in from the left edge (it should go back to the artist), then at the top swipe from the left (the sidebar should open) and from the right (the app should go to the background, music playing).
 
+## 5.10. The Drive screen, folded Settings and the library backup
+
+1. With Android Auto connected (or car mode on through a driving mode), check the Drive screen shows, swiping skips, the buttons work, Full app leaves it and the Drive button brings it back, and that it goes away when car mode ends. Rotate the phone to check the landscape layout. The screen is `DriveView` in `crates/patina-gui/ui/app.slint`.
+2. Open Settings: every group should start folded. If a new group was added, it folds like the rest without anything to change; `cargo test -p patina-core --test browse settings_groups` checks it.
+3. Back up the library on the phone to Downloads, and on the desktop. Open the copy with `sqlite3 copy.db "PRAGMA integrity_check"`; it should say ok. Android's save dialog is `Picker.save` in `android/java/dev/patina/player/Picker.java`.
+
 ## 6. ListenBrainz and Last.fm
 
 1. In Settings, check the ListenBrainz row still shows your user name. If it says the token is refused, make a new one at listenbrainz.org/settings and paste it in.

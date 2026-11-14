@@ -151,6 +151,10 @@ impl Hooks for AndroidHooks {
         jni_glue::pick_image()
     }
 
+    fn save_file(&self, src: &std::path::Path, name: &str) -> Picked {
+        jni_glue::save_copy(src, name)
+    }
+
     fn prompt(&self, id: u64, p: &Prompt) -> bool {
         jni_glue::prompt(id, p)
     }

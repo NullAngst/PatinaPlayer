@@ -19,6 +19,8 @@ pub enum Key {
     Folder(PathBuf),
     AddFolder,
     Watch,
+    /// Save a copy of the library database somewhere.
+    BackupLibrary,
     Theme,
     /// The GUI's sidebar with the window wider than it's tall.
     SidebarLandscape,
@@ -497,6 +499,16 @@ pub fn rows(
                 label: "Watch for changes".into(),
                 help: "Pick up added, changed and removed files while the player runs.",
                 control: Control::Toggle(cfg.library.watch),
+            },
+        );
+        push(
+            "Library",
+            Setting {
+                disabled: None,
+                key: Key::BackupLibrary,
+                label: "Back up the library".into(),
+                help: "Saves a copy of the library database: play counts, ratings, playlists, smart playlists, history, podcast positions. Passwords aren't in it; they're in the keyring.",
+                control: Control::Action("Back up…"),
             },
         );
     }

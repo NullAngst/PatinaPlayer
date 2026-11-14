@@ -1257,6 +1257,9 @@ impl App {
                 {
                     self.b.change_setting(&st.key, Change::Toggle)
                 }
+                Control::Action(_) if st.key == SettingKey::BackupLibrary => {
+                    self.b.change_setting(&st.key, Change::Toggle)
+                }
                 Control::Action(_) if st.key == SettingKey::AddPlex => {
                     self.modal = Modal::Input {
                         purpose: InputPurpose::PlexByHand,

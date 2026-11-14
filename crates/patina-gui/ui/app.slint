@@ -1411,7 +1411,7 @@ component ListRow inherits Rectangle {
     // Rows that can be picked for a multiple selection.
     property <bool> markable: item.selectable && (item.kind <= 8 || item.kind == 11 || item.kind == 16 || item.kind == 17);
     property <bool> has-grip: root.draggable && (item.kind == 0 || item.kind == 11);
-    height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : 40px);
+    height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : (item.kind == 19 ? 50px : 40px));
     z: root.dragging ? 10 : 0;
     background: root.dragging ? transparent : (item.playing ? P.playing-bg : (item.marked || root.lifted ? P.raised : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent))));
     border-radius: 6px * P.round;
@@ -1427,6 +1427,44 @@ component ListRow inherits Rectangle {
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.9px;
+    }
+
+    // A Settings group: its name, how many rows it holds, and a chevron
+    // that turns when it's open. A tap opens or folds it.
+    if item.kind == 19: HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 16px;
+        spacing: 12px;
+        Text {
+            text: item.title;
+            vertical-alignment: center;
+            font-size: 14.5px;
+            font-weight: 600;
+            color: item.on ? P.accent-text : P.text;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: item.sub;
+            vertical-alignment: center;
+            font-size: 12px;
+            color: P.muted;
+        }
+        Rectangle {
+            width: 18px;
+            Path {
+                width: 14px;
+                height: 14px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: item.on ? "M6 9l6 6 6-6" : "M9 6l6 6-6 6";
+                stroke: item.on ? P.accent-text : P.muted;
+                stroke-width: 2px;
+                fill: transparent;
+            }
+        }
     }
 
     // Picked: a bar down the left edge.
@@ -1449,7 +1487,7 @@ component ListRow inherits Rectangle {
         drop-shadow-blur: 10px;
         drop-shadow-color: P.shadow;
     }
-    if item.kind != 9 && item.kind != 12: HorizontalLayout {
+    if item.kind != 9 && item.kind != 12 && item.kind != 19: HorizontalLayout {
         y: root.dragging ? root.drag-dy : 0px;
         height: root.height;
         padding-left: 8px;
@@ -2608,6 +2646,315 @@ component NowPlayingPage inherits Rectangle {
 // transport, volume, and lyrics and the queue at the foot. Everything
 // else (rating, going to the album or artist, the cover, the sound chain)
 // is in the menu at the top.
+// ----- Driving -----
+
+// A big round button for the Drive screen: easy to hit at a glance.
+component DriveButton inherits Rectangle {
+    in property <string> icon;
+    in property <length> size: 84px;
+    in property <bool> primary;
+    // Lit: the heart while loved, shuffle while on.
+    in property <bool> lit;
+    // Solid shapes (play, skip, the heart) rather than lines.
+    in property <bool> solid: true;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: self.size;
+    height: self.size;
+    border-radius: self.size / 2;
+    opacity: self.enabled ? 1 : 0.4;
+    background: self.primary
+        ? (dta.pressed ? P.accent-hover : P.verdigris)
+        : (dta.pressed ? P.raised : (self.lit ? P.verdigris-dim : P.surface));
+    border-width: self.primary ? 0px : 1px;
+    border-color: self.lit ? P.verdigris : P.border;
+    property <color> ink: self.primary ? P.on-accent : (self.lit ? P.accent-text : P.text);
+    Path {
+        width: root.size * 0.42;
+        height: root.size * 0.42;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon;
+        fill: root.solid ? root.ink : transparent;
+        stroke: root.solid ? transparent : root.ink;
+        stroke-width: 2.4px;
+    }
+    dta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The song on the Drive screen: big type, and a thick bar for where it is.
+component DriveInfo inherits VerticalLayout {
+    in property <bool> has-track;
+    in property <string> title;
+    in property <string> artist;
+    in property <float> position;
+    in property <string> elapsed;
+    in property <string> remaining;
+    spacing: 8px;
+    Text {
+        text: root.has-track ? root.title : "Nothing playing";
+        horizontal-alignment: center;
+        overflow: elide;
+        font-size: 28px;
+        font-weight: 700;
+        color: P.text;
+    }
+    Text {
+        text: root.artist;
+        horizontal-alignment: center;
+        overflow: elide;
+        font-size: 19px;
+        color: P.muted;
+    }
+    Rectangle { height: 6px; }
+    Rectangle {
+        height: 8px;
+        border-radius: 4px;
+        background: P.raised;
+        Rectangle {
+            x: 0;
+            width: parent.width * clamp(root.position, 0, 1);
+            border-radius: 4px;
+            background: P.verdigris;
+        }
+    }
+    HorizontalLayout {
+        Text { text: root.elapsed; font-size: 15px; color: P.muted; font-family: P.mono; }
+        Rectangle { horizontal-stretch: 1; }
+        Text { text: root.remaining; font-size: 15px; color: P.muted; font-family: P.mono; }
+    }
+}
+
+// The Drive screen's buttons: skip and play big in the middle, the heart,
+// shuffle and volume under them.
+component DriveControls inherits VerticalLayout {
+    in property <bool> has-track;
+    in property <bool> playing;
+    in property <bool> shuffle;
+    in property <int> love-state;
+    in property <float> volume;
+    in property <bool> volume-locked;
+    callback play-pause;
+    callback prev;
+    callback next;
+    callback toggle-shuffle;
+    callback love;
+    callback set-volume(float);
+    spacing: 22px;
+    HorizontalLayout {
+        alignment: center;
+        spacing: 26px;
+        DriveButton {
+            y: (parent.height - self.height) / 2;
+            icon: Icons.prev;
+            size: 92px;
+            enabled: root.has-track;
+            clicked => { root.prev(); }
+        }
+        DriveButton {
+            icon: root.playing ? Icons.pause : Icons.play;
+            size: 124px;
+            primary: true;
+            enabled: root.has-track;
+            clicked => { root.play-pause(); }
+        }
+        DriveButton {
+            y: (parent.height - self.height) / 2;
+            icon: Icons.next;
+            size: 92px;
+            enabled: root.has-track;
+            clicked => { root.next(); }
+        }
+    }
+    HorizontalLayout {
+        alignment: center;
+        spacing: 18px;
+        if root.love-state > 0: DriveButton {
+            icon: Icons.heart;
+            size: 68px;
+            lit: root.love-state == 2;
+            solid: root.love-state == 2;
+            clicked => { root.love(); }
+        }
+        DriveButton {
+            icon: Icons.shuffle;
+            size: 68px;
+            solid: false;
+            lit: root.shuffle;
+            clicked => { root.toggle-shuffle(); }
+        }
+        DriveButton {
+            icon: Icons.volume-low;
+            size: 68px;
+            solid: false;
+            enabled: !root.volume-locked;
+            clicked => { root.set-volume(max(0, root.volume - 0.1)); }
+        }
+        DriveButton {
+            icon: Icons.volume;
+            size: 68px;
+            solid: false;
+            enabled: !root.volume-locked;
+            clicked => { root.set-volume(min(1, root.volume + 0.1)); }
+        }
+    }
+}
+
+// The car screen in the app: Minimal UX while driving. What Android Auto
+// shows, and no more: the cover, the song, where it is, and buttons a
+// thumb finds without looking twice. Swipe anywhere for the next or the
+// previous song.
+component DriveView inherits Rectangle {
+    in property <bool> has-track;
+    in property <string> title;
+    in property <string> artist;
+    in property <image> art;
+    in property <bool> has-art;
+    in property <bool> playing;
+    in property <float> position;
+    in property <string> elapsed;
+    in property <string> remaining;
+    in property <bool> shuffle;
+    in property <int> love-state;
+    in property <float> volume;
+    in property <bool> volume-locked;
+    callback play-pause;
+    callback prev;
+    callback next;
+    callback toggle-shuffle;
+    callback love;
+    callback set-volume(float);
+    // Back to the whole app, until driving ends.
+    callback leave;
+    property <bool> wide: self.width > self.height * 1.15;
+    // Room for the cover: what the rest leaves.
+    property <length> cover: self.wide
+        ? max(120px, min(self.height - 48px, self.width * 0.42))
+        : max(120px, min(self.width - 48px, self.height - 470px, 520px));
+    property <length> slide: swipe.swiping ? swipe.current-position.x - swipe.pressed-position.x : 0px;
+    background: P.bg;
+    // Swallow taps that miss a button, so nothing behind reacts.
+    TouchArea {}
+
+    swipe := SwipeGestureHandler {
+        handle-swipe-left: root.has-track;
+        handle-swipe-right: root.has-track;
+        swiped => {
+            if self.current-position.x - self.pressed-position.x < -60px {
+                root.next();
+            } else if self.current-position.x - self.pressed-position.x > 60px {
+                root.prev();
+            }
+        }
+
+        // Top: the way back to the whole app.
+        Rectangle {
+            x: parent.width - self.width - 16px;
+            y: 12px;
+            width: 132px;
+            height: 44px;
+            z: 2;
+            border-radius: 22px;
+            background: lta.pressed ? P.raised : P.surface;
+            border-width: 1px;
+            border-color: P.border;
+            Text {
+                text: "Full app";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 15px;
+                font-weight: 600;
+                color: P.text;
+            }
+            lta := TouchArea { clicked => { root.leave(); } }
+        }
+
+        GridLayout {
+            padding: 20px;
+            padding-top: 64px;
+            spacing: 18px;
+            // The cover, beside everything else on a wide screen and
+            // above it on a tall one.
+            Row {
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: root.cover;
+                        height: root.cover;
+                        Cover {
+                            x: root.slide;
+                            opacity: 1 - min(0.6, abs(root.slide) / root.cover);
+                            width: root.cover;
+                            height: root.cover;
+                            art: root.art;
+                            has-art: root.has-art;
+                            radius: 18px;
+                        }
+                    }
+                }
+                if root.wide: VerticalLayout {
+                    alignment: center;
+                    spacing: 18px;
+                    horizontal-stretch: 1;
+                    DriveInfo {
+                        has-track: root.has-track;
+                        title: root.title;
+                        artist: root.artist;
+                        position: root.position;
+                        elapsed: root.elapsed;
+                        remaining: root.remaining;
+                    }
+                    DriveControls {
+                        has-track: root.has-track;
+                        playing: root.playing;
+                        shuffle: root.shuffle;
+                        love-state: root.love-state;
+                        volume: root.volume;
+                        volume-locked: root.volume-locked;
+                        play-pause => { root.play-pause(); }
+                        prev => { root.prev(); }
+                        next => { root.next(); }
+                        toggle-shuffle => { root.toggle-shuffle(); }
+                        love => { root.love(); }
+                        set-volume(v) => { root.set-volume(v); }
+                    }
+                }
+            }
+            if !root.wide: Row {
+                DriveInfo {
+                    has-track: root.has-track;
+                    title: root.title;
+                    artist: root.artist;
+                    position: root.position;
+                    elapsed: root.elapsed;
+                    remaining: root.remaining;
+                }
+            }
+            if !root.wide: Row {
+                DriveControls {
+                    has-track: root.has-track;
+                    playing: root.playing;
+                    shuffle: root.shuffle;
+                    love-state: root.love-state;
+                    volume: root.volume;
+                    volume-locked: root.volume-locked;
+                    play-pause => { root.play-pause(); }
+                    prev => { root.prev(); }
+                    next => { root.next(); }
+                    toggle-shuffle => { root.toggle-shuffle(); }
+                    love => { root.love(); }
+                    set-volume(v) => { root.set-volume(v); }
+                }
+            }
+        }
+    }
+}
+
 component NowPlayingPhone inherits Rectangle {
     in property <bool> has-track;
     in property <string> title;
@@ -3877,6 +4224,10 @@ export component AppWindow inherits Window {
     // Minimal UX: the technical readouts left out of the bottom bar and
     // Now Playing, and the output device a plain button.
     in property <bool> minimal;
+    // Driving, with Minimal UX while driving on: the Drive screen shows,
+    // unless Full app was tapped (until driving ends).
+    in property <bool> drive;
+    in-out property <bool> drive-hidden;
     // Playing on another device, and its name.
     in property <bool> casting;
     in property <string> cast-name;
@@ -5787,6 +6138,55 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 color: root.toast-error ? P.copper : P.text;
             }
+        }
+
+        // ----- Driving -----
+        if root.drive && !root.drive-hidden && !root.rm-open: DriveView {
+            x: 0;
+            y: 0;
+            width: keys.width;
+            height: keys.height;
+            has-track: root.has-track;
+            title: root.np-title;
+            artist: root.np-artist;
+            art: root.np-art;
+            has-art: root.np-has-art;
+            playing: root.playing;
+            position: root.position;
+            elapsed: root.elapsed;
+            remaining: root.remaining;
+            shuffle: root.shuffle;
+            love-state: root.love-state;
+            volume: root.volume;
+            volume-locked: root.volume-locked;
+            play-pause => { root.play-pause(); }
+            prev => { root.prev(); }
+            next => { root.next(); }
+            toggle-shuffle => { root.toggle-shuffle(); }
+            love => { root.love-clicked(); }
+            set-volume(v) => { root.set-volume(v); }
+            leave => { root.drive-hidden = true; keys.focus(); }
+        }
+        // Back to the Drive screen from the whole app, while driving.
+        if root.drive && root.drive-hidden && !root.rm-open: Rectangle {
+            x: parent.width - self.width - 14px;
+            y: 10px;
+            width: 112px;
+            height: 40px;
+            z: 5;
+            border-radius: 20px;
+            background: dra.pressed ? P.accent-hover : P.verdigris;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: P.shadow;
+            Text {
+                text: "Drive";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 15px;
+                font-weight: 700;
+                color: P.on-accent;
+            }
+            dra := TouchArea { clicked => { root.drive-hidden = false; } }
         }
 
         // ----- Steering another player -----

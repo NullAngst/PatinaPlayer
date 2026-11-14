@@ -37,6 +37,7 @@ final class Native {
     static final int PICK_FOLDER = 1;
     static final int PICK_EQ_FILE = 2;
     static final int PICK_IMAGE = 3;
+    static final int PICK_SAVE = 4;
 
     /** Playback state, as Rust reports it. */
     static final int STOPPED = 0;
@@ -219,6 +220,11 @@ final class Native {
     /** Open the system's file picker for an EQ file to import. */
     static void pickFile() {
         main.post(() -> Picker.start(activity.get(), PICK_EQ_FILE));
+    }
+
+    /** The system's save dialog, for a copy of the file at src. */
+    static void saveCopy(String src, String name) {
+        main.post(() -> Picker.save(activity.get(), src, name));
     }
 
     /** Open the system's picker for an image (an album's cover). */
