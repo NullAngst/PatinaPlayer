@@ -695,6 +695,19 @@ impl Browser {
         self.open_section(s, false);
     }
 
+    /// Step Now Playing's visualizer on to the next style, as a click on
+    /// the cover does, and keep it.
+    pub fn next_visualizer(&mut self) {
+        let next = self.config.appearance.visualizer.next();
+        if let Err(e) =
+            config::set_value(&self.config_path, "appearance", "visualizer", next.as_str())
+        {
+            self.error(format!("couldn't save to the config: {e}"));
+        }
+        self.config.appearance.visualizer = next;
+        self.refresh_or_stale(Section::Settings);
+    }
+
     /// Switch, but leave a first build that could take a while (a big
     /// library, a server) for `finish_pending`. The window draws
     /// placeholder rows in between, so the click shows at once.
@@ -1924,6 +1937,20 @@ impl Browser {
                     let v = &options[*index].0;
                     w(config::set_value(&path, "appearance", "theme", v.as_str()))?;
                     self.config.appearance.theme = v.parse().unwrap_or_default();
+                }
+                (Key::Visualizer, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(
+                        &path,
+                        "appearance",
+                        "visualizer",
+                        v.as_str(),
+                    ))?;
+                    self.config.appearance.visualizer = v.parse().unwrap_or_default();
+                }
+                (Key::MinimalUi, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "appearance", "minimal", *on))?;
+                    self.config.appearance.minimal = *on;
                 }
                 (Key::CoverAccent, Control::Toggle(on)) => {
                     w(config::set_value(&path, "appearance", "cover_accent", *on))?;

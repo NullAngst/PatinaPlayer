@@ -26,7 +26,9 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 - Pick several rows and act on them at once: play them, queue them, add them to a playlist, keep them offline, send them to an iPod, or take them out of a playlist or the queue. Ctrl-click and Shift-click on the desktop, Space in the terminal app, and on a phone long press, Select, then tap the others. A bar at the bottom says how many are picked.
 - Drag songs by the grip at the right of each row to reorder the queue or a playlist. On a touch screen, tap the grip to lift the song and tap where it should go.
 - Now Playing: at the top of the sidebar, or tap the cover in the bottom bar (Ctrl+N in the terminal app), for the big cover, the song, its format, whether it's bit-perfect, the output it's going to, every stage of the sound chain that's touching it, and the lyrics beside it. Going anywhere else (the sidebar, a search, Back, Go to album) closes it, so you see where you went. On a phone it takes the whole screen and keeps it simple: the cover, the song with its heart, the seek bar with the format between the times, the transport, volume, and lyrics and the queue at the foot. Rating, Go to album or artist, the cover and the sound chain are in the menu at the top.
-- Cover backdrop: the playing song's cover, blurred, washed over whatever theme you use, behind Now Playing or behind every view. Off by default; Settings, Appearance turns it on and sets how strong it is.
+- Cover backdrop: the playing song's cover, blurred, washed over whatever theme you use, behind Now Playing or behind every view. Off by default; Settings, Appearance turns it on and sets how strong it is. It works the same on every theme, OLED included (though on OLED it lights pixels that would otherwise be off). Behind every view, the sidebar, the bottom bar, the queue and lyrics panels, the search box and the EQ and amp panels let it through too. A light cover under light text (or a dark one under dark text) gets a veil of the theme's own ground over it, as much as the muted text needs to stay readable and no more.
+- Visualizer on Now Playing: click (tap) the cover to step through bars, mirrored bars, an oscilloscope, a ring, and back to just the cover. It draws what's actually going out, after the EQ and the rest of the chain. The choice is kept, and it's also in Settings, Appearance.
+- Minimal UX (Settings, Appearance): the bottom bar loses the limiter, EQ, amp, gain and format badges, and the output device becomes a plain button beside cast and the sleep timer (its name in the tooltip). Now Playing loses the format, the output line and the sound chain. Everything still works; it just isn't shown.
 - Cover accent: the play button, the seek and volume bars and Now Playing's buttons take a strong color from the playing cover instead of the theme's. A cover with no strong color (black and white, washed out) keeps the theme's. Off by default, in Settings, Appearance.
 - Artist pictures, round, in Artists. A local artist's folder can hold one (`artist.jpg`, `band.jpg`, `photo.jpg`, or `folder.jpg` in the folder above the albums); Subsonic and Ampache servers send their own. An artist with no picture anywhere gets a plain mark, and isn't asked about again for a week.
 - A section opened for the first time shows placeholder rows while it's read, and covers still loading shimmer, so a big library never looks stuck or empty.
@@ -305,6 +307,8 @@ sidebar_portrait = "auto"
 backdrop = "off"         # off, now-playing or everywhere: the playing cover, blurred
 backdrop_strength = 60   # 10 to 100 percent
 cover_accent = false     # color the transport from the playing cover
+minimal = false          # leave the technical readouts off the bar and Now Playing
+visualizer = "off"       # off, bars, mirror, scope or ring; clicking the cover steps through
 
 [playback]
 volume = 80              # starting volume, 0 to 100

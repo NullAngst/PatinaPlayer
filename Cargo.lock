@@ -4869,6 +4869,7 @@ dependencies = [
  "ndk 0.9.0",
  "notify",
  "pipewire",
+ "realfft",
  "reqwest",
  "roxmltree",
  "rss",

@@ -243,7 +243,7 @@ pub struct State {
     blur_key: Option<(PathBuf, bool)>,
     /// What the backdrop and the cover accent were made for: whether each
     /// is on, and the theme's ground color.
-    look_flags: (bool, bool, u32),
+    look_flags: (bool, bool, u32, u8),
     /// Placeholder rows went up for a section still to be read.
     loading_shown: bool,
     /// The cast and player pickers, as last filled: redrawn when a search
@@ -252,6 +252,9 @@ pub struct State {
     players_shown: u64,
     /// Another player being steered from here.
     remote: Option<crate::remote_view::RemoteView>,
+    /// Now Playing's visualizer: the analyzer and its bars' model.
+    vis: patina_core::visual::Analyzer,
+    vis_bars: Rc<VecModel<f32>>,
 }
 
 /// Lists at least this long keep their built rows for when they're opened
@@ -470,11 +473,13 @@ impl State {
             covers_model: Rc::new(VecModel::default()),
             cover_file_pick: None,
             blur_key: None,
-            look_flags: (false, false, 0),
+            look_flags: (false, false, 0, 0),
             loading_shown: false,
             cast_shown: u64::MAX,
             players_shown: u64::MAX,
             remote: None,
+            vis: patina_core::visual::Analyzer::new(VIS_BARS),
+            vis_bars: Rc::new(VecModel::default()),
         }
     }
 
@@ -2453,6 +2458,34 @@ impl State {
         self.dlg = Dlg::Confirm(c);
     }
 
+    // ----- The visualizer -----
+
+    /// Every frame (30 a second): while Now Playing shows a visualizer,
+    /// read what's going out and draw it. Otherwise make sure the renderer
+    /// isn't copying samples for nobody.
+    fn vis_tick(&mut self, ui: &AppWindow) {
+        let style = self.b.config.appearance.visualizer;
+        ui.set_vis_style(style.index());
+        let scope = self.b.player.scope();
+        let showing = style != patina_core::config::Visualizer::Off
+            && ui.get_np_open()
+            && self.remote.is_none()
+            && self.snap.track.is_some();
+        if scope.is_on() != showing {
+            scope.set_on(showing);
+        }
+        if !showing {
+            return;
+        }
+        let f = self.vis.frame(scope, self.snap.state == PlayState::Playing);
+        if ui.get_vis_bars().row_count() != f.bars.len() {
+            ui.set_vis_bars(ModelRc::from(self.vis_bars.clone()));
+        }
+        self.vis_bars.set_vec(f.bars.clone());
+        ui.set_vis_wave(ss(wave_path(&f.wave)));
+        ui.set_vis_ring(ss(ring_path(&f.bars)));
+    }
+
     // ----- Other devices -----
 
     /// Play on: this device or one on the network. Looks again each time,
@@ -3350,12 +3383,21 @@ impl State {
     /// when the song or its cover changes.
     fn sync_backdrop(&mut self, ui: &AppWindow) {
         let look = &self.b.config.appearance;
+        ui.set_minimal(look.minimal);
         ui.set_backdrop(look.backdrop.index());
         ui.set_backdrop_strength(f32::from(look.backdrop_strength) / 100.0);
         let want_blur = look.backdrop != patina_core::config::Backdrop::Off;
         let want_accent = look.cover_accent;
         let bg = ui.global::<P>().get_bg();
-        let flags = (want_blur, want_accent, bg.as_argb_encoded());
+        let flags = (
+            want_blur,
+            want_accent,
+            bg.as_argb_encoded(),
+            look.backdrop_strength,
+        );
+        let everywhere = look.backdrop == patina_core::config::Backdrop::Everywhere;
+        ui.global::<P>()
+            .set_wash(everywhere && ui.get_np_has_blur());
         let has = ui.get_np_has_art();
         let key = self.playing_path().map(|p| (p, has));
         if key == self.blur_key && flags == self.look_flags {
@@ -3365,8 +3407,19 @@ impl State {
         self.look_flags = flags;
         let art = has.then(|| ui.get_np_art());
         let img = art.as_ref().filter(|_| want_blur).and_then(blurred);
+        let veil = img.as_ref().map_or(0.0, |i| {
+            wash_veil(
+                i,
+                f32::from(look.backdrop_strength) / 100.0,
+                bg,
+                ui.global::<P>().get_muted(),
+            )
+        });
+        ui.global::<P>().set_wash_veil(veil);
         ui.set_np_has_blur(img.is_some());
         ui.set_np_blur(img.unwrap_or_default());
+        ui.global::<P>()
+            .set_wash(everywhere && ui.get_np_has_blur());
         let tint = ui.global::<Tint>();
         match art
             .as_ref()
@@ -4629,6 +4682,56 @@ fn luminance(c: slint::Color) -> f32 {
         / 255.0
 }
 
+/// How much of the theme's ground has to lie over the blurred cover for
+/// the theme's text to stay readable on it: 0 when the cover is already
+/// dark enough (or light enough, on a light theme), up to nearly all of it
+/// for a white cover under light text. Judged on the cover's brightest
+/// tenth (darkest, on a light theme), since that's where text gets lost,
+/// as blended on screen: the cover at `strength` over the ground. Measured
+/// against the theme's muted text, the faintest that has to stay readable
+/// (placeholders, second lines).
+fn wash_veil(blur: &slint::Image, strength: f32, bg: slint::Color, text: slint::Color) -> f32 {
+    let Some(buf) = blur.to_rgba8() else {
+        return 0.0;
+    };
+    let mut lumas: Vec<f32> = buf
+        .as_slice()
+        .iter()
+        .map(|p| luminance(slint::Color::from_rgb_u8(p.r, p.g, p.b)))
+        .collect();
+    if lumas.is_empty() {
+        return 0.0;
+    }
+    lumas.sort_by(f32::total_cmp);
+    let (lb, lt) = (luminance(bg), luminance(text));
+    let dark = lt > lb;
+    let at = if dark {
+        lumas.len() * 9 / 10
+    } else {
+        lumas.len() / 10
+    };
+    let art = lumas[at.min(lumas.len() - 1)];
+    let shown = strength * art + (1.0 - strength) * lb;
+    let v = if dark {
+        // Light text: keep what's behind it at most this bright.
+        let most = (lt - 0.32).clamp(0.12, 0.35);
+        if shown > most {
+            (shown - most) / (shown - lb).max(0.01)
+        } else {
+            0.0
+        }
+    } else {
+        // Dark text: at least this bright.
+        let least = (lt + 0.35).clamp(0.65, 0.88);
+        if shown < least {
+            (least - shown) / (lb - shown).max(0.01)
+        } else {
+            0.0
+        }
+    };
+    v.clamp(0.0, 0.92)
+}
+
 /// A strong color from a cover, for the transport and Now Playing, and
 /// what reads on top of it. The most common vivid hue wins, then it's
 /// lightened or darkened to stand out from the theme's ground. None for a
@@ -4790,6 +4893,7 @@ fn open_text(
 /// Keeps the timer (and so the bridge) alive for the window's lifetime.
 pub struct Bridge {
     _timer: Timer,
+    _vis_timer: Timer,
     _state: Rc<RefCell<State>>,
 }
 
@@ -5076,6 +5180,12 @@ pub fn install(
     on!(on_trim_toggle, |s, _u| s.b.toggle_trim());
     on!(on_dlg_accept, |s, u| s.dlg_accept(&u));
     on!(on_cast_clicked, |s, u| s.open_cast(&u));
+    on!(on_vis_next, |s, u| {
+        s.b.next_visualizer();
+        s.vis_tick(&u);
+        let v = s.b.config.appearance.visualizer;
+        s.b.note(format!("Visualizer: {}", v.label()));
+    });
     on!(on_rm_cmd, |s, _u, c| s.remote_cmd(c.as_str()));
     on!(on_rm_seek, |s, _u, v| {
         if let Some(r) = &mut s.remote {
@@ -5120,12 +5230,70 @@ pub fn install(
             }
         });
     }
+    // The visualizer, smoother than the main tick. Does nothing unless
+    // Now Playing shows one.
+    let vis_timer = Timer::default();
+    {
+        let st = st.clone();
+        let weak = ui.as_weak();
+        vis_timer.start(TimerMode::Repeated, Duration::from_millis(33), move || {
+            if let Some(u) = weak.upgrade()
+                && let Ok(mut s) = st.try_borrow_mut()
+            {
+                s.vis_tick(&u);
+            }
+        });
+    }
     st.borrow_mut().tick(ui);
     ui.invoke_focus_root();
     Bridge {
         _timer: timer,
+        _vis_timer: vis_timer,
         _state: st,
     }
+}
+
+/// Bars in Now Playing's visualizer.
+const VIS_BARS: usize = 40;
+
+/// The oscilloscope's line, in a 100 by 100 box.
+fn wave_path(wave: &[f32]) -> String {
+    use std::fmt::Write;
+    let mut p = String::with_capacity(wave.len() * 14);
+    let last = wave.len().saturating_sub(1).max(1) as f32;
+    for (i, v) in wave.iter().enumerate() {
+        let x = i as f32 * 100.0 / last;
+        let y = 50.0 - v * 40.0;
+        let _ = write!(p, "{}{x:.1} {y:.1} ", if i == 0 { "M " } else { "L " });
+    }
+    p
+}
+
+/// The ring: a ray for each bar, mirrored left and right so it's
+/// symmetrical, lows at the top.
+fn ring_path(bars: &[f32]) -> String {
+    use std::fmt::Write;
+    let mut p = String::with_capacity(bars.len() * 60);
+    let n = bars.len();
+    for (i, v) in bars.iter().enumerate() {
+        for side in [1.0f32, -1.0] {
+            let a = side * std::f32::consts::PI * (i as f32 + 0.5) / n as f32;
+            let (sin, cos) = a.sin_cos();
+            let (r0, r1) = (24.0, 26.0 + v * 22.0);
+            let _ = write!(
+                p,
+                "M {:.1} {:.1} L {:.1} {:.1} ",
+                50.0 + sin * r0,
+                50.0 - cos * r0,
+                50.0 + sin * r1,
+                50.0 - cos * r1
+            );
+        }
+    }
+    if p.is_empty() {
+        p.push_str("M 50 50");
+    }
+    p
 }
 
 /// "12 tracks", "3 stations", or "4 artists, 2 albums, 9 tracks" for a mix.
@@ -5299,5 +5467,45 @@ mod tests {
         assert!(!(15.0..=345.0).contains(&h), "{h}");
         // All grey: none.
         assert_eq!(vivid_hsl(vec![[90u8, 90, 90]; 100].into_iter()), None);
+    }
+
+    fn flat(c: [u8; 3]) -> slint::Image {
+        let px: Vec<u8> = (0..16).flat_map(|_| [c[0], c[1], c[2], 255]).collect();
+        slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(&px, 4, 4))
+    }
+
+    fn rgb(c: [u8; 3]) -> slint::Color {
+        slint::Color::from_rgb_u8(c[0], c[1], c[2])
+    }
+
+    /// The backdrop as it lands on screen, veil included.
+    fn shown(cover: [u8; 3], strength: f32, bg: [u8; 3], veil: f32) -> f32 {
+        let (a, b) = (luminance(rgb(cover)), luminance(rgb(bg)));
+        let img = strength * a + (1.0 - strength) * b;
+        veil * b + (1.0 - veil) * img
+    }
+
+    #[test]
+    fn a_white_cover_is_veiled_under_light_text() {
+        // Runout's ground and muted text.
+        let (bg, text) = ([0x0e, 0x19, 0x17], [0x8f, 0xa3, 0x9d]);
+        let v = wash_veil(&flat([250, 250, 250]), 0.8, rgb(bg), rgb(text));
+        assert!(v > 0.5, "{v}");
+        assert!(shown([250, 250, 250], 0.8, bg, v) <= 0.31);
+        // A dark cover needs nothing.
+        assert_eq!(wash_veil(&flat([20, 30, 40]), 0.8, rgb(bg), rgb(text)), 0.0);
+    }
+
+    #[test]
+    fn a_black_cover_is_veiled_under_dark_text() {
+        // Light's ground and muted text.
+        let (bg, text) = ([0xff, 0xff, 0xff], [0x68, 0x6d, 0x76]);
+        let v = wash_veil(&flat([5, 5, 5]), 0.6, rgb(bg), rgb(text));
+        assert!(v > 0.3, "{v}");
+        assert!(shown([5, 5, 5], 0.6, bg, v) >= 0.77);
+        assert_eq!(
+            wash_veil(&flat([240, 235, 230]), 0.6, rgb(bg), rgb(text)),
+            0.0
+        );
     }
 }

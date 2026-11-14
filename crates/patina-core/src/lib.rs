@@ -32,6 +32,7 @@ pub mod secrets;
 pub mod session;
 pub mod sleep;
 pub mod track;
+pub mod visual;
 
 pub use audio::output::{Backend, OutputConfig};
 pub use player::{Command, Event, PlayState, Player, PlayerConfig, Snapshot};

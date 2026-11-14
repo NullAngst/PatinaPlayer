@@ -58,6 +58,12 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 4. Remote control: turn it on in Settings on the desktop, then from a phone, Settings, Other devices, Control another player. The desktop should be listed by its machine name. `cargo test -p patina-core --test control` drives a real player through the client.
 5. `mdns-sd` and `rust_cast` move fast. When updating either, run the two tests above and steps 1 and 4 by hand, since mDNS needs a real network.
 
+## 5.7. Looks
+
+1. Turn on the cover backdrop, Everywhere, and play an album with a near-white cover on a dark theme, then one with a near-black cover on Light. Muted text (the search placeholder, artist names in lists) should stay readable on both. The veil is `wash_veil` in `crates/patina-gui/src/bridge.rs`; its thresholds are the two numbers to nudge.
+2. Click the cover on Now Playing through every visualizer style while a song plays, then pause: the bars should fall away. A Slint update that changes how `Path` takes its `commands` would show up here first.
+3. Turn on Minimal UX and check the bottom bar and Now Playing have no badges, format or sound chain, and that the output button still opens the device list.
+
 ## 6. ListenBrainz and Last.fm
 
 1. In Settings, check the ListenBrainz row still shows your user name. If it says the token is refused, make a new one at listenbrainz.org/settings and paste it in.

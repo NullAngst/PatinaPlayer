@@ -105,6 +105,19 @@ export global P {
     out property <color> mint: c.mint;
     out property <color> butter: c.butter;
     out property <color> dots: c.dots;
+    // The cover backdrop shows behind every view (set from Rust): the
+    // panels that sit on the window's ground let some of it through, as
+    // the bottom bar and sidebar do, so none of them stands out in the
+    // theme's flat color. Floating things (menus, tooltips, dialogs)
+    // stay solid.
+    in property <bool> wash;
+    // How much of the ground lies over the blurred cover at the least, so
+    // the text on it stays readable whatever the cover (set from Rust).
+    in property <float> wash-veil;
+    // Light enough that the backdrop reads through the whole frame, not
+    // just the middle; the veil under it already keeps text readable.
+    out property <color> panel: wash ? c.surface.with-alpha(0.45) : c.surface;
+    out property <color> ground: wash ? c.bg.with-alpha(0.4) : c.bg;
 
     out property <string> sans: kawaii ? "Rounded Mplus 1c" : "Inter";
     // Runout's headings are serif; the plain themes keep to Inter.
@@ -730,8 +743,52 @@ component Wash inherits Rectangle {
     }
     Rectangle {
         background: @linear-gradient(180deg,
-            P.bg.with-alpha(0.2 * (1 - root.strength)) 0%,
-            P.bg.with-alpha(0.9 - 0.3 * root.strength) 100%);
+            P.bg.with-alpha(max(P.wash-veil, 0.2 * (1 - root.strength))) 0%,
+            P.bg.with-alpha(max(P.wash-veil, 0.9 - 0.3 * root.strength)) 100%);
+    }
+}
+
+// What's playing, drawn over Now Playing's cover: 1 bars, 2 mirrored
+// bars, 3 oscilloscope, 4 a ring of rays. A dark veil under it keeps it
+// readable over any cover. The wave and the ring are path commands in a
+// 100 by 100 box, from Rust.
+component Visualizer inherits Rectangle {
+    in property <int> style;
+    in property <[float]> bars;
+    in property <string> wave;
+    in property <string> ring;
+    in property <length> radius;
+    clip: true;
+    border-radius: root.radius;
+    background: #000000.with-alpha(root.style == 4 ? 0.4 : 0.58);
+    property <length> bw: (self.width - 16px) / max(1, root.bars.length);
+    for v[i] in root.bars: Rectangle {
+        visible: root.style == 1 || root.style == 2;
+        x: 8px + i * root.bw + root.bw * 0.14;
+        width: root.bw * 0.72;
+        height: max(2px, v * (root.height - 24px));
+        y: root.style == 2 ? (root.height - self.height) / 2 : root.height - 12px - self.height;
+        border-radius: min(self.width / 2, 3px);
+        background: Tint.accent;
+        opacity: 0.55 + 0.45 * v;
+    }
+    if root.style == 3: Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: root.wave;
+        stroke: Tint.accent;
+        stroke-width: 2.5px;
+    }
+    if root.style == 4: Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: root.ring;
+        stroke: Tint.accent;
+        stroke-width: 3px;
     }
 }
 
@@ -739,6 +796,8 @@ component Wash inherits Rectangle {
 // online, or use an image file. Laid over the cover.
 component CoverMenu inherits Rectangle {
     callback act(string);
+    // A plain click or tap, not one that opened the menu.
+    callback clicked;
     cma := ContextMenuArea {
         Menu {
             MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
@@ -749,12 +808,24 @@ component CoverMenu inherits Rectangle {
             running: false;
             triggered => {
                 self.running = false;
-                if ta.pressed { cma.show({ x: ta.mouse-x, y: ta.mouse-y }); }
+                if ta.pressed {
+                    ta.held = true;
+                    cma.show({ x: ta.mouse-x, y: ta.mouse-y });
+                }
             }
         }
         ta := TouchArea {
+            in-out property <bool> held;
+            clicked => {
+                if self.held {
+                    self.held = false;
+                } else {
+                    root.clicked();
+                }
+            }
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down {
+                    self.held = false;
                     if e.button == PointerEventButton.right {
                         cma.show({ x: self.mouse-x, y: self.mouse-y });
                     } else if e.button == PointerEventButton.left && Ui.touch {
@@ -2229,6 +2300,13 @@ component NowPlayingPage inherits Rectangle {
     in property <image> blur;
     in property <bool> show-wash;
     in property <float> wash;
+    // The visualizer over the cover (0 none), its numbers, and a click on
+    // the cover stepping to the next style.
+    in property <int> vis-style;
+    in property <[float]> vis-bars;
+    in property <string> vis-wave;
+    in property <string> vis-ring;
+    callback vis-next;
     callback close;
     callback rate(int);
     callback love;
@@ -2282,10 +2360,20 @@ component NowPlayingPage inherits Rectangle {
                     art: root.art;
                     has-art: root.has-art;
                     radius: 10px;
+                    if root.has-track && root.vis-style > 0: Visualizer {
+                        width: parent.width;
+                        height: parent.height;
+                        radius: 10px;
+                        style: root.vis-style;
+                        bars: root.vis-bars;
+                        wave: root.vis-wave;
+                        ring: root.vis-ring;
+                    }
                     if root.has-track: CoverMenu {
                         width: parent.width;
                         height: parent.height;
                         act(a) => { root.act(a); }
+                        clicked => { root.vis-next(); }
                     }
                 }
                 if root.wide: NpInfo {
@@ -2353,6 +2441,16 @@ component NowPlayingPhone inherits Rectangle {
     in property <string> sleep-label;
     in property <bool> lyrics-open;
     in property <bool> queue-open;
+    // Minimal UX: no sound chain in the menu.
+    in property <bool> minimal;
+    // The visualizer over the cover (0 none), its numbers, and a click on
+    // the cover stepping to the next style.
+    in property <int> vis-style;
+    in property <[float]> vis-bars;
+    in property <string> vis-wave;
+    in property <string> vis-ring;
+    callback vis-next;
+
     // Steering another player: no sleep timer, menu, lyrics or casting
     // here, and the heading names it.
     in property <bool> remote;
@@ -2466,8 +2564,8 @@ component NowPlayingPhone inherits Rectangle {
                             if root.has-track && !root.live: MenuSeparator {}
                             if root.has-track && !root.live: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
                             if root.has-track && !root.live: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
-                            if root.has-track: MenuSeparator {}
-                            if root.has-track: MenuItem { title: "Sound chain…"; activated => { root.act("chain"); } }
+                            if root.has-track && !root.minimal: MenuSeparator {}
+                            if root.has-track && !root.minimal: MenuItem { title: "Sound chain…"; activated => { root.act("chain"); } }
                         }
                         IconButton {
                             tint: Tint.accent;
@@ -2512,10 +2610,20 @@ component NowPlayingPhone inherits Rectangle {
                         drop-shadow-blur: 24px;
                         drop-shadow-offset-y: 6px;
                         drop-shadow-color: P.shadow;
+                        if !root.remote && root.has-track && root.vis-style > 0: Visualizer {
+                            width: parent.width;
+                            height: parent.height;
+                            radius: 14px;
+                            style: root.vis-style;
+                            bars: root.vis-bars;
+                            wave: root.vis-wave;
+                            ring: root.vis-ring;
+                        }
                         if !root.remote: CoverMenu {
                             width: parent.width;
                             height: parent.height;
                             act(a) => { root.act(a); }
+                            clicked => { root.vis-next(); }
                         }
                     }
                 }
@@ -3010,7 +3118,7 @@ component AmpPanel inherits Rectangle {
     callback unit-toggle(int);
     callback act(string);
     border-radius: 8px * P.round;
-    background: P.surface;
+    background: P.panel;
     border-width: 1px;
     border-color: P.border;
     VerticalLayout {
@@ -3173,7 +3281,7 @@ component EqPanel inherits Rectangle {
     callback point(int, float, float);
     callback act(string);
     border-radius: 8px * P.round;
-    background: P.surface;
+    background: P.panel;
     border-width: 1px;
     border-color: P.border;
     VerticalLayout {
@@ -3537,6 +3645,16 @@ export component AppWindow inherits Window {
     // Bit-perfect on a DAC with no volume control: fixed at 100%.
     in property <bool> volume-locked;
     in property <string> output-label;
+    // Now Playing's visualizer: the style (0 none), its numbers, and a
+    // click on the cover asking for the next style.
+    in property <int> vis-style;
+    in property <[float]> vis-bars;
+    in property <string> vis-wave;
+    in property <string> vis-ring;
+    callback vis-next;
+    // Minimal UX: the technical readouts left out of the bottom bar and
+    // Now Playing, and the output device a plain button.
+    in property <bool> minimal;
     // Playing on another device, and its name.
     in property <bool> casting;
     in property <string> cast-name;
@@ -3776,7 +3894,7 @@ export component AppWindow inherits Window {
                                 border-radius: 6px * P.round;
                                 border-width: 1px;
                                 border-color: search-input.has-focus ? P.verdigris-dim : P.border;
-                                background: P.bg;
+                                background: P.ground;
                                 HorizontalLayout {
                                     padding-left: 12px;
                                     padding-right: 10px;
@@ -3880,7 +3998,7 @@ export component AppWindow inherits Window {
                                     border-radius: 26px;
                                     border-width: 2px;
                                     border-color: P.border;
-                                    background: P.surface;
+                                    background: P.panel;
                                 }
                                 if P.kawaii: Rectangle {
                                     x: parent.width - 92px;
@@ -4372,10 +4490,15 @@ export component AppWindow inherits Window {
                             title: root.np-title;
                             artist: root.np-artist;
                             album: root.np-album;
-                            format: root.np-format;
+                            format: root.minimal ? "" : root.np-format;
+                            vis-style: root.vis-style;
+                            vis-bars: root.vis-bars;
+                            vis-wave: root.vis-wave;
+                            vis-ring: root.vis-ring;
+                            vis-next => { root.vis-next(); }
                             path: root.np-path;
-                            output: root.np-output;
-                            chain: root.np-chain;
+                            output: root.minimal ? "" : root.np-output;
+                            chain: root.minimal ? [] : root.np-chain;
                             art: root.np-art;
                             has-art: root.np-has-art;
                             rating: root.np-rating;
@@ -4408,7 +4531,7 @@ export component AppWindow inherits Window {
             bar := Rectangle {
                 height: root.bar-h;
                 // Over the cover backdrop, it lets a little of it through.
-                background: root.wash-all ? P.surface.with-alpha(0.78) : P.surface;
+                background: P.panel;
                 property <length> bp: root.tight ? 12px : 20px;
                 property <length> gap: root.tight ? 10px : 20px;
                 // The least the now-playing side and the transport get.
@@ -4442,11 +4565,11 @@ export component AppWindow inherits Window {
                     visible: false;
                     spacing: 8px;
                     if root.speed-label != "": Badge { text: root.speed-label; }
-                    if root.bp-badge != "": Badge { text: root.bp-badge; }
-                    Badge { text: "LIM -00.0 dB"; }
-                    Badge { text: "EQ"; }
-                    Badge { text: "AMP"; }
-                    if root.level-label != "": Badge { text: root.level-label; }
+                    if root.bp-badge != "" && !root.minimal: Badge { text: root.bp-badge; }
+                    if !root.minimal: Badge { text: "LIM -00.0 dB"; }
+                    if !root.minimal: Badge { text: "EQ"; }
+                    if !root.minimal: Badge { text: "AMP"; }
+                    if root.level-label != "" && !root.minimal: Badge { text: root.level-label; }
                 }
 
                     // Now playing.
@@ -4676,7 +4799,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // Click it to hear why (or what device, and how).
-                        if root.bp-badge != "" && !root.tiny && !bar.lean: Rectangle {
+                        if root.bp-badge != "" && !root.tiny && !bar.lean && !root.minimal: Rectangle {
                             width: bpb.width;
                             bpb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -4692,7 +4815,7 @@ export component AppWindow inherits Window {
                         // longest reading, so nothing beside it moves when
                         // it starts or stops. Lit copper, with how much it's
                         // taking off, while it works.
-                        if !root.tiny && !root.tight && !bar.lean: Rectangle {
+                        if !root.tiny && !root.tight && !bar.lean && !root.minimal: Rectangle {
                             width: limw.preferred-width + 16px;
                             limw := Text {
                                 visible: false;
@@ -4709,7 +4832,7 @@ export component AppWindow inherits Window {
                         }
                         // The EQ: lit when it's on and shaping the sound.
                         // Click it for the EQ view.
-                        if !root.tiny && !bar.lean: Rectangle {
+                        if !root.tiny && !bar.lean && !root.minimal: Rectangle {
                             width: eqb.width;
                             eqb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -4722,7 +4845,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // The amp stack: lit copper when it's working.
-                        if !root.tiny && !bar.lean: Rectangle {
+                        if !root.tiny && !bar.lean && !root.minimal: Rectangle {
                             width: ampb.width;
                             ampb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -4735,7 +4858,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // Click it for where the gain came from.
-                        if root.level-label != "" && !root.tight && !bar.lean: Rectangle {
+                        if root.level-label != "" && !root.tight && !bar.lean && !root.minimal: Rectangle {
                             width: lvb.width;
                             lvb := Badge {
                                 y: (parent.height - self.height) / 2;
@@ -4747,20 +4870,28 @@ export component AppWindow inherits Window {
                                 clicked => { root.level-clicked(); }
                             }
                         }
-                        if root.badge != "" && !root.compact: Badge {
+                        if root.badge != "" && !root.compact && !root.minimal: Badge {
                             y: (parent.height - self.height) / 2;
                             text: root.badge;
                         }
-                        if root.resample-label != "" && !root.compact: Badge {
+                        if root.resample-label != "" && !root.compact && !root.minimal: Badge {
                             y: (parent.height - self.height) / 2;
                             text: root.resample-label;
                             fg: P.copper;
                         }
-                        if root.output-label != "" && !root.compact: Chip {
+                        if root.output-label != "" && !root.compact && !root.minimal: Chip {
                             y: (parent.height - self.height) / 2;
                             icon: Icons.output;
                             text: root.output-label;
                             clicked => { root.output-clicked(); }
+                        }
+                        // Minimal UX: the output device as a button of its
+                        // own, its name in the tooltip.
+                        if root.minimal && !root.tiny: IconButton {
+                            y: (parent.height - self.height) / 2;
+                            icon: Icons.output;
+                            tip: root.output-label != "" ? "Output: " + root.output-label : "Output device";
+                            clicked => { root.output-clicked(); keys.focus(); }
                         }
                         if !root.tiny: IconButton {
                             y: (parent.height - self.height) / 2;
@@ -4862,7 +4993,7 @@ export component AppWindow inherits Window {
             width: root.drawer ? 228px : root.side-w;
             height: keys.height - root.bar-h;
             visible: !root.drawer || root.drawer-open;
-            background: root.wash-all && !root.drawer ? P.surface.with-alpha(0.78) : P.surface;
+            background: root.drawer ? P.surface : P.panel;
             drop-shadow-blur: root.drawer ? 18px : 0px;
             drop-shadow-color: P.shadow;
             Rectangle {
@@ -5166,7 +5297,13 @@ export component AppWindow inherits Window {
             has-track: root.has-track;
             title: root.np-title;
             artist: root.np-artist;
-            format: root.np-format;
+            format: root.minimal ? "" : root.np-format;
+            minimal: root.minimal;
+            vis-style: root.vis-style;
+            vis-bars: root.vis-bars;
+            vis-wave: root.vis-wave;
+            vis-ring: root.vis-ring;
+            vis-next => { root.vis-next(); }
             art: root.np-art;
             has-art: root.np-has-art;
             blur: root.np-blur;
@@ -5218,7 +5355,7 @@ export component AppWindow inherits Window {
             y: 0;
             width: root.tiny ? keys.width : root.lyrics-w;
             height: keys.height - (root.np-phone ? 0px : root.bar-h);
-            background: P.surface;
+            background: root.np-phone ? P.surface : P.panel;
             // Nothing inside draws past the panel, however long the song.
             clip: true;
             // Takes the clicks, so none reach the view under it.
@@ -5280,7 +5417,7 @@ export component AppWindow inherits Window {
             y: 0;
             width: root.tiny ? keys.width : root.queue-w;
             height: keys.height - (root.np-phone ? 0px : root.bar-h);
-            background: P.surface;
+            background: root.np-phone ? P.surface : P.panel;
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
             VerticalLayout {

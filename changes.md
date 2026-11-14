@@ -1,5 +1,15 @@
 # Changes
 
+2026.11.13 - UX overhaul (Minimal UX, visualizer, backdrop over everything, readable backdrop)
+
+* Minimal UX, in Settings, Appearance: the bottom bar drops the limiter, EQ, amp, gain, bit-perfect and format badges, and the output device chip becomes an icon button beside cast and the sleep timer, with the device's name in its tooltip. Now Playing drops the format, the output line and the sound chain, and on a phone the Sound chain menu entry and the format chip go too.
+* A visualizer on Now Playing, desktop and phone: clicking or tapping the cover steps through bars, mirrored bars, an oscilloscope, a ring of rays, and the plain cover. The renderer copies what it sends out into a small lock-free ring only while one is showing; a 2048-point FFT in log-spaced bars and the leveled wave are drawn at 30 frames a second. The style is kept (`[appearance] visualizer`) and is in Settings too. A long press or right-click on the cover still opens the cover menu.
+* The cover backdrop, set to show everywhere, now shows through the queue and lyrics panels, the search box and the EQ and amp panels as well as the sidebar and bottom bar, and all of them let the same amount through, so nothing sits in the theme's flat color beside it.
+* The backdrop stays readable whatever the cover: the brightest tenth of the blurred cover (the darkest, on a light theme) is checked against the theme's muted text, and as much of the theme's ground as needed is laid over it. A dark cover under a dark theme is left alone.
+* Tests: the scope tap's mono mix and wrap-around; a tone lighting its own bar, the bars falling in silence, a quiet wave leveled up; the backdrop veil on a white cover under light text and a black cover under dark text.
+
+Reasons for changes: asked for a Minimal UX mode that hides the technical badges and Now Playing's sound details with the output device as its own button, a visualizer cycled by clicking the cover, the backdrop to cover the queue panel, search bar and other panels that stood out, and text that stays readable over light covers.
+
 2026.11.13 - Feature addition (play on another device, remote control, Android Auto queue) / UX overhaul (artist pictures, cover accent, gestures, placeholders, podcast speed)
 
 * Play on another device: a cast button on the bottom bar and on Now Playing, and a last entry in the output picker, list the Chromecasts, DLNA renderers and Snapcast servers on the network. The sound still comes from the app's own player, after the EQ, the amp stack and leveling, so the queue, gapless and crossfades carry on. Chromecasts and DLNA renderers fetch a live 48 kHz WAV stream from a small HTTP server in the app; a snapserver gets the same PCM over TCP. Songs at other rates are resampled to 48 kHz on the way, and bit-perfect is off while it plays elsewhere. If the device fails, the player comes back to this one rather than trying it again on the next song.

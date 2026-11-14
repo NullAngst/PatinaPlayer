@@ -339,6 +339,10 @@ impl Renderer {
         }
         // 10. Dither and convert happens in the backend for its sample format.
 
+        // A copy for the visualizer, while one's showing.
+        if shared.scope.is_on() {
+            shared.scope.push(&self.buf[..n], ch, self.format.rate);
+        }
         n
     }
 }

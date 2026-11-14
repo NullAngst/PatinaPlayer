@@ -8,6 +8,7 @@ pub mod decoder;
 pub mod feeder;
 pub mod output;
 pub mod render;
+pub mod scope;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -125,6 +126,8 @@ pub struct Shared {
     /// Channel tools, the same way again.
     pub channel: std::sync::Mutex<crate::dsp::channel::ChannelParams>,
     pub channel_gen: AtomicU64,
+    /// What goes out, for a visualizer.
+    pub scope: Arc<scope::Scope>,
 }
 
 impl Default for Shared {
@@ -158,6 +161,7 @@ impl Default for Shared {
             amp_gen: AtomicU64::new(0),
             channel: std::sync::Mutex::new(crate::dsp::channel::ChannelParams::default()),
             channel_gen: AtomicU64::new(0),
+            scope: Arc::default(),
         }
     }
 }

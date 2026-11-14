@@ -369,6 +369,12 @@ pub struct AppearanceConfig {
     pub backdrop_strength: u8,
     /// Color the transport and Now Playing with the cover's own color.
     pub cover_accent: bool,
+    /// Leave the technical readouts out: the bottom bar's limiter, EQ,
+    /// amp, gain and format badges, and Now Playing's format, output and
+    /// sound chain.
+    pub minimal: bool,
+    /// What Now Playing draws over the cover.
+    pub visualizer: Visualizer,
 }
 
 impl Default for AppearanceConfig {
@@ -380,6 +386,8 @@ impl Default for AppearanceConfig {
             backdrop: Backdrop::default(),
             backdrop_strength: BACKDROP_STRENGTH,
             cover_accent: false,
+            minimal: false,
+            visualizer: Visualizer::Off,
         }
     }
 }
@@ -433,6 +441,74 @@ impl std::str::FromStr for Backdrop {
             .into_iter()
             .find(|b| b.as_str().eq_ignore_ascii_case(&s))
             .ok_or_else(|| format!("unknown backdrop \"{s}\" (off, now-playing, everywhere)"))
+    }
+}
+
+/// What Now Playing shows over its cover. Clicking the cover steps
+/// through them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Visualizer {
+    /// Just the cover.
+    #[default]
+    Off,
+    /// Spectrum bars rising from the bottom.
+    Bars,
+    /// The same bars, mirrored about the middle.
+    Mirror,
+    /// The wave itself, like an oscilloscope.
+    Scope,
+    /// The spectrum as rays around a ring.
+    Ring,
+}
+
+impl Visualizer {
+    pub const ALL: [Visualizer; 5] = [
+        Visualizer::Off,
+        Visualizer::Bars,
+        Visualizer::Mirror,
+        Visualizer::Scope,
+        Visualizer::Ring,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Visualizer::Off => "off",
+            Visualizer::Bars => "bars",
+            Visualizer::Mirror => "mirror",
+            Visualizer::Scope => "scope",
+            Visualizer::Ring => "ring",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Visualizer::Off => "Off (just the cover)",
+            Visualizer::Bars => "Bars",
+            Visualizer::Mirror => "Mirrored bars",
+            Visualizer::Scope => "Oscilloscope",
+            Visualizer::Ring => "Ring",
+        }
+    }
+
+    /// The GUI's number for it.
+    pub fn index(self) -> i32 {
+        Visualizer::ALL.iter().position(|v| *v == self).unwrap_or(0) as i32
+    }
+
+    /// The next one, as a click on the cover steps.
+    pub fn next(self) -> Visualizer {
+        Visualizer::ALL[(self.index() as usize + 1) % Visualizer::ALL.len()]
+    }
+}
+
+impl std::str::FromStr for Visualizer {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        Visualizer::ALL
+            .into_iter()
+            .find(|v| v.as_str().eq_ignore_ascii_case(s))
+            .ok_or_else(|| format!("unknown visualizer \"{s}\" (off, bars, mirror, scope, ring)"))
     }
 }
 
@@ -811,6 +887,8 @@ struct RawAppearance {
     backdrop: Option<String>,
     backdrop_strength: Option<i64>,
     cover_accent: Option<bool>,
+    minimal: Option<bool>,
+    visualizer: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1101,6 +1179,13 @@ impl Config {
             })?,
             None => Backdrop::default(),
         };
+        let visualizer = match &look.visualizer {
+            Some(v) => v.parse::<Visualizer>().map_err(|msg| ConfigError::Parse {
+                path: path.to_path_buf(),
+                msg: format!("appearance.visualizer: {msg}"),
+            })?,
+            None => Visualizer::default(),
+        };
         let backdrop_strength = look
             .backdrop_strength
             .map(|v| v.clamp(10, 100) as u8)
@@ -1210,6 +1295,8 @@ impl Config {
                 backdrop,
                 backdrop_strength,
                 cover_accent: look.cover_accent.unwrap_or(false),
+                minimal: look.minimal.unwrap_or(false),
+                visualizer,
             },
             servers,
             cache,
@@ -1399,6 +1486,13 @@ backdrop_strength = 60
 # Color the play button, seek bar and Now Playing's buttons with the
 # playing cover's own color. Window only.
 cover_accent = false
+# Minimal: no limiter, EQ, amp, gain or format badges on the bottom bar
+# (the output device becomes a button beside cast), and no format, output
+# or sound chain on Now Playing. Window only.
+minimal = false
+# What Now Playing draws over the cover: off, bars, mirror, scope or ring.
+# Clicking the cover steps through them. Window only.
+visualizer = "off"
 
 [playback]
 # Starting volume, 0 to 100.

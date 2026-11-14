@@ -308,6 +308,7 @@ pub struct Player {
     events: Receiver<Event>,
     snapshot: Arc<Mutex<Snapshot>>,
     queue: Arc<Mutex<Queue>>,
+    scope: Arc<crate::audio::scope::Scope>,
 }
 
 impl Player {
@@ -321,6 +322,7 @@ impl Player {
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         let queue = Arc::new(Mutex::new(Queue::new()));
         let core = Core::new(cfg, hooks, cmd_rx, ev_tx, snapshot.clone(), queue.clone());
+        let scope = core.shared.scope.clone();
         std::thread::Builder::new()
             .name("patina-core".into())
             .spawn(move || core.run())
@@ -330,7 +332,13 @@ impl Player {
             events: ev_rx,
             snapshot,
             queue,
+            scope,
         }
+    }
+
+    /// What's going out, for a visualizer. Turn it on while one shows.
+    pub fn scope(&self) -> &crate::audio::scope::Scope {
+        &self.scope
     }
 
     pub fn send(&self, cmd: Command) {

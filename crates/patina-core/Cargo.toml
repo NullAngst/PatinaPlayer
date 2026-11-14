@@ -55,6 +55,8 @@ libloading = "0.8"
 # Chromecasts, Snapcast servers and other PatinaPlayers on the network.
 rust_cast = "0.21"
 mdns-sd = "0.21"
+# The visualizer's spectrum. Already here through rubato.
+realfft = "3"
 
 [dev-dependencies]
 tempfile = "3"

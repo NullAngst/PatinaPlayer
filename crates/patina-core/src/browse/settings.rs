@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::audio::output::exclusive::HwDevice;
 use crate::audio::output::{Backend, BitPerfect, OutDevice, RATES, SampleFormat};
-use crate::config::{Backdrop, Config, SidebarMode, Theme};
+use crate::config::{Backdrop, Config, SidebarMode, Theme, Visualizer};
 use crate::dsp::resample::Quality;
 use crate::remote::{ServerStatus, StreamFormat};
 
@@ -29,6 +29,8 @@ pub enum Key {
     BackdropStrength,
     /// The cover's color on the transport and Now Playing.
     CoverAccent,
+    MinimalUi,
+    Visualizer,
     StartVolume,
     FadeMs,
     Backend,
@@ -978,6 +980,35 @@ pub fn rows(
             label: "Cover accent".into(),
             help: "Color the play button, the seek bar and Now Playing's buttons with a strong color from the playing cover, in place of the theme's. A cover with no strong color keeps the theme's. Window only.",
             control: Control::Toggle(cfg.appearance.cover_accent),
+        },
+    );
+    push(
+        "Appearance",
+        Setting {
+            disabled: None,
+            key: Key::MinimalUi,
+            label: "Minimal UX".into(),
+            help: "Leave out the technical readouts: the bottom bar's limiter, EQ, amp, gain and format badges (the output device becomes a button beside cast and the sleep timer), and Now Playing's format, output and sound chain. The EQ, the amp stack and the limiter still work; they just aren't shown. Window only.",
+            control: Control::Toggle(cfg.appearance.minimal),
+        },
+    );
+    push(
+        "Appearance",
+        Setting {
+            disabled: None,
+            key: Key::Visualizer,
+            label: "Visualizer".into(),
+            help: "What Now Playing draws over the cover while a song plays. Clicking (tapping) the cover steps through them too. Window only.",
+            control: Control::Choice {
+                options: Visualizer::ALL
+                    .iter()
+                    .map(|v| (v.as_str().to_string(), v.label().to_string()))
+                    .collect(),
+                index: Visualizer::ALL
+                    .iter()
+                    .position(|v| *v == cfg.appearance.visualizer)
+                    .unwrap_or(0),
+            },
         },
     );
 
