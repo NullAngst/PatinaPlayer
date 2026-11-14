@@ -880,6 +880,8 @@ struct RawServer {
     stream: Option<String>,
     bitrate: Option<u32>,
     udn: Option<String>,
+    /// Plex Pass features for a Plex server.
+    plex_pass: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1005,11 +1007,7 @@ impl Config {
             servers.push(ServerConfig {
                 name,
                 // A DLNA address is the exact description URL.
-                url: if kind == ServerKind::Dlna {
-                    s.url.trim().to_string()
-                } else {
-                    crate::remote::normalize_url(&s.url)
-                },
+                url: crate::remote::normalize_for(kind, &s.url),
                 user: s.user.trim().to_string(),
                 kind,
                 stream: match s.stream {
@@ -1020,6 +1018,7 @@ impl Config {
                 },
                 bitrate: s.bitrate.unwrap_or(192).clamp(32, 512),
                 udn: s.udn.unwrap_or_default().trim().to_string(),
+                extras: kind == ServerKind::Plex && s.plex_pass.unwrap_or(false),
             });
         }
         let dc = CacheConfig::default();
@@ -1845,6 +1844,9 @@ pub fn set_servers(path: &Path, servers: &[ServerConfig]) -> Result<bool, Config
             if !s.udn.is_empty() {
                 t.insert("udn", toml_edit::value(s.udn.clone()));
             }
+            if s.kind == ServerKind::Plex {
+                t.insert("plex_pass", toml_edit::value(s.extras));
+            }
             arr.push(t);
         }
         if arr.is_empty() {
@@ -2005,6 +2007,7 @@ mod tests {
             stream: StreamFormat::Opus,
             bitrate: 128,
             udn: String::new(),
+            extras: false,
         };
         let dlna = ServerConfig {
             name: "NAS".into(),

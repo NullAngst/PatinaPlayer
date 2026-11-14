@@ -10,7 +10,7 @@ use crate::audio::output::exclusive::HwDevice;
 use crate::audio::output::{Backend, BitPerfect, OutDevice, RATES, SampleFormat};
 use crate::config::{Backdrop, Config, SidebarMode, Theme, Visualizer};
 use crate::dsp::resample::Quality;
-use crate::remote::{ServerStatus, StreamFormat};
+use crate::remote::{ServerKind, ServerStatus, StreamFormat};
 
 /// Which option a row is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -55,6 +55,18 @@ pub enum Key {
     AddServer,
     /// Look for DLNA servers on the network.
     FindDlna,
+    /// A Plex server's Plex Pass features, on or off.
+    ServerExtras(String),
+    /// Sign in to Plex with a PIN. The window shows the code.
+    PlexSignIn,
+    /// Add a Plex server by its address and a token.
+    AddPlex,
+    AddIcecast,
+    /// Look at the snapserver's rooms again.
+    SnapRefresh,
+    /// A snapclient: on Patina's stream or not.
+    SnapClient(String),
+    SnapVolume(String),
     /// The cache's size cap.
     CacheSize,
     /// Prefetch by size or by song count.
@@ -316,6 +328,42 @@ Other apps won't be able to play sound through it until PatinaPlayer stops or yo
 pub const LEVELING_BIT_PERFECT: &str =
     "Bit-perfect is on, and it skips leveling. Set bit-perfect to Off or Auto to level.";
 
+/// The Sources pages: one per kind of source, each showing its group of
+/// rows, which Settings leaves out.
+pub const GROUP_PLEX: &str = "Plex";
+pub const GROUP_SUBSONIC: &str = "Subsonic & Ampache";
+pub const GROUP_DLNA: &str = "DLNA";
+pub const GROUP_ICECAST: &str = "Icecast";
+pub const GROUP_SNAPCAST: &str = "Snapcast";
+pub const SOURCE_GROUPS: [&str; 5] = [
+    GROUP_PLEX,
+    GROUP_SUBSONIC,
+    GROUP_DLNA,
+    GROUP_ICECAST,
+    GROUP_SNAPCAST,
+];
+
+/// Which page a kind of server's rows go on.
+pub fn group_of(kind: ServerKind) -> &'static str {
+    match kind {
+        ServerKind::Plex => GROUP_PLEX,
+        ServerKind::Subsonic | ServerKind::Ampache => GROUP_SUBSONIC,
+        ServerKind::Dlna => GROUP_DLNA,
+        ServerKind::Icecast => GROUP_ICECAST,
+    }
+}
+
+/// Plex converts to AAC where the others make Opus, so the same choices
+/// read differently there.
+pub const PLEX_STREAM_CHOICES: [(&str, &str); 6] = [
+    ("raw", "Original file"),
+    ("opus:96", "AAC 96 kbps"),
+    ("opus:128", "AAC 128 kbps"),
+    ("opus:192", "AAC 192 kbps"),
+    ("mp3:192", "MP3 192 kbps"),
+    ("mp3:320", "MP3 320 kbps"),
+];
+
 /// Stream choices for a server: (value, label). The value is
 /// "format" or "format:kbps".
 pub const STREAM_CHOICES: [(&str, &str); 6] = [
@@ -346,6 +394,19 @@ pub struct Live {
     pub outputs: Vec<OutDevice>,
     /// The remote control's port while it's on.
     pub remote_port: Option<u16>,
+    /// The snapserver's rooms, for the Snapcast page.
+    pub snap: SnapLive,
+}
+
+/// What the Snapcast page shows of the snapserver's rooms.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SnapLive {
+    /// The snapserver they're on.
+    pub server: Option<String>,
+    pub clients: Vec<crate::cast::snapcast::SnapClient>,
+    /// Why there are none, or how the last change went.
+    pub note: Option<String>,
+    pub loading: bool,
 }
 
 /// Device choices: the system default, then each device there is, then
@@ -398,6 +459,7 @@ pub fn rows(
         listenbrainz,
         outputs,
         remote_port,
+        snap,
     } = live;
     let lastfm = lastfm.as_ref();
     let mut v: Vec<(Option<&'static str>, Setting)> = Vec::new();
@@ -439,9 +501,10 @@ pub fn rows(
         );
     }
 
-    // Servers
+    // Servers, each kind on its own Sources page.
     if !info.no_library {
         for sc in &cfg.servers {
+            let group = group_of(sc.kind);
             let status = servers
                 .iter()
                 .find(|s| s.name == sc.name)
@@ -450,32 +513,51 @@ pub fn rows(
             if !sc.kind.logs_in() {
                 let host = url::Url::parse(&sc.url)
                     .ok()
-                    .and_then(|u| u.host_str().map(str::to_string))
+                    .and_then(|u| {
+                        u.host_str().map(|h| {
+                            format!(
+                                "{h}{}",
+                                u.port().map(|p| format!(":{p}")).unwrap_or_default()
+                            )
+                        })
+                    })
                     .unwrap_or_else(|| sc.url.clone());
                 push(
-                    "Servers",
+                    group,
                     Setting {
                         disabled: None,
                         key: Key::Server(sc.name.clone()),
                         label: sc.name.clone(),
-                        help: "A DLNA server on your network. Sync reads its library again now. Edit renames it.",
+                        help: if sc.kind == ServerKind::Icecast {
+                            "An Icecast server. Its live streams are listed here and in Radio, and read again every few minutes. Edit renames it."
+                        } else {
+                            "A DLNA server on your network. Sync reads its library again now. Edit renames it."
+                        },
                         control: Control::Server(format!("{host} · {status}")),
                     },
                 );
                 continue;
             }
             let who = if sc.user.is_empty() {
-                "API key".to_string()
+                if sc.kind == ServerKind::Plex {
+                    "token".to_string()
+                } else {
+                    "API key".to_string()
+                }
             } else {
                 sc.user.clone()
             };
             push(
-                "Servers",
+                group,
                 Setting {
                     disabled: None,
                     key: Key::Server(sc.name.clone()),
                     label: sc.name.clone(),
-                    help: "Sync reads the server's library again now. Edit changes the address, user or password.",
+                    help: if sc.kind == ServerKind::Plex {
+                        "Sync reads the server's library again now. Edit changes the name, or the address and token for one added by hand."
+                    } else {
+                        "Sync reads the server's library again now. Edit changes the address, user or password."
+                    },
                     control: Control::Server(format!("{} · {who} · {status}", sc.url)),
                 },
             );
@@ -483,7 +565,12 @@ pub fn rows(
                 StreamFormat::Raw => "raw".to_string(),
                 f => format!("{}:{}", f.as_str(), sc.bitrate),
             };
-            let mut options: Vec<(String, String)> = STREAM_CHOICES
+            let choices: &[(&str, &str)] = if sc.kind == ServerKind::Plex {
+                &PLEX_STREAM_CHOICES
+            } else {
+                &STREAM_CHOICES
+            };
+            let mut options: Vec<(String, String)> = choices
                 .iter()
                 .map(|(v, l)| (v.to_string(), l.to_string()))
                 .collect();
@@ -494,9 +581,33 @@ pub fn rows(
                 ));
             }
             let index = options.iter().position(|o| o.0 == current).unwrap_or(0);
+            if sc.kind == ServerKind::Plex {
+                let pass = servers
+                    .iter()
+                    .find(|s| s.name == sc.name)
+                    .and_then(|s| s.info.as_ref())
+                    .map(|i| i.product.contains("Plex Pass"));
+                push(
+                    group,
+                    Setting {
+                        disabled: None,
+                        key: Key::ServerExtras(sc.name.clone()),
+                        label: format!("{}: Plex Pass features", sc.name),
+                        help: match pass {
+                            Some(false) => {
+                                "Mixes from Plex's sonic analysis, lyrics from Plex, and loudness from Plex's analysis. This server's owner has no Plex Pass, so these stay off whatever this says."
+                            }
+                            _ => {
+                                "Mixes from Plex's sonic analysis, lyrics from Plex, and loudness from Plex's analysis. They need Plex Pass on the server; without them Patina uses Last.fm, LRCLIB and its own measuring."
+                            }
+                        },
+                        control: Control::Toggle(sc.extras),
+                    },
+                );
+            }
             let mode = cfg.lastfm.mode(&sc.name);
             push(
-                "Servers",
+                group,
                 Setting {
                     disabled: None,
                     key: Key::ServerScrobble(sc.name.clone()),
@@ -517,7 +628,7 @@ pub fn rows(
             if listenbrainz.as_ref().is_some_and(|l| l.has_token) {
                 let mode = cfg.listenbrainz.mode(&sc.name);
                 push(
-                    "Servers",
+                    group,
                     Setting {
                         disabled: None,
                         key: Key::ServerListenBrainz(sc.name.clone()),
@@ -537,18 +648,42 @@ pub fn rows(
                 );
             }
             push(
-                "Servers",
+                group,
                 Setting {
                     disabled: None,
                     key: Key::ServerStream(sc.name.clone()),
                     label: format!("{}: streaming", sc.name),
-                    help: "The original file keeps the sound untouched (and lets bit-perfect work). A transcode saves data on a slow line.",
+                    help: if sc.kind == ServerKind::Plex {
+                        "The original file keeps the sound untouched (and lets bit-perfect work). A conversion by Plex saves data on a slow line; Plex makes AAC or MP3."
+                    } else {
+                        "The original file keeps the sound untouched (and lets bit-perfect work). A transcode saves data on a slow line."
+                    },
                     control: Control::Choice { options, index },
                 },
             );
         }
         push(
-            "Servers",
+            GROUP_PLEX,
+            Setting {
+                disabled: None,
+                key: Key::PlexSignIn,
+                label: "Sign in with Plex".into(),
+                help: "Shows a code to enter at plex.tv/link, then lists the servers on your account. Your password never passes through PatinaPlayer.",
+                control: Control::Action("Sign in"),
+            },
+        );
+        push(
+            GROUP_PLEX,
+            Setting {
+                disabled: None,
+                key: Key::AddPlex,
+                label: "Add by address and token".into(),
+                help: "A server's address (http://192.168.1.50:32400) and an X-Plex-Token, for a server you'd rather not reach through plex.tv.",
+                control: Control::Action("Add by hand"),
+            },
+        );
+        push(
+            GROUP_SUBSONIC,
             Setting {
                 disabled: None,
                 key: Key::AddServer,
@@ -558,13 +693,23 @@ pub fn rows(
             },
         );
         push(
-            "Servers",
+            GROUP_DLNA,
             Setting {
                 disabled: None,
                 key: Key::FindDlna,
                 label: "Find DLNA servers".into(),
                 help: "MiniDLNA, Gerbera, Jellyfin, Plex, Serviio or a NAS on your network. No login needed.",
                 control: Control::Action("Find servers"),
+            },
+        );
+        push(
+            GROUP_ICECAST,
+            Setting {
+                disabled: None,
+                key: Key::AddIcecast,
+                label: "Add an Icecast server".into(),
+                help: "An Icecast 2.4 or newer server, \"host:8000\" or its web address. Its live streams play like radio stations.",
+                control: Control::Action("Add server"),
             },
         );
     }
@@ -1025,20 +1170,84 @@ pub fn rows(
         },
     );
 
-    // Other devices
+    // Snapcast, on its own Sources page.
     push(
-        "Other devices",
+        GROUP_SNAPCAST,
         Setting {
             disabled: None,
             key: Key::CastSnapcast,
             label: "Snapcast server".into(),
-            help: "A snapserver to play on, \"host\" or \"host:port\", for one that doesn't announce itself. It needs a TCP source in server mode: source = tcp://0.0.0.0:4953?name=Patina&mode=server. Chromecasts, DLNA renderers and snapservers on the network show up under Play on without this.",
+            help: "A snapserver to play on, \"host\" or \"host:port\", for one that doesn't announce itself. PatinaPlayer adds its stream there itself. Snapservers that announce themselves show up under Play on and here without this.",
             control: Control::Text {
                 value: cfg.cast.snapcast.clone().unwrap_or_default(),
                 empty: "none",
             },
         },
     );
+    push(
+        GROUP_SNAPCAST,
+        Setting {
+            disabled: None,
+            key: Key::SnapRefresh,
+            label: match &snap.server {
+                Some(s) => format!("Rooms on {s}"),
+                None => "Rooms".into(),
+            },
+            help: "The snapclients the snapserver knows. Turn one on to play PatinaPlayer there and nowhere else you haven't picked; turning it off puts it back on what it played before.",
+            control: Control::Action(if snap.loading {
+                "Looking…"
+            } else {
+                "Refresh"
+            }),
+        },
+    );
+    if let Some(n) = &snap.note {
+        push(
+            GROUP_SNAPCAST,
+            Setting {
+                disabled: None,
+                key: Key::Info("snapcast"),
+                label: "Snapcast".into(),
+                help: "",
+                control: Control::Info(n.clone()),
+            },
+        );
+    }
+    for c in &snap.clients {
+        push(
+            GROUP_SNAPCAST,
+            Setting {
+                disabled: (!c.connected).then_some("This snapclient isn't connected right now."),
+                key: Key::SnapClient(c.id.clone()),
+                label: if c.connected {
+                    c.name.clone()
+                } else {
+                    format!("{} (away)", c.name)
+                },
+                help: "Plays PatinaPlayer in this room when on. Others in its Snapcast group keep what they're playing.",
+                control: Control::Toggle(c.on_patina),
+            },
+        );
+        push(
+            GROUP_SNAPCAST,
+            Setting {
+                disabled: (!c.connected).then_some("This snapclient isn't connected right now."),
+                key: Key::SnapVolume(c.id.clone()),
+                label: format!("{}: volume", c.name),
+                help: "This room's own volume, on top of PatinaPlayer's.",
+                control: Control::Number {
+                    value: i64::from(c.volume),
+                    min: 0,
+                    max: 100,
+                    step: 5,
+                    scale: 1,
+                    unit: "%",
+                },
+            },
+        );
+    }
+
+    // Other devices
     push(
         "Other devices",
         Setting {

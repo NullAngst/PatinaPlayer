@@ -1,5 +1,5 @@
-//! Music servers: Subsonic (Navidrome, Gonic and the rest), Ampache, and
-//! DLNA media servers on the local network.
+//! Music servers: Subsonic (Navidrome, Gonic and the rest), Ampache, Plex,
+//! DLNA media servers on the local network, and Icecast servers' streams.
 //!
 //! Each server is a source like a local folder. Its songs are synced into
 //! the same SQLite index (see [`sync`]), so every view, search and the
@@ -9,14 +9,18 @@
 //! song id sits beside it; that's what playing, playlists and covers use.
 //!
 //! [`Client`] is what a server can do. [`subsonic::Subsonic`] and
-//! [`ampache::Ampache`] log in; [`dlna::Dlna`] is found on the network and
-//! needs no login. [`service::RemoteService`] keeps
+//! [`ampache::Ampache`] log in; [`plex::Plex`] signs in through plex.tv
+//! ([`plex_tv`]); [`dlna::Dlna`] is found on the network and needs no
+//! login; [`icecast::Icecast`] has no songs, only live streams. [`service::RemoteService`] keeps
 //! them connected and synced in the background, and [`registry`] lets the
 //! player and the art loader reach a connected server from any thread.
 
 pub mod ampache;
 pub mod dlna;
 pub(crate) mod http;
+pub mod icecast;
+pub mod plex;
+pub mod plex_tv;
 pub mod service;
 pub mod subsonic;
 pub mod sync;
@@ -44,6 +48,10 @@ pub enum ServerKind {
     Ampache,
     /// A UPnP/DLNA media server. No login, no playlists, no play queue.
     Dlna,
+    /// Plex Media Server. Signs in through plex.tv, or with a token.
+    Plex,
+    /// An Icecast server: no songs, its live mounts are radio stations.
+    Icecast,
 }
 
 impl ServerKind {
@@ -52,17 +60,43 @@ impl ServerKind {
             ServerKind::Subsonic => "subsonic",
             ServerKind::Ampache => "ampache",
             ServerKind::Dlna => "dlna",
+            ServerKind::Plex => "plex",
+            ServerKind::Icecast => "icecast",
         }
     }
 
-    /// Whether it takes a user name and password.
+    /// What the Sources pages call it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ServerKind::Subsonic | ServerKind::Ampache => "Subsonic and Ampache",
+            ServerKind::Dlna => "DLNA",
+            ServerKind::Plex => "Plex",
+            ServerKind::Icecast => "Icecast",
+        }
+    }
+
+    /// Whether it keeps a secret in the keyring: a password, an API key,
+    /// or a Plex sign-in.
     pub fn logs_in(self) -> bool {
-        self != ServerKind::Dlna
+        matches!(
+            self,
+            ServerKind::Subsonic | ServerKind::Ampache | ServerKind::Plex
+        )
     }
 
     /// Whether it can convert songs as it streams them.
     pub fn transcodes(self) -> bool {
-        self != ServerKind::Dlna
+        self.logs_in()
+    }
+
+    /// Whether it has a library of songs to sync.
+    pub fn has_songs(self) -> bool {
+        self != ServerKind::Icecast
+    }
+
+    /// Whether it's told what's playing, as it plays (Plex's timeline).
+    pub fn reports_timeline(self) -> bool {
+        self == ServerKind::Plex
     }
 }
 
@@ -73,8 +107,10 @@ impl std::str::FromStr for ServerKind {
             "subsonic" => Ok(ServerKind::Subsonic),
             "ampache" => Ok(ServerKind::Ampache),
             "dlna" | "upnp" => Ok(ServerKind::Dlna),
+            "plex" => Ok(ServerKind::Plex),
+            "icecast" => Ok(ServerKind::Icecast),
             other => Err(format!(
-                "unknown server kind \"{other}\" (subsonic, ampache, dlna)"
+                "unknown server kind \"{other}\" (subsonic, ampache, plex, dlna, icecast)"
             )),
         }
     }
@@ -124,15 +160,59 @@ pub struct ServerConfig {
     pub stream: StreamFormat,
     /// For Opus and MP3, in kbps.
     pub bitrate: u32,
-    /// A DLNA server's unique id, to find it again when its address
-    /// changes. Empty for the rest.
+    /// A DLNA server's unique id, or a Plex server's machine identifier,
+    /// to find it again when its address changes. Empty for the rest.
     pub udn: String,
+    /// Plex Pass features: sonic mixes, lyrics and loudness from Plex.
+    /// Off by default, so a server without Plex Pass isn't asked for them.
+    pub extras: bool,
 }
 
 impl ServerConfig {
-    /// Keyring key: the address without a trailing slash.
+    /// Keyring key: the address without a trailing slash. A Plex server's
+    /// address can change (plex.tv hands out new ones), so it's keyed by
+    /// its machine identifier.
     pub fn secret_key(&self) -> String {
-        normalize_url(&self.url)
+        if self.kind == ServerKind::Plex && !self.udn.is_empty() {
+            format!("plex://{}", self.udn)
+        } else {
+            normalize_url(&self.url)
+        }
+    }
+}
+
+/// What a player is doing, for a server that wants to be told as it
+/// plays (Plex's timeline).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timeline {
+    Playing,
+    Paused,
+    Buffering,
+    Stopped,
+}
+
+impl Timeline {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Timeline::Playing => "playing",
+            Timeline::Paused => "paused",
+            Timeline::Buffering => "buffering",
+            Timeline::Stopped => "stopped",
+        }
+    }
+}
+
+/// An address as typed, for a kind of server. A Plex server on the local
+/// network answers plain HTTP on port 32400, so a bare address gets
+/// http:// there; an Icecast address loses its path.
+pub fn normalize_for(kind: ServerKind, url: &str) -> String {
+    match kind {
+        ServerKind::Dlna => url.trim().to_string(),
+        ServerKind::Icecast => icecast::normalize(url),
+        ServerKind::Plex if !url.contains("://") => {
+            normalize_url(&format!("http://{}", url.trim()))
+        }
+        _ => normalize_url(url),
     }
 }
 
@@ -143,7 +223,14 @@ pub fn normalize_url(url: &str) -> String {
     if !u.contains("://") {
         u = format!("https://{u}");
     }
-    for tail in ["/rest", "/app", "/server/json.server.php", "/server"] {
+    for tail in [
+        "/rest",
+        "/app",
+        "/server/json.server.php",
+        "/server",
+        "/web/index.html",
+        "/web",
+    ] {
         if let Some(stripped) = u.strip_suffix(tail) {
             u = stripped.to_string();
         }
@@ -428,6 +515,25 @@ pub trait Client: Send + Sync {
     fn lyrics(&self, _song_id: &str, _artist: &str, _title: &str) -> Result<Option<ServerLyrics>> {
         Err(RemoteError::Unsupported("lyrics"))
     }
+
+    /// Tell the server what's playing and where, as it plays. `continuing`
+    /// goes with a stop that moves on to another song.
+    fn timeline(
+        &self,
+        _id: &str,
+        _state: Timeline,
+        _pos: Duration,
+        _duration: Option<Duration>,
+        _continuing: bool,
+    ) -> Result<()> {
+        Err(RemoteError::Unsupported("now playing"))
+    }
+
+    /// A secret that changed while connected (a refreshed sign-in), to be
+    /// saved in the keyring in place of the old one. Taken once.
+    fn fresh_secret(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Ids and names out of the similarity answers.
@@ -464,6 +570,15 @@ pub fn connect(cfg: &ServerConfig, secret: &str) -> Result<Arc<dyn Client>> {
             cfg.bitrate,
         )?),
         ServerKind::Dlna => Arc::new(dlna::Dlna::connect(cfg.url.trim(), &cfg.udn)?),
+        ServerKind::Plex => Arc::new(plex::Plex::connect(
+            &url,
+            &cfg.udn,
+            secret,
+            cfg.stream,
+            cfg.bitrate,
+            cfg.extras,
+        )?),
+        ServerKind::Icecast => Arc::new(icecast::Icecast::connect(&cfg.url)?),
     })
 }
 

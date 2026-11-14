@@ -19,6 +19,7 @@ pub mod offline;
 mod select;
 mod servers;
 pub mod settings;
+mod sources;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -41,6 +42,7 @@ use crate::{Command, Event, Player, TrackInfo};
 pub use model::*;
 pub use select::{NowPlaying, SmartCheck};
 pub use settings::{Change, Control, Key, Setting, SettingsInfo};
+pub use sources::{PlexChoice, PlexSignIn};
 
 /// A message for the person, shown however the frontend shows them.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +151,9 @@ pub struct Browser {
     /// while a big sync runs.
     servers_changed: Option<Instant>,
     queue_sync: servers::QueueSync,
+    timeline: servers::TimelineSync,
+    plex: sources::PlexState,
+    snap: sources::SnapState,
     /// Where "Find DLNA servers" asks. The local network when unset.
     pub dlna_probe: Option<std::net::SocketAddr>,
     dlna: servers::DlnaSearch,
@@ -313,6 +318,9 @@ impl Browser {
             servers: Vec::new(),
             servers_changed: None,
             queue_sync: servers::QueueSync::default(),
+            timeline: servers::TimelineSync::default(),
+            plex: sources::PlexState::default(),
+            snap: sources::SnapState::default(),
             dlna_probe: None,
             dlna: servers::DlnaSearch::default(),
             section: Section::Folders,
@@ -450,6 +458,7 @@ impl Browser {
         self.poll_lyrics();
         self.poll_ipod();
         self.poll_cast();
+        self.poll_sources();
         for ev in &events {
             if let Event::Played(path) = ev {
                 self.after_played(path);
@@ -585,30 +594,13 @@ impl Browser {
                 server: None,
             })
             .collect();
-        // Servers as configured, synced yet or not.
-        if self.lib.is_some() {
-            for sc in &self.config.servers {
-                let root = crate::remote::root(&sc.name);
-                entries.push(SideEntry::Source {
-                    tracks: sources
-                        .iter()
-                        .find(|x| x.root == root)
-                        .map(|x| x.tracks)
-                        .unwrap_or(0),
-                    path: root,
-                    present: true,
-                    server: Some(
-                        self.servers
-                            .iter()
-                            .find(|x| x.name == sc.name)
-                            .map(|x| x.state.clone())
-                            .unwrap_or(ServerState::Connecting),
-                    ),
-                });
-            }
-        }
         if self.ipod_connected() {
             entries.push(SideEntry::Section(Section::Ipod));
+        }
+        // Each kind of source has its page, where its servers are set up.
+        // Servers' songs are in Artists, Albums and the rest already.
+        if self.lib.is_some() {
+            entries.extend(Section::SOURCES.iter().map(|&x| SideEntry::Section(x)));
         }
         if !entries.is_empty() {
             s.push(SideEntry::Gap);
@@ -750,6 +742,9 @@ impl Browser {
         self.pending = None;
         self.section = s;
         self.view_error = None;
+        if s == Section::Snapcast {
+            self.snap_page_opened();
+        }
         if s == Section::Settings {
             // Cards come and go (a USB DAC); look again each time. Off this
             // thread: asking PipeWire takes a round trip, and Settings
@@ -786,6 +781,7 @@ impl Browser {
                 listenbrainz: self.listenbrainz.as_ref().map(|l| l.status()),
                 outputs: &self.outputs,
                 remote_port: self.remote_server.as_ref().map(|s| s.port()),
+                snap: self.snap.live.clone(),
             },
             stations: &self.stations,
             checks: &self.checks,
@@ -963,6 +959,12 @@ impl Browser {
     }
 
     pub fn refresh_section(&mut self, s: Section) {
+        // The Sources pages are Settings' rows too.
+        if s == Section::Settings {
+            for p in Section::SOURCES {
+                self.refresh_or_stale(p);
+            }
+        }
         if let Some(n) = self.stacks.get(&s).map(|v| v.len()) {
             for i in 0..n {
                 self.rebuild_level(s, i);
@@ -993,6 +995,15 @@ impl Browser {
 
     /// Refresh a section now if it's open, or when it's next opened.
     pub fn refresh_or_stale(&mut self, s: Section) {
+        if s == Section::Settings && self.section != Section::Settings {
+            for p in Section::SOURCES {
+                if p == self.section {
+                    self.refresh_section(p);
+                } else if self.stacks.contains_key(&p) {
+                    self.stale.insert(p);
+                }
+            }
+        }
         if s == self.section {
             self.refresh_section(s);
         } else if self.stacks.contains_key(&s) {
@@ -1262,6 +1273,11 @@ impl Browser {
                     | Section::Amp
                     | Section::Genres
                     | Section::Playlists
+                    | Section::Plex
+                    | Section::MusicServers
+                    | Section::Dlna
+                    | Section::Icecast
+                    | Section::Snapcast
             ) | Source::Podcast { .. }
         );
         playable && self.lib.is_some() && level.items.iter().any(Item::selectable)
@@ -1762,19 +1778,21 @@ impl Browser {
 
     /// Open (or reuse) a search level. Returns the query already there.
     pub fn start_search(&mut self) -> String {
-        if matches!(
-            self.section,
-            Section::Queue
-                | Section::Settings
-                | Section::Eq
-                | Section::Amp
-                | Section::Downloads
-                | Section::Radio
-                | Section::Podcasts
-                | Section::MostListened
-                | Section::TopAlbums
-                | Section::TopArtists
-        ) {
+        if self.section.source_group().is_some()
+            || matches!(
+                self.section,
+                Section::Queue
+                    | Section::Settings
+                    | Section::Eq
+                    | Section::Amp
+                    | Section::Downloads
+                    | Section::Radio
+                    | Section::Podcasts
+                    | Section::MostListened
+                    | Section::TopAlbums
+                    | Section::TopArtists
+            )
+        {
             self.switch(Section::Songs);
         }
         let existing = match self.level().map(|l| &l.source) {
@@ -1864,6 +1882,7 @@ impl Browser {
                 listenbrainz: self.listenbrainz.as_ref().map(|l| l.status()),
                 outputs: self.outputs.clone(),
                 remote_port: self.remote_server.as_ref().map(|s| s.port()),
+                snap: self.snap.live.clone(),
             },
         )
         .into_iter()
@@ -1923,6 +1942,12 @@ impl Browser {
         }
         if *key == Key::LastFmLink {
             return self.lastfm_link();
+        }
+        // Buttons on the Sources pages.
+        match key {
+            Key::SnapRefresh => return self.refresh_snap_rooms(),
+            Key::PlexSignIn => return self.plex_sign_in(),
+            _ => {}
         }
         let Some(new) = settings::stepped(&row.control, &change) else {
             return;
@@ -1993,6 +2018,22 @@ impl Browser {
                 ) => {
                     let mode: config::SidebarMode = options[*index].0.parse().unwrap_or_default();
                     self.save_sidebar(*key == Key::SidebarLandscape, mode)?;
+                }
+                (Key::ServerExtras(name), Control::Toggle(on)) => {
+                    let mut list = self.config.servers.clone();
+                    if let Some(sc) = list.iter_mut().find(|s| &s.name == name) {
+                        sc.extras = *on;
+                    }
+                    w(config::set_servers(&path, &list))?;
+                    self.config.servers = list;
+                    // The server reconnects with them on or off.
+                    if let Some(r) = &self.remote {
+                        r.set_servers(self.config.servers.clone());
+                    }
+                }
+                (Key::SnapClient(id), Control::Toggle(on)) => self.set_snap_room(id, *on),
+                (Key::SnapVolume(id), Control::Number { value, .. }) => {
+                    self.set_snap_volume(id, *value)
                 }
                 (Key::ServerStream(name), Control::Choice { options, index }) => {
                     let (stream, kbps) = settings::parse_stream(&options[*index].0);

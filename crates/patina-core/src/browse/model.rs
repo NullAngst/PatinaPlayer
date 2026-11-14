@@ -40,9 +40,45 @@ pub enum Section {
     TopArtists,
     /// A plugged-in iPod.
     Ipod,
+    // The Sources pages: each kind of source, set up on its own page.
+    Plex,
+    /// Subsonic and Ampache servers.
+    MusicServers,
+    Dlna,
+    Icecast,
+    Snapcast,
 }
 
 impl Section {
+    /// The Sources pages, in sidebar order.
+    pub const SOURCES: [Section; 5] = [
+        Section::Plex,
+        Section::MusicServers,
+        Section::Dlna,
+        Section::Icecast,
+        Section::Snapcast,
+    ];
+
+    /// The Settings group a Sources page shows.
+    pub fn source_group(self) -> Option<&'static str> {
+        use super::settings as st;
+        Some(match self {
+            Section::Plex => st::GROUP_PLEX,
+            Section::MusicServers => st::GROUP_SUBSONIC,
+            Section::Dlna => st::GROUP_DLNA,
+            Section::Icecast => st::GROUP_ICECAST,
+            Section::Snapcast => st::GROUP_SNAPCAST,
+            _ => return None,
+        })
+    }
+
+    /// A page of setting rows rather than music: Settings, EQ, Amp and
+    /// the Sources pages.
+    pub fn is_settings_page(self) -> bool {
+        matches!(self, Section::Settings | Section::Eq | Section::Amp)
+            || self.source_group().is_some()
+    }
+
     /// Its first build reads the whole library or asks a server, which
     /// can take a noticeable moment on a big collection.
     pub fn slow_first_build(self) -> bool {
@@ -114,6 +150,11 @@ impl Section {
             Section::TopAlbums => "Top albums",
             Section::TopArtists => "Top artists",
             Section::Ipod => "iPod",
+            Section::Plex => "Plex",
+            Section::MusicServers => "Subsonic & Ampache",
+            Section::Dlna => "DLNA",
+            Section::Icecast => "Icecast",
+            Section::Snapcast => "Snapcast",
         }
     }
 }
@@ -460,6 +501,7 @@ pub struct SettingsState<'a> {
     pub outputs: &'a [crate::audio::output::OutDevice],
     /// The remote control's port while other players can control this one.
     pub remote_port: Option<u16>,
+    pub snap: super::settings::SnapLive,
 }
 
 /// Everything a view can draw from besides the library itself.
@@ -572,7 +614,14 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
             let eps = lib.episodes(*id).map_err(err)?;
             Ok((title.clone(), eps.into_iter().map(Item::Episode).collect()))
         }
-        Source::Section(Section::Settings) => {
+        Source::Section(
+            page @ (Section::Settings
+            | Section::Plex
+            | Section::MusicServers
+            | Section::Dlna
+            | Section::Icecast
+            | Section::Snapcast),
+        ) => {
             let st = &ctx.settings;
             let rows = super::settings::rows(
                 st.config,
@@ -587,20 +636,55 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                     listenbrainz: st.listenbrainz.clone(),
                     outputs: st.outputs.to_vec(),
                     remote_port: st.remote_port,
+                    snap: st.snap.clone(),
                 },
             );
+            let only = page.source_group();
             let mut items = Vec::new();
             let mut last = None;
             for (group, setting) in rows {
-                if group != last
+                let source_row = group.is_some_and(|g| super::settings::SOURCE_GROUPS.contains(&g));
+                let keep = match only {
+                    Some(g) => group == Some(g),
+                    None => !source_row,
+                };
+                if !keep {
+                    continue;
+                }
+                // A Sources page is one group; its title says which.
+                if only.is_none()
+                    && group != last
                     && let Some(g) = group
                 {
                     items.push(Item::Header(g.into()));
                 }
                 last = group;
+                // An Icecast server's streams go right under it.
+                let mounts = match (&setting.key, page) {
+                    (super::settings::Key::Server(name), Section::Icecast) => ctx
+                        .servers
+                        .iter()
+                        .find(|s| &s.name == name)
+                        .map(|srv| srv.stations.clone())
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let server = match &setting.key {
+                    super::settings::Key::Server(n) => Some(n.clone()),
+                    _ => None,
+                };
                 items.push(Item::Setting(setting));
+                items.extend(mounts.into_iter().map(|st| Item::Station {
+                    index: usize::MAX,
+                    check: ctx.checks.get(&st.url).cloned(),
+                    station: Station {
+                        name: st.name,
+                        url: st.url,
+                    },
+                    server: server.clone(),
+                }));
             }
-            Ok(("Settings".into(), items))
+            Ok((page.label().into(), items))
         }
         Source::Section(Section::Eq) => {
             let greyed =
@@ -984,6 +1068,11 @@ fn build_library(
             Section::Radio
             | Section::Podcasts
             | Section::Settings
+            | Section::Plex
+            | Section::MusicServers
+            | Section::Dlna
+            | Section::Icecast
+            | Section::Snapcast
             | Section::Eq
             | Section::Amp
             | Section::Downloads

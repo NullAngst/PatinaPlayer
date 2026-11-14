@@ -39,6 +39,7 @@ fn add(srv: &Subsonic, name: &str, db: &Path) {
         stream: StreamFormat::Raw,
         bitrate: 192,
         udn: String::new(),
+        extras: false,
     };
     let c = remote::connect(&sc, "pw").unwrap();
     let mut lib = Library::open(db).unwrap();

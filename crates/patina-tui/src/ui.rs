@@ -76,7 +76,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::FeedUrl => "Podcast feed URL",
                 InputPurpose::AddFolder => "Add a music folder",
                 InputPurpose::SetValue { label, .. } => label.as_str(),
-                InputPurpose::RenameServer(_) => "DLNA server: new name",
+                InputPurpose::RenameServer(_) => "Server: new name",
+                InputPurpose::PlexByHand => "Plex server: address, a space, then its X-Plex-Token",
+                InputPurpose::IcecastUrl => "Icecast server address (radio.example.com:8000)",
                 InputPurpose::ServerName(f) if f.old.is_some() => "Server: name",
                 InputPurpose::ServerName(_) => "New server: a name for it",
                 InputPurpose::ServerUrl(_) => "Server address (https://music.example.com)",
@@ -477,6 +479,9 @@ fn hints(app: &App) -> &'static str {
         }
         (Section::Settings, _) => {
             "Enter change (or sync a server) · h/l step · N add folder · E edit server · d remove"
+        }
+        (s, _) if s.source_group().is_some() => {
+            "Enter change, sync or add · h/l step · E rename or edit a server · d remove it"
         }
         (Section::Eq, _) => {
             "Enter change · h/l ±0.5 dB · H/L move a band · o on/off · d remove a band · Ctrl+E here"

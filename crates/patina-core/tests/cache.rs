@@ -91,6 +91,7 @@ fn rig_on(flavor: Flavor, name: &str, cfg: CacheConfig, body: Option<Vec<u8>>) -
         stream: StreamFormat::Raw,
         bitrate: 192,
         udn: String::new(),
+        extras: false,
     };
     let client = remote::connect(&sc, "pw").unwrap();
     let dir = tempfile::tempdir().unwrap();

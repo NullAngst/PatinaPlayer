@@ -123,6 +123,12 @@ final class Native {
      */
     static native String carArt(String key);
 
+    /**
+     * The system's Back: a gesture or the button. `edge` is 1 for a swipe
+     * in from the left, 2 from the right, 0 when unknown.
+     */
+    static native void backPressed(int edge);
+
     /** Keeps this class, so Rust's threads can find it. */
     static native void nativeInit();
 

@@ -10,9 +10,12 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 
 - **Local folders**, indexed into one SQLite database, so browsing is instant and works offline. Tags come from lofty (ID3v2, Vorbis comments, MP4, APE), with FFmpeg as the fallback. A rescan only reads new or changed files, and the folders are watched while the app runs, so an album you copy in shows up a couple of seconds later.
 - **Subsonic servers** (Navidrome, Gonic, Airsonic, LMS and anything else that speaks the API) and **Ampache**, as many as you like. The app logs in and works out which kind it is, so there's nothing to pick. The server's library is copied into the local index, so its songs sit in every view next to your local music and browsing never waits on the network.
-- **DLNA servers** (MiniDLNA, Gerbera, Jellyfin, Plex, Serviio, Twonky, most NAS boxes). Find DLNA servers in Settings asks the network who's there. No address to type, no login.
+- **Plex Media Server**, through the API Plex documents at developer.plex.tv. Sign in with a code at plex.tv/link and pick your server, or add one by its address and a token. See [Plex](#plex) below.
+- **DLNA servers** (MiniDLNA, Gerbera, Jellyfin, Plex, Serviio, Twonky, most NAS boxes). Find DLNA servers asks the network who's there. No address to type, no login.
+- **Icecast servers**: give it the address, and every live stream on it plays like a radio station, listed on its page and in Radio, and read again every five minutes so streams that start or stop come and go.
+- Each kind has its own page in the sidebar under Sources (Plex, Subsonic & Ampache, DLNA, Icecast, and Snapcast for the rooms you play to), where they're added, synced, edited and removed. Settings keeps the rest.
 - Server playlists, play queues (Subsonic), radio stations and podcasts come across too. Changes to a server playlist go back to the server.
-- Ratings and starred albums and artists sync both ways with Subsonic and Ampache.
+- Ratings sync both ways with Subsonic, Ampache and Plex; starred albums and artists with Subsonic and Ampache.
 - Passwords live in the desktop keyring (KWallet, GNOME Keyring) through the Secret Service API, never in the config file. With no keyring (a TTY, SSH, a phone) they go in a file only you can read, and the app says so.
 
 ### Views
@@ -102,6 +105,18 @@ In order, after decoding: leveling, the amp stack, the EQ, the channel tools, vo
 
 Everything in the chain glides when you change it, so nothing clicks or zippers.
 
+### Plex
+
+Plex is a server kind like the others: its music libraries are copied into the index, and its songs sit in every view next to your own.
+
+- **Signing in.** On the Plex page, Sign in shows a four-character code. Enter it at plex.tv/link on any device, signed in to Plex there. The app never sees your Plex password. It then lists the servers on your account (your own and ones shared with you) to add. Following Plex's docs, the app makes its own Ed25519 key, sends the public half with the code, and gets a Plex JWT back. That token lasts 7 days, and the app swaps it for a new one a day before it runs out, signing with the key. Plex allows that even after it has run out, so being away for a month is fine. The key and tokens live in the keyring. Add by hand takes a server address and a classic X-Plex-Token instead, without plex.tv.
+- **Finding the server.** plex.tv lists every address the server has. The app tries the one that worked last, then the local ones, then the internet ones, then Plex's relay, and keeps the first that answers as that server.
+- **Playing.** Songs stream as the original file, so bit-perfect and gapless work as with local files. Set a server's streaming to a conversion and Plex's own transcoder makes it (AAC, or MP3 for the MP3 choices), which the cache downloads and keeps like any other.
+- **Ratings** go both ways (Plex counts out of ten, so a star is two).
+- **Plays and Now Playing.** While a song plays, the app tells Plex where it is every ten seconds and whenever it pauses, resumes or stops, the way Plex's own players do. That puts PatinaPlayer on Plex's dashboard, and Plex counts the play once the song gets near its end, so "most played" and history in Plex stay right.
+- **Playlists** come across, and changes to yours go back. Plex's smart playlists come across too, read-only, and are read again every half hour since their songs change on their own.
+- **Plex Pass features**, a switch per server, off by default: mixes from Plex's sonic analysis (songs that sound alike, rather than Last.fm's or genre tags' idea of alike), lyrics from Plex, and loudness from Plex's analysis, so leveling doesn't have to measure every song. They need Plex Pass on the server's owner's account; the row says when the server doesn't have it. With the switch off, or no Plex Pass, mixes, lyrics and leveling work the way they do for every other server.
+
 ### Servers on a slow line
 
 - Every server song plays through a cache. Prefetch downloads what's coming up in the queue (by size, 1 GB by default, or by song count), the cache keeps what you've played (10 GB by default), and Keep offline pins songs, albums, artists, playlists or server folders until you unpin them.
@@ -143,7 +158,8 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 ### Other devices
 
 - **Play on** another device: the cast button on the bottom bar or on Now Playing, or the last entry in the output picker. It lists Chromecasts, DLNA renderers (network speakers, AV receivers, TVs, Kodi) and Snapcast servers found on the network. The sound still comes from this app's player, after the EQ, the amp stack and leveling, so the queue, gapless and crossfades all carry on. Chromecasts and DLNA renderers fetch it from the app as a live 48 kHz WAV stream; a snapserver gets it over TCP. Pick This device to come back.
-- For Snapcast, nothing has to change on the snapserver. When you pick it, PatinaPlayer asks the snapserver over its control API (port 1705, or 1780) for a TCP source on port 4953 and adds one called "Patina" if there isn't one, then checks it can connect, and says what's wrong if it can't. Then set your rooms to the Patina stream in Snapweb or the Snapcast app. A source added that way lasts until the snapserver restarts, and PatinaPlayer adds it again the next time. To keep it for good, put `source = tcp://0.0.0.0:4953?name=Patina&mode=server` in the `[stream]` section of the `snapserver.conf` the snapserver actually reads (in Docker, the one mounted into the container), and publish port 4953 if it runs in Docker. A snapserver that doesn't announce itself goes in by address, from the same list or Settings, Other devices.
+- For Snapcast, nothing has to change on the snapserver. When you pick it, PatinaPlayer asks the snapserver over its control API (port 1705, or 1780) for a TCP source on port 4953 and adds one called "Patina" if there isn't one, then checks it can connect, and says what's wrong if it can't. Then turn rooms on from the Snapcast page (below), or set them to the Patina stream in Snapweb or the Snapcast app. A source added that way lasts until the snapserver restarts, and PatinaPlayer adds it again the next time. To keep it for good, put `source = tcp://0.0.0.0:4953?name=Patina&mode=server` in the `[stream]` section of the `snapserver.conf` the snapserver actually reads (in Docker, the one mounted into the container), and publish port 4953 if it runs in Docker. A snapserver that doesn't announce itself goes in by address, from the same list or the Snapcast page.
+- **Snapcast rooms**: the Snapcast page lists the snapclients the snapserver knows. Turn one on and PatinaPlayer plays in that room, with nothing else changing: a room that shares a Snapcast group with others is moved into a group of its own first, so the others keep what they were playing. Turning it off puts it back on the stream it had. Each room has its own volume there too. Turning the first room on starts playing on that snapserver if PatinaPlayer isn't already. It all goes through the snapserver's control API (`Group.SetClients`, `Group.SetStream`, `Client.SetVolume`).
 - **Remote control**: turn it on in Settings, Other devices, and PatinaPlayer on a phone (or another computer) on the same network can steer this one: the song, its cover, play, pause, skip, seek, volume, shuffle, repeat, the heart, and the queue, where tapping a song plays it. It asks for the six-digit code shown there; New code makes a fresh one and shuts out whoever had the old one. On the other side, Settings, Other devices, Control another player lists the players on the network (or takes an address) and opens their Now Playing. Back or Escape leaves it. The code from last time is kept, so the second time it's one tap.
 
 ### The desktop
@@ -172,6 +188,7 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 - The volume button opens a tall slider, easier to hit with a thumb than the bar's.
 - Minimal UX while driving (Settings, Appearance, on by default): when the phone goes into car mode, which Android Auto turns on and so do driving modes built on it, the app switches to Minimal UX by itself, and back after.
 - Gestures: swipe up on the bottom bar to open Now Playing, swipe down anywhere on Now Playing to close it (the page follows your finger), and swipe the cover left or right for the next or previous song.
+- Back (the edge swipe or the button) closes what's open first (a dialog, the sidebar, a panel, Now Playing), then goes up a level, from an album back to its artist. At the top, a swipe in from the left edge pulls the sidebar out; from the right, or the button, leaves the app with the music playing. Telling the edges apart needs Android 14; on 13 both edges do what the right does.
 - Android Auto has a queue screen: what's coming up, with covers, and tapping a song plays it.
 - Bit-perfect to a USB DAC on Android 14 and later, where the phone's maker offers it.
 
@@ -270,9 +287,17 @@ Both apps work the same here. They share the config and the library, though you'
 
 From the command line, if you'd rather: `patinaplayer --add-folder /mnt/storage/music` adds one and exits, and `--remove-folder` takes one out.
 
+To add a Plex server:
+
+1. Open Plex in the sidebar, under Sources.
+2. Choose Sign in. A code shows up.
+3. On any device, go to plex.tv/link, sign in to Plex, and enter the code. The desktop app has a button that opens the page.
+4. Pick the server. One server on the account is added straight away. The first sync starts, with progress next to it on its page.
+5. For Plex Pass features (sonic mixes, lyrics, loudness), turn on its Plex Pass features row.
+
 To add a Subsonic or Ampache server:
 
-1. Open Settings and find Servers.
+1. Open Subsonic & Ampache in the sidebar, under Sources.
 2. Choose Add server…
 3. Give it a name for the sidebar, its address (whichever address you open its web page at, like `https://music.example.com`), your user name and your password. For an OpenSubsonic API key, leave the user name empty and put the key in the password box.
 4. Connect. If the login works it's saved and the first sync starts, with progress next to its name in the sidebar.
@@ -280,10 +305,12 @@ To add a Subsonic or Ampache server:
 To add a DLNA server:
 
 1. Make sure it's on and on the same network as you.
-2. Open Settings, find Servers, and choose Find servers… It listens for about three seconds.
+2. Open DLNA in the sidebar, under Sources, and choose Find servers… It listens for about three seconds.
 3. Pick the server from the list. It's added under its own name and the sync starts.
 
 If nothing answers, a firewall dropping incoming UDP is the usual cause, since the answers come back to a random port. Let replies from the server's address in through ufw, or whichever firewall you run.
+
+To add an Icecast server: open Icecast under Sources, choose Add server, and give it the address, like `radio.example.com:8000`. It needs Icecast 2.4 or newer, which has the status page the streams are read from.
 
 To play files without the library: `patinaplayer song.flac ~/Downloads/SomeAlbum`. They go straight into the queue.
 
@@ -406,9 +433,10 @@ url = "https://example.com/listen.pls"
 name = "Home"            # shown in the sidebar
 url = "https://music.example.com"
 user = "me"
-kind = "subsonic"        # subsonic, ampache or dlna; Settings finds out
+kind = "subsonic"        # subsonic, ampache, plex, dlna or icecast; adding one sets it
 stream = "raw"           # raw (the original file), opus or mp3
 bitrate = 192            # kbps, for opus and mp3
+# plex_pass = false      # a Plex server's Plex Pass features; udn is its machine id
 ```
 
 The app writes the `[eq]` and `[amp]` tables itself, along with which device gets which preset. The EQ and Amp views are the easier way in. Command line flags (`--backend`, `--device`, `--buffer-ms`, `--volume`, `--fade-ms`) override the file for one run.
@@ -480,7 +508,7 @@ HEADS UP IF YOU'VE USED THE TERMINAL APP BEFORE: Space in a list now picks the r
 | F5 | Check folders for changes and refresh podcast feeds |
 | Ctrl+Q | Quit |
 
-In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe; in a show, `w` downloads, `x` deletes the download, `P` marks played. In the Queue: `d` remove (the picked songs, if any), `J`/`K` move, `S` save to a playlist (the picked songs, if any), `L` load the queue saved on your server, `C` clear. In Playlists: `N` new, `S` new smart playlist, `R` rename, `D` delete, `E` edit a smart playlist's rules. In Recently played: the Clear the history row at the top empties it. In the iPod view: `d` take a playlist or album off, `E` eject. In Downloads: `w` pauses or resumes, `x` cancels or unpins, `W` pauses everything, `C` clears the cache. In Settings and the EQ: Enter flips, cycles or edits, `h`/`l` step a value down or up.
+In Radio: `N` new station, `E` edit, `T` test, `D` delete, `J`/`K` move. In Podcasts: `N` subscribe, `D` unsubscribe; in a show, `w` downloads, `x` deletes the download, `P` marks played. In the Queue: `d` remove (the picked songs, if any), `J`/`K` move, `S` save to a playlist (the picked songs, if any), `L` load the queue saved on your server, `C` clear. In Playlists: `N` new, `S` new smart playlist, `R` rename, `D` delete, `E` edit a smart playlist's rules. In Recently played: the Clear the history row at the top empties it. In the iPod view: `d` take a playlist or album off, `E` eject. In Downloads: `w` pauses or resumes, `x` cancels or unpins, `W` pauses everything, `C` clears the cache. In Settings and the EQ: Enter flips, cycles or edits, `h`/`l` step a value down or up. On the Sources pages the same, plus `E` renames or edits a server and `d` removes it; Sign in shows the Plex code in the message line, and adds your own server once it's entered (sign in again for another on the same account).
 
 TUI cover art picks a protocol by asking the terminal. To force one: `patinaplayer-tui --art kitty` (or `sixel`, `iterm2`, `blocks`, `off`). Konsole supports kitty images. Inside tmux, auto usually falls back to blocks.
 
@@ -502,7 +530,7 @@ The core owns all the state, and every view and what each action does lives in `
 
 Server songs sit in the same index as local files, under paths like `server://Home/Nirvana/Bleach/01 Blew.flac` that follow the server's folder layout. That's why every view, search and the folder tree work the same for both.
 
-The tests generate their own audio with FFmpeg and run stand-in servers inside the test (Navidrome-like, Gonic-like, Ampache, DLNA, Last.fm, LRCLIB, radio streams and feeds), so they need no internet. They check gapless joins sample for sample, bit-perfect output byte for byte through ALSA's file plugin, leveling, the EQ and limiter against exact figures, and the cache reading a song while it downloads. The servers workflow runs the same clients against real Navidrome, Gonic, Ampache, MiniDLNA and Gerbera containers.
+The tests generate their own audio with FFmpeg and run stand-in servers inside the test (Navidrome-like, Gonic-like, Ampache, Plex and plex.tv, DLNA, Icecast, Last.fm, LRCLIB, radio streams and feeds), so they need no internet. They check gapless joins sample for sample, bit-perfect output byte for byte through ALSA's file plugin, leveling, the EQ and limiter against exact figures, and the cache reading a song while it downloads. The servers workflow runs the same clients against real Navidrome, Gonic, Ampache, MiniDLNA and Gerbera containers.
 
 To try it against a server without having one: `cargo run -p patina-core --example mock_server` starts a stand-in Navidrome and prints its address. Log in as `demo`, password `demo`.
 
@@ -518,7 +546,10 @@ To time indexing on your own collection: `cargo run --release -p patina-core --e
 - DLNA sources are songs only: DLNA has no playlists, queues, ratings or stars to reach, and no way to tell the server about plays. Finding DLNA servers needs multicast, so one on another subnet or behind a VPN has to go in the config by its description address.
 - Navidrome makes its folder tree up from tags (Artist/Album/01 - Title.flac) unless its `Subsonic.DefaultReportRealPath` option is on. Navidrome has no podcasts, and Ampache has no saved play queue and no lyrics call.
 - Mixes match Last.fm's answers to your library by artist and title as tagged, apart from case. "The Beatles" and "Beatles" don't match.
-- A tag edit on the server that leaves an album's song count, length and dates alone isn't seen by the regular sync. Sync now, in Settings, reads every album and catches it.
+- A tag edit on the server that leaves an album's song count, length and dates alone isn't seen by the regular sync. Sync now, on its Sources page, reads every album and catches it.
+- Plex is built from Plex's published API and tested against a stand-in that follows it, not yet against a real Plex Media Server. Some developers report that a server token plex.tv hands out for a Plex JWT gets refused by their server; the app then tries the account's token, and if that's refused too, Add by hand with a classic token works. Plex has no favorites, so stars don't sync with it, and no saved play queue. Plex's podcasts and its Live TV aren't music libraries and don't come across.
+- A Plex conversion comes as HLS segments (the only way Plex's docs offer it), joined into one file as it downloads, so like any conversion it seeks only as far as what's downloaded.
+- Icecast needs 2.4 or newer for its JSON status page. A stream that needs a password to listen won't play.
 - Metered connections are only detected through NetworkManager.
 - inotify needs one watch per folder, so a very large library can run past `fs.inotify.max_user_watches`. The app says so if it does, and raising the limit with `sysctl` fixes it.
 - On Android, folders are added by path, so a folder from a cloud app's storage provider can't go in. Add that music through a server instead. Bit-perfect depends on the phone's maker offering it.

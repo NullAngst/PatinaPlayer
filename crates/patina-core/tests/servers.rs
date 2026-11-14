@@ -21,6 +21,7 @@ fn cfg(name: &str, url: &str, user: &str, kind: ServerKind) -> ServerConfig {
         stream: StreamFormat::Raw,
         bitrate: 192,
         udn: String::new(),
+        extras: false,
     }
 }
 

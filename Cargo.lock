@@ -4854,6 +4854,7 @@ name = "patina-core"
 version = "0.1.0"
 dependencies = [
  "alsa",
+ "base64 0.22.1",
  "chrono",
  "crossbeam-channel",
  "dirs",
@@ -4871,6 +4872,7 @@ dependencies = [
  "pipewire",
  "realfft",
  "reqwest",
+ "ring",
  "roxmltree",
  "rss",
  "rtrb",

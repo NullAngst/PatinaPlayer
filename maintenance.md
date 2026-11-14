@@ -69,6 +69,16 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 1. Open each of the three rating playlists in the editor: they should open as rows, not text. Add a row of each kind (stars, a range, "in the last", a date, lossless) and save; reopening it should show the same rows. `cargo test -p patina-core form` covers the round trip.
 2. After a Snapcast update, check `crates/patina-core/src/cast/snapcast.rs` still matches its JSON-RPC: `Server.GetStatus` (streams under `server.streams`, each with `uri.scheme`, `uri.host`, `uri.query`) and `Stream.AddStream` with `streamUri`. The control API's doc is `doc/json_rpc_api/control.md` in the Snapcast repo. If Snapcast ever requires authentication for AddStream, the note will say it wouldn't add a source; the fix is then the line in `snapserver.conf`.
 
+## 5.9. Plex, Icecast and Snapcast rooms
+
+1. Plex's API docs live at developer.plex.tv/pms. Every couple of months, open its "API versioning" table. When a new version is listed, read what it changed against `crates/patina-core/src/remote/plex.rs`: the calls used are `/identity`, `/`, `/library/sections/all`, `/library/sections/{id}/all` (types 8 and 9), `/library/metadata/{id}/children`, `/library/metadata/{ids}`, `/library/metadata/{id}/nearest`, `/library/metadata/{id}/similar`, `/library/parts/...`, `/library/streams/{id}`, `/photo/:/transcode`, `/music/:/transcode/universal/start.m3u8`, `PUT /:/rate`, `POST /:/timeline` and `/playlists`. If nothing in them changed, raise `API_VERSION` in that file to the new version. The community OpenAPI spec (github.com/LukeHagar/plex-api-spec) is a quicker way to diff.
+2. Check "Authenticating with Plex" on the same page still describes the PIN with a `jwk`, the `deviceJWT` poll, `/auth/nonce` and `/auth/token` returning `auth_token`. That flow is `crates/patina-core/src/remote/plex_tv.rs`. If Plex ever retires classic tokens, Add by hand stops working and the README should say so.
+3. Watch the Plex forum thread "Question on https://clients.plex.tv/api/v2/resources and JWT authentication". If Plex answers it, the fallback to the account token in `Plex::connect` may be droppable, or may need replacing.
+4. Sign in with a real Plex account, add a server, play a song through and check it shows on Plex's dashboard while it plays and its play count went up after. Rate a song and check Plex shows it.
+5. Icecast: add any public Icecast 2.4+ server and check its mounts show. If Icecast changes `status-json.xsl`, `crates/patina-core/src/remote/icecast.rs` is where it's read.
+6. Snapcast rooms use `Server.GetStatus`, `Group.SetClients`, `Group.SetStream` and `Client.SetVolume` from the control API doc in the Snapcast repo. Turn a room on that shares a group with another, check only it moves to the Patina stream, then turn it off and check it goes back.
+7. Android: on a phone with Android 14 or later, open an album and swipe in from the left edge (it should go back to the artist), then at the top swipe from the left (the sidebar should open) and from the right (the app should go to the background, music playing).
+
 ## 6. ListenBrainz and Last.fm
 
 1. In Settings, check the ListenBrainz row still shows your user name. If it says the token is refused, make a new one at listenbrainz.org/settings and paste it in.

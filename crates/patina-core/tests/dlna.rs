@@ -314,7 +314,7 @@ fn the_browser_finds_adds_renames_and_removes_one() {
     });
     b.dlna_probe = Some(d.ssdp);
 
-    b.switch(Section::Settings);
+    b.switch(Section::Dlna);
     assert!(setting_keys(&b).contains(&Key::FindDlna));
     b.find_dlna();
     assert!(b.finding_dlna());
@@ -338,17 +338,10 @@ fn the_browser_finds_adds_renames_and_removes_one() {
     );
     assert!(!text.contains("user ="), "no login to save: {text}");
     assert!(!std::path::Path::new(&dir.path().join("secrets.toml")).exists());
-    assert!(b.sidebar.iter().any(|e| matches!(
-        e,
-        SideEntry::Source {
-            server: Some(ServerState::Ready),
-            tracks: 5,
-            ..
-        }
-    )));
+    assert!(b.sidebar.contains(&SideEntry::Section(Section::Dlna)));
 
-    // Settings: the server, but no streaming choice (DLNA doesn't convert).
-    b.switch(Section::Settings);
+    // Its page: the server, but no streaming choice (DLNA doesn't convert).
+    b.switch(Section::Dlna);
     let keys = setting_keys(&b);
     assert!(keys.contains(&Key::Server("Living Room".into())));
     assert!(!keys.contains(&Key::ServerStream("Living Room".into())));

@@ -133,6 +133,21 @@ pub extern "system" fn Java_dev_patina_player_Native_permissionsDone<'local>(
     }
 }
 
+/// The system's Back, which predictive back no longer sends as a key. The
+/// window picks it up on its next tick.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_patina_player_Native_backPressed<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    edge: jint,
+) {
+    platform::outside_action(match edge {
+        1 => "back-left",
+        2 => "back-right",
+        _ => "back",
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_patina_player_Native_command<'local>(
     _env: JNIEnv<'local>,

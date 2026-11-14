@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use patina_core::browse::{
-    Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, Section, SideEntry, Source,
+    Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, PlexSignIn, Section,
+    SideEntry, Source,
 };
 use patina_core::library::PlaylistRow;
 use patina_core::remote::dlna::Found;
@@ -46,8 +47,13 @@ pub enum InputPurpose {
     ServerUser(ServerForm),
     /// The password or API key. Drawn as dots, and not trimmed.
     ServerSecret(ServerForm),
-    /// A new name for a DLNA server, the one thing it has to edit.
+    /// A new name for a DLNA, Icecast or Plex server, the one thing it
+    /// has to edit here.
     RenameServer(String),
+    /// A Plex server's address and token, space between.
+    PlexByHand,
+    /// An Icecast server's address.
+    IcecastUrl,
     /// A new playlist on a server.
     ServerPlaylist {
         server: String,
@@ -250,6 +256,7 @@ impl App {
                 }
             }
             self.take_notes();
+            self.plex_tick();
             if matches!(self.modal, Modal::None)
                 && let Some(found) = self.b.take_dlna_found()
             {
@@ -290,6 +297,46 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Signing in to Plex: the code stays in the message line until it's
+    /// entered, then the account's server is added (your own first; run
+    /// it again for another).
+    fn plex_tick(&mut self) {
+        match self.b.plex_sign_in_state().cloned() {
+            Some(PlexSignIn::Waiting { code, .. }) => {
+                self.toast = Some((
+                    format!("Plex: enter {code} at plex.tv/link"),
+                    Instant::now(),
+                    false,
+                ));
+            }
+            Some(PlexSignIn::Choose { servers, .. }) => {
+                let pick = servers
+                    .iter()
+                    .filter(|c| !c.added)
+                    .min_by_key(|c| !c.owned)
+                    .map(|c| c.id.clone());
+                let others = servers
+                    .iter()
+                    .filter(|c| !c.added)
+                    .count()
+                    .saturating_sub(1);
+                match pick {
+                    Some(id) => self.b.add_plex_choice(&id),
+                    None => self
+                        .b
+                        .note("Every server on that Plex account is added already"),
+                }
+                if others > 0 {
+                    self.b.note(format!(
+                        "{others} more on that account: sign in again to add the next"
+                    ));
+                }
+                self.b.cancel_plex_sign_in();
+            }
+            _ => {}
+        }
     }
 
     fn take_notes(&mut self) {
@@ -630,10 +677,7 @@ impl App {
         if self.b.section == Section::Queue {
             return !self.b.player.queue().is_empty();
         }
-        if matches!(
-            self.b.section,
-            Section::Settings | Section::Eq | Section::Amp | Section::Ipod
-        ) {
+        if self.b.section.is_settings_page() || self.b.section == Section::Ipod {
             return false;
         }
         matches!(
@@ -830,11 +874,7 @@ impl App {
         if self.media_key(k) {
             return;
         }
-        if matches!(
-            self.b.section,
-            Section::Settings | Section::Eq | Section::Amp
-        ) && self.settings_key(k)
-        {
+        if self.b.section.is_settings_page() && self.settings_key(k) {
             return;
         }
         let queue = self.b.section == Section::Queue;
@@ -1212,6 +1252,23 @@ impl App {
                 Control::Action(_) if st.key == SettingKey::ControlAnother => self
                     .b
                     .note("Controlling another player is in the window app"),
+                Control::Action(_)
+                    if matches!(st.key, SettingKey::PlexSignIn | SettingKey::SnapRefresh) =>
+                {
+                    self.b.change_setting(&st.key, Change::Toggle)
+                }
+                Control::Action(_) if st.key == SettingKey::AddPlex => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::PlexByHand,
+                        buf: "http://".into(),
+                    };
+                }
+                Control::Action(_) if st.key == SettingKey::AddIcecast => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::IcecastUrl,
+                        buf: String::new(),
+                    };
+                }
                 Control::Action(_) if st.key == SettingKey::AddServer => {
                     self.modal = Modal::Input {
                         purpose: InputPurpose::ServerName(ServerForm::default()),
@@ -1238,7 +1295,7 @@ impl App {
                 let Some(sc) = self.b.server(name).cloned() else {
                     return false;
                 };
-                if !sc.kind.logs_in() {
+                if !sc.kind.logs_in() || sc.kind == patina_core::remote::ServerKind::Plex {
                     self.modal = Modal::Input {
                         purpose: InputPurpose::RenameServer(sc.name.clone()),
                         buf: sc.name,
@@ -1426,6 +1483,14 @@ impl App {
                 self.b.create_server_playlist(&server, &text, &add)
             }
             InputPurpose::RenameServer(old) => self.b.edit_server(&old, &text, "", "", None),
+            InputPurpose::PlexByHand => {
+                let mut parts = text.split_whitespace();
+                match (parts.next(), parts.next()) {
+                    (Some(url), Some(token)) => self.b.add_plex_by_token("", url, token),
+                    _ => self.b.error("Type the address, a space, then the token"),
+                }
+            }
+            InputPurpose::IcecastUrl => self.b.add_icecast("", &text),
             InputPurpose::ServerName(mut f) => {
                 if text.is_empty() {
                     return;

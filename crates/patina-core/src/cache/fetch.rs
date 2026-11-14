@@ -12,6 +12,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
+/// How long to wait between reads of an HLS playlist that's still growing.
+const HLS_POLL: Duration = Duration::from_secs(2);
+/// Give up on an HLS playlist that stops growing without ending.
+const HLS_STALL: u32 = 60;
+
 /// A run of spaces at least this long at the very end of a download is
 /// filler, not the song. Ampache sends the size its catalog has for a file
 /// and, when the file is shorter than that (retagged since the last scan),
@@ -162,7 +167,12 @@ pub fn fetch(
     progress.set_state(State::Running);
     let mut tries = 0;
     loop {
-        match fetch_once(http, url, dest, &part, resume, progress, stop) {
+        let attempt = if is_hls(url) {
+            fetch_hls(http, url, dest, &part, progress, stop)
+        } else {
+            fetch_once(http, url, dest, &part, resume, progress, stop)
+        };
+        match attempt {
             Ok(o) => {
                 progress.set_state(match o {
                     Outcome::Done => State::Done,
@@ -288,6 +298,149 @@ fn fetch_once(
     Ok(Outcome::Done)
 }
 
+/// An HLS playlist rather than a file: Plex's universal transcoder.
+pub fn is_hls(url: &str) -> bool {
+    url::Url::parse(url)
+        .map(|u| u.path().ends_with(".m3u8"))
+        .unwrap_or(false)
+}
+
+/// A URL from a playlist, made absolute, with the playlist's X-Plex-
+/// arguments carried over (the token among them) when it has none.
+fn hls_resolve(playlist: &url::Url, line: &str) -> Option<url::Url> {
+    let mut u = playlist.join(line.trim()).ok()?;
+    if u.host_str() == playlist.host_str() && !u.query_pairs().any(|(k, _)| k == "X-Plex-Token") {
+        let carried: Vec<(String, String)> = playlist
+            .query_pairs()
+            .filter(|(k, _)| k.starts_with("X-Plex-"))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let mut q = u.query_pairs_mut();
+        for (k, v) in carried {
+            q.append_pair(&k, &v);
+        }
+    }
+    Some(u)
+}
+
+/// What a playlist lists: variants (a master playlist) or segments, and
+/// whether it's complete.
+fn hls_parse(base: &url::Url, text: &str) -> (Vec<url::Url>, Vec<url::Url>, bool) {
+    let mut variants = Vec::new();
+    let mut segments = Vec::new();
+    let mut next_is_variant = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("#EXT-X-STREAM-INF") {
+            next_is_variant = true;
+        } else if line.is_empty() || line.starts_with('#') {
+            continue;
+        } else if let Some(u) = hls_resolve(base, line) {
+            if next_is_variant || line.contains(".m3u8") {
+                variants.push(u);
+            } else {
+                segments.push(u);
+            }
+            next_is_variant = false;
+        }
+    }
+    (variants, segments, text.contains("#EXT-X-ENDLIST"))
+}
+
+/// Download an HLS stream's segments, in order, into one file. MPEG-TS
+/// segments joined end to end are a file FFmpeg plays. Can't resume: the
+/// server transcodes afresh each time.
+fn fetch_hls(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    part: &Path,
+    progress: &Progress,
+    stop: &AtomicBool,
+) -> Result<Outcome, FetchError> {
+    let get_text = |u: &url::Url| -> Result<String, FetchError> {
+        let resp = http
+            .get(u.as_str())
+            .send()
+            .map_err(|e| FetchError::Http(e.without_url().to_string()))?;
+        if !resp.status().is_success() {
+            return Err(FetchError::Http(format!("HTTP {}", resp.status())));
+        }
+        resp.text()
+            .map_err(|e| FetchError::Http(e.without_url().to_string()))
+    };
+    let mut playlist = url::Url::parse(url).map_err(|e| FetchError::Http(e.to_string()))?;
+    // A master playlist points at the real one.
+    for _ in 0..3 {
+        let text = get_text(&playlist)?;
+        let (variants, _, _) = hls_parse(&playlist, &text);
+        match variants.into_iter().next() {
+            Some(v) => playlist = v,
+            None => break,
+        }
+    }
+    let mut file = std::fs::File::create(part)?;
+    let mut done = 0u64;
+    progress.done.store(0, Ordering::Release);
+    let mut fetched = 0usize;
+    let mut idle = 0;
+    loop {
+        let text = get_text(&playlist)?;
+        let (_, segments, ended) = hls_parse(&playlist, &text);
+        let new = segments.len().saturating_sub(fetched);
+        for seg in segments.iter().skip(fetched) {
+            if stop.load(Ordering::Relaxed) {
+                file.flush()?;
+                return Ok(Outcome::Stopped);
+            }
+            let mut resp = http
+                .get(seg.as_str())
+                .send()
+                .map_err(|e| FetchError::Http(e.without_url().to_string()))?;
+            if !resp.status().is_success() {
+                return Err(FetchError::Http(format!("segment: HTTP {}", resp.status())));
+            }
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = resp
+                    .read(&mut buf)
+                    .map_err(|e| FetchError::Http(e.to_string()))?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buf[..n])?;
+                done += n as u64;
+                progress.done.store(done, Ordering::Release);
+            }
+            fetched += 1;
+        }
+        if ended {
+            break;
+        }
+        // A live playlist grows as the server transcodes.
+        if new == 0 {
+            idle += 1;
+            if idle > HLS_STALL {
+                return Err(FetchError::Http("the conversion stopped".into()));
+            }
+        } else {
+            idle = 0;
+        }
+        if stop.load(Ordering::Relaxed) {
+            file.flush()?;
+            return Ok(Outcome::Stopped);
+        }
+        std::thread::sleep(HLS_POLL);
+    }
+    file.flush()?;
+    drop(file);
+    if done == 0 {
+        return Err(FetchError::Http("the server sent an empty stream".into()));
+    }
+    progress.total.store(done, Ordering::Release);
+    std::fs::rename(part, dest)?;
+    Ok(Outcome::Done)
+}
+
 /// How many bytes of space filler end a file `len` bytes long: 0, or at
 /// least [`FILLER_MIN`].
 fn trailing_filler(file: &mut std::fs::File, len: u64) -> std::io::Result<u64> {
@@ -330,6 +483,32 @@ fn server_message(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hls_playlists_and_their_tokens() {
+        let base = url::Url::parse(
+            "http://pms:32400/music/:/transcode/universal/start.m3u8?path=x&X-Plex-Token=T&X-Plex-Client-Identifier=C",
+        )
+        .unwrap();
+        let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nsession/abc/base/index.m3u8\n";
+        let (v, s, end) = hls_parse(&base, master);
+        assert_eq!(v.len(), 1);
+        assert!(s.is_empty() && !end);
+        assert!(v[0].as_str().starts_with(
+            "http://pms:32400/music/:/transcode/universal/session/abc/base/index.m3u8?"
+        ));
+        assert!(
+            v[0].query_pairs()
+                .any(|(k, val)| k == "X-Plex-Token" && val == "T")
+        );
+        let list = "#EXTM3U\n#EXTINF:10,\n00000.ts\n#EXTINF:10,\n00001.ts\n#EXT-X-ENDLIST\n";
+        let (v, s, end) = hls_parse(&v[0], list);
+        assert!(v.is_empty() && end);
+        assert_eq!(s.len(), 2);
+        assert!(s[1].path().ends_with("/session/abc/base/00001.ts"));
+        assert!(is_hls(base.as_str()));
+        assert!(!is_hls("http://x/library/parts/1/2/file.flac"));
+    }
 
     #[test]
     fn part_name() {

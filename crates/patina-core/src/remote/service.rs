@@ -23,6 +23,8 @@ use crate::secrets::{Secrets, Stored};
 
 /// How often a connected server is synced again on its own.
 const RESYNC: Duration = Duration::from_secs(30 * 60);
+/// A streams-only server (Icecast) is read more often: mounts come and go.
+const RESYNC_STREAMS: Duration = Duration::from_secs(5 * 60);
 /// Waits between tries while a server can't be reached.
 const RETRY: [u64; 5] = [15, 30, 60, 120, 300];
 /// How often a connected server is checked for still being there, so a
@@ -381,6 +383,57 @@ fn forget(ctx: &Ctx, name: &str) {
 }
 
 fn add(mut cfg: ServerConfig, secret: String, replaces: Option<String>, ctx: &Ctx) {
+    if cfg.kind == ServerKind::Icecast {
+        cfg.url = super::normalize_for(cfg.kind, &cfg.url);
+        let res = super::icecast::Icecast::connect(&cfg.url);
+        let _ = ctx.events.send(match res {
+            Ok(c) => RemoteEvent::Added {
+                info: c.info().clone(),
+                cfg,
+                stored: Stored::NotNeeded,
+                replaces,
+            },
+            Err(e) => RemoteEvent::AddFailed(format!("{}: {e}", cfg.name)),
+        });
+        return;
+    }
+    if cfg.kind == ServerKind::Plex {
+        cfg.url = super::normalize_for(cfg.kind, &cfg.url);
+        let res = super::plex::Plex::connect(
+            &cfg.url,
+            &cfg.udn,
+            &secret,
+            cfg.stream,
+            cfg.bitrate,
+            cfg.extras,
+        )
+        .and_then(|c| {
+            cfg.udn = c.machine().to_string();
+            let keep = c.fresh_secret().unwrap_or(secret);
+            // A pasted token comes in bare; it's kept with the client id
+            // it was used with, so Plex sees one device, not a new one
+            // every start.
+            let keep = if keep.trim_start().starts_with('{') {
+                keep
+            } else {
+                super::plex_tv::Login::parse(&keep).to_secret()
+            };
+            ctx.secrets
+                .set(&cfg.secret_key(), &cfg.user, &keep)
+                .map(|stored| (c.info().clone(), stored))
+                .map_err(|e| RemoteError::Http(e.to_string()))
+        });
+        let _ = ctx.events.send(match res {
+            Ok((info, stored)) => RemoteEvent::Added {
+                cfg,
+                info,
+                stored,
+                replaces,
+            },
+            Err(e) => RemoteEvent::AddFailed(format!("{}: {e}", cfg.name)),
+        });
+        return;
+    }
     if cfg.kind == ServerKind::Dlna {
         let res = super::dlna::Dlna::connect(cfg.url.trim(), &cfg.udn);
         let _ = ctx.events.send(match res {
@@ -523,6 +576,7 @@ impl Worker {
         };
         match super::connect(&self.cfg, &secret) {
             Ok(c) => {
+                self.save_fresh(c.as_ref());
                 registry().set_client(&self.cfg.name, Some(c.clone()));
                 let info = c.info().clone();
                 self.client = Some(c);
@@ -547,10 +601,25 @@ impl Worker {
     fn ping(&mut self) {
         self.next_ping = Instant::now() + PING_EVERY;
         let Some(c) = self.client.clone() else { return };
-        match c.ping() {
+        let res = c.ping();
+        self.save_fresh(c.as_ref());
+        match res {
             Ok(()) => {}
             Err(e @ RemoteError::Http(_)) => self.offline(e.to_string()),
             Err(e) => log::info!("{} answered the ping with: {e}", self.name()),
+        }
+    }
+
+    /// Keep a sign-in the server refreshed (a Plex JWT), so the next start
+    /// uses the new one.
+    fn save_fresh(&self, c: &dyn Client) {
+        if let Some(secret) = c.fresh_secret()
+            && let Err(e) = self
+                .ctx
+                .secrets
+                .set(&self.cfg.secret_key(), &self.cfg.user, &secret)
+        {
+            log::warn!("{}: couldn't save the refreshed sign-in: {e}", self.name());
         }
     }
 
@@ -581,6 +650,20 @@ impl Worker {
             }
         };
         let full = std::mem::take(&mut self.full);
+        if !kind.has_songs() {
+            // Only streams: the station list is the whole sync.
+            let stations = client.radio().unwrap_or_else(|e| {
+                log::info!("{name} streams: {e}");
+                Vec::new()
+            });
+            self.ctx.set_state(&name, |s| {
+                s.state = ServerState::Ready;
+                s.last_sync = Some(crate::library::now_secs());
+                s.stations = stations;
+            });
+            self.next_sync = Instant::now() + RESYNC_STREAMS;
+            return;
+        }
         let res = sync::sync_library(
             &mut self.lib,
             &name,

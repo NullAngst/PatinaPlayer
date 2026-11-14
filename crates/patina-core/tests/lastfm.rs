@@ -342,6 +342,7 @@ fn rig(name: &str, mode: ScrobbleMode, linked_here: bool, song_secs: u32) -> Rig
         stream: StreamFormat::Raw,
         bitrate: 192,
         udn: String::new(),
+        extras: false,
     };
     remote::registry().set_client(name, Some(remote::connect(&sc, "pw").unwrap()));
     let secrets = Arc::new(Secrets::with(None, dir.path().join("secrets.toml")));
@@ -515,6 +516,7 @@ fn stars_go_to_the_server() {
         stream: StreamFormat::Raw,
         bitrate: 192,
         udn: String::new(),
+        extras: false,
     };
     let c = remote::connect(&sc, "pw").unwrap();
     c.star("11", true).unwrap();

@@ -337,6 +337,7 @@ fn settings_rows_and_bit_perfect() {
                 listenbrainz: None,
                 outputs: Vec::new(),
                 remote_port: None,
+                snap: Default::default(),
             },
         )
     };

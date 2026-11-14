@@ -46,6 +46,7 @@ fn check(name: &str, url: &str, user: &str, pw: &str, want: ServerKind) {
         stream: StreamFormat::Raw,
         bitrate: 192,
         udn: String::new(),
+        extras: false,
     };
     let c = remote::connect(&cfg, pw).unwrap();
 

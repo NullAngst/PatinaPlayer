@@ -6,6 +6,10 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.window.BackEvent;
+import android.window.OnBackAnimationCallback;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +35,48 @@ public class MainActivity extends NativeActivity {
         Native.init(this);
         super.onCreate(state);
         askPermissions();
+        catchBack();
+    }
+
+    /**
+     * The manifest opts into predictive back, so from Android 13 on the
+     * system no longer sends a Back key: without a callback the gesture
+     * just closes the app. This hands it to Rust instead, which closes
+     * what's open, goes up a level, or opens the sidebar for a swipe in
+     * from the left at the top. Android 14 says which edge a swipe came
+     * from; before that, and for the Back button, it's unknown (0).
+     */
+    private void catchBack() {
+        if (Build.VERSION.SDK_INT < 33) {
+            return;
+        }
+        OnBackInvokedCallback cb;
+        if (Build.VERSION.SDK_INT >= 34) {
+            cb = new OnBackAnimationCallback() {
+                private int edge = 0;
+
+                @Override
+                public void onBackStarted(BackEvent e) {
+                    edge = e.getSwipeEdge() == BackEvent.EDGE_LEFT ? 1
+                        : e.getSwipeEdge() == BackEvent.EDGE_RIGHT ? 2 : 0;
+                }
+
+                @Override
+                public void onBackCancelled() {
+                    edge = 0;
+                }
+
+                @Override
+                public void onBackInvoked() {
+                    Native.backPressed(edge);
+                    edge = 0;
+                }
+            };
+        } else {
+            cb = () -> Native.backPressed(0);
+        }
+        getOnBackInvokedDispatcher()
+            .registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, cb);
     }
 
     /** Music on the phone, and the media notification. */

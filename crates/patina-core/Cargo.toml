@@ -36,6 +36,10 @@ serde_json = "1"
 md-5 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
+# Plex sign-in: an Ed25519 device key signs the JWTs plex.tv asks for.
+# ring is here already through rustls.
+ring = "0.17"
+base64 = "0.22"
 toml = "1"
 toml_edit = "0.25"
 dirs = "7"

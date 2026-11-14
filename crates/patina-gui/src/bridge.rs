@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use patina_core::browse::covers::CoverTarget;
 use patina_core::browse::{
-    Activated, Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, Section,
-    SideEntry, Source, fmt_duration, fmt_length,
+    Activated, Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, PlexSignIn,
+    Section, SideEntry, Source, fmt_duration, fmt_length,
 };
 use patina_core::config::Theme;
 use patina_core::library::PlaylistRow;
@@ -59,6 +59,13 @@ enum Dlg {
     RenameServer(String),
     /// Picking one of the DLNA servers a search found.
     Dlna(Vec<patina_core::remote::dlna::Found>),
+    /// The Plex sign-in code, and plex.tv/link with it filled in.
+    PlexCode(String),
+    /// Servers on the Plex account, by machine id.
+    PlexChoose(Vec<String>),
+    /// A Plex server by address and token.
+    AddPlex,
+    AddIcecast,
     /// A new smart playlist: its name and its query.
     SmartNew,
     /// Changing one.
@@ -161,6 +168,10 @@ pub struct State {
     queue_sel: usize,
     follow: bool,
     dlg: Dlg,
+    /// The Plex sign-in as last shown.
+    plex_shown: u64,
+    /// The Back being handled came from a swipe in from the left.
+    back_from_left: Rc<std::cell::Cell<bool>>,
     toast_until: Option<Instant>,
     /// Art each row and queue entry would show. Only the rows on screen,
     /// plus a margin, actually get theirs, so a 5000-track queue or a
@@ -367,6 +378,11 @@ fn jp_section(s: Section) -> &'static str {
         Section::TopArtists => "スター",
         Section::History => "さいきん",
         Section::Ipod => "アイポッド",
+        Section::Plex => "プレックス",
+        Section::MusicServers => "サーバー",
+        Section::Dlna => "ディーエルエヌエー",
+        Section::Icecast => "アイスキャスト",
+        Section::Snapcast => "スナップキャスト",
     }
 }
 
@@ -441,6 +457,8 @@ impl State {
             queue_sel: 0,
             follow: true,
             dlg: Dlg::None,
+            plex_shown: 0,
+            back_from_left: Rc::default(),
             toast_until: None,
             row_art: Vec::new(),
             queue_art: Vec::new(),
@@ -698,6 +716,17 @@ impl State {
                     Control::Action(_) if st.key == SettingKey::MeasureLibrary => (11, false),
                     Control::Action(_) if st.key.is_eq() || st.key.is_amp() => (11, false),
                     Control::Action(_) if st.key == SettingKey::LastFmLink => (11, false),
+                    Control::Action(_)
+                        if matches!(
+                            st.key,
+                            SettingKey::PlexSignIn
+                                | SettingKey::AddPlex
+                                | SettingKey::AddIcecast
+                                | SettingKey::SnapRefresh
+                        ) =>
+                    {
+                        (11, false)
+                    }
                     Control::Action(_)
                         if matches!(
                             st.key,
@@ -961,7 +990,7 @@ impl State {
                 vec![("refresh", "Refresh".into())],
             ),
             (Section::Downloads, _) => (0, vec![], vec![]),
-            (Section::Settings | Section::Eq | Section::Amp, _) => (0, vec![], vec![]),
+            (s, _) if s.is_settings_page() => (0, vec![], vec![]),
             // Mixed artists, albums and songs: the group headings label them.
             (_, Some(Source::Search(_))) => (0, vec![], vec![]),
             (_, Some(Source::Folder(_))) => (0, tracks_cols, vec![]),
@@ -1223,6 +1252,21 @@ impl State {
             Some(Source::Section(Section::Settings)) => {
                 "Changes are saved to config.toml as you make them".to_string()
             }
+            Some(Source::Section(Section::Plex)) => {
+                "Your Plex servers. Their songs are in Artists, Albums and the rest.".to_string()
+            }
+            Some(Source::Section(Section::MusicServers)) => {
+                "Navidrome, Gonic, Airsonic, Ampache. Their songs are in Artists, Albums and the rest.".to_string()
+            }
+            Some(Source::Section(Section::Dlna)) => {
+                "Media servers on your network. Their songs are in Artists, Albums and the rest.".to_string()
+            }
+            Some(Source::Section(Section::Icecast)) => {
+                "Live streams from Icecast servers. They're in Radio too.".to_string()
+            }
+            Some(Source::Section(Section::Snapcast)) => {
+                "Which rooms hear PatinaPlayer, and how loud".to_string()
+            }
             _ if items.is_empty() => String::new(),
             _ => count_label(items),
         }));
@@ -1414,6 +1458,11 @@ impl State {
                         Section::TopArtists => icons.get_top_artists(),
                         Section::History => icons.get_history(),
                         Section::Ipod => icons.get_ipod(),
+                        Section::Plex => icons.get_plex(),
+                        Section::MusicServers => icons.get_servers(),
+                        Section::Dlna => icons.get_dlna(),
+                        Section::Icecast => icons.get_icecast(),
+                        Section::Snapcast => icons.get_snapcast(),
                     },
                     active: *s == self.b.section && !np,
                     count: ss(if *s == Section::Queue {
@@ -1830,14 +1879,37 @@ impl State {
             self.follow = true;
         }
         for a in platform::take_outside_actions() {
-            if a == "love" {
-                self.b.toggle_love();
+            match a.as_str() {
+                "love" => self.b.toggle_love(),
+                // Android's Back, from its callback: it goes through the
+                // window as the Back key, so a dialog, the drawer or a
+                // panel closes first, as with the key.
+                "back" | "back-left" | "back-right" => {
+                    // After this tick: the key's handler needs the state
+                    // this tick is holding.
+                    let left = self.back_from_left.clone();
+                    let from_left = a == "back-left";
+                    let weak = ui.as_weak();
+                    Timer::single_shot(Duration::ZERO, move || {
+                        let Some(u) = weak.upgrade() else { return };
+                        left.set(from_left);
+                        let back: SharedString = Key::Back.into();
+                        let w = u.window();
+                        w.dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                            text: back.clone(),
+                        });
+                        w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: back });
+                        left.set(false);
+                    });
+                }
+                _ => {}
             }
         }
         platform::set_now_loved(self.b.loved_now);
         if let Some(found) = self.b.take_dlna_found() {
             self.open_dlna(ui, found);
         }
+        self.sync_plex_sign_in(ui);
         self.sync_window_size(ui);
         let look = &self.b.config.appearance;
         ui.set_side_land(look.sidebar_landscape.index());
@@ -2407,10 +2479,17 @@ impl State {
     /// The add or edit form for a server.
     fn open_server(&mut self, ui: &AppWindow, edit: Option<String>) {
         let cur = edit.as_ref().and_then(|n| self.b.server(n).cloned());
-        if let Some(c) = cur.as_ref().filter(|c| !c.kind.logs_in()) {
+        if let Some(c) = cur
+            .as_ref()
+            .filter(|c| !c.kind.logs_in() || c.kind == patina_core::remote::ServerKind::Plex)
+        {
             open_text(
                 ui,
-                "Rename DLNA server",
+                match c.kind {
+                    patina_core::remote::ServerKind::Plex => "Rename Plex server",
+                    patina_core::remote::ServerKind::Icecast => "Rename Icecast server",
+                    _ => "Rename DLNA server",
+                },
                 "Name, as the sidebar shows it",
                 &c.name,
                 None,
@@ -2442,6 +2521,91 @@ impl State {
         ui.set_dlg_text4(SharedString::new());
         ui.set_dlg_four_fields(true);
         self.dlg = Dlg::Server(edit);
+    }
+
+    fn open_add_plex(&mut self, ui: &AppWindow) {
+        open_text(
+            ui,
+            "Add a Plex server by hand",
+            "Name, as PatinaPlayer shows it",
+            "Plex",
+            Some(("Address, like http://192.168.1.50:32400", "")),
+            "Connect",
+        );
+        ui.set_dlg_three_fields(true);
+        ui.set_dlg_label3(ss(
+            "X-Plex-Token (Plex's support article \"Finding an authentication token\" shows where)",
+        ));
+        ui.set_dlg_text3(SharedString::new());
+        self.dlg = Dlg::AddPlex;
+    }
+
+    fn open_add_icecast(&mut self, ui: &AppWindow) {
+        open_text(
+            ui,
+            "Add an Icecast server",
+            "Name (empty uses the address)",
+            "",
+            Some(("Address, like radio.example.com:8000", "")),
+            "Add",
+        );
+        self.dlg = Dlg::AddIcecast;
+    }
+
+    /// The Plex sign-in, as it moves along: the code to enter, then the
+    /// servers to pick from.
+    fn sync_plex_sign_in(&mut self, ui: &AppWindow) {
+        let g = self.b.plex_generation();
+        if g == self.plex_shown {
+            return;
+        }
+        self.plex_shown = g;
+        match self.b.plex_sign_in_state().cloned() {
+            Some(PlexSignIn::Starting) => {
+                ui.set_dlg_title(ss("Sign in with Plex"));
+                ui.set_dlg_message(ss("Asking plex.tv for a code…"));
+                ui.set_dlg_code(SharedString::new());
+                ui.set_dlg_ok(SharedString::new());
+                ui.set_dialog(7);
+                self.dlg = Dlg::PlexCode(String::new());
+            }
+            Some(PlexSignIn::Waiting { code, link }) => {
+                ui.set_dlg_title(ss("Sign in with Plex"));
+                ui.set_dlg_message(ss(
+                    "On any device, go to plex.tv/link, sign in to Plex there, and enter this code. This window carries on by itself once it's in.",
+                ));
+                ui.set_dlg_code(ss(&code));
+                ui.set_dlg_ok(ss(if platform::hooks().is_some() {
+                    ""
+                } else {
+                    "Open plex.tv/link"
+                }));
+                ui.set_dialog(7);
+                self.dlg = Dlg::PlexCode(link);
+            }
+            Some(PlexSignIn::Choose { account, servers }) => {
+                let items = servers.iter().map(|c| {
+                    ss(format!(
+                        "{}{}{}",
+                        c.name,
+                        if c.owned { "" } else { "   (shared with you)" },
+                        if c.added { "   (added)" } else { "" }
+                    ))
+                });
+                set_strings(&self.dlg_items, items);
+                ui.set_dlg_title(ss(format!("Signed in as {account}. Add which server?")));
+                ui.set_dlg_new_first(false);
+                ui.set_dialog(2);
+                self.dlg = Dlg::PlexChoose(servers.into_iter().map(|c| c.id).collect());
+            }
+            None => {
+                if matches!(self.dlg, Dlg::PlexCode(_) | Dlg::PlexChoose(_)) {
+                    self.dlg = Dlg::None;
+                    ui.set_dialog(0);
+                    ui.invoke_focus_root();
+                }
+            }
+        }
     }
 
     fn open_station(&mut self, ui: &AppWindow, edit: Option<usize>) {
@@ -2797,6 +2961,17 @@ impl State {
             Control::Action(_) if st.key.is_eq() || st.key.is_amp() => "measure",
             Control::Action(_) if st.key == SettingKey::LastFmLink => "measure",
             Control::Action(_)
+                if matches!(
+                    st.key,
+                    SettingKey::PlexSignIn
+                        | SettingKey::AddPlex
+                        | SettingKey::AddIcecast
+                        | SettingKey::SnapRefresh
+                ) =>
+            {
+                "measure"
+            }
+            Control::Action(_)
                 if matches!(st.key, SettingKey::RemoteCode | SettingKey::ControlAnother) =>
             {
                 "measure"
@@ -2827,6 +3002,14 @@ impl State {
         }
         if key == SettingKey::ControlAnother {
             return self.open_players(ui);
+        }
+        match key {
+            SettingKey::PlexSignIn | SettingKey::SnapRefresh => {
+                return self.b.change_setting(&key, Change::Toggle);
+            }
+            SettingKey::AddPlex => return self.open_add_plex(ui),
+            SettingKey::AddIcecast => return self.open_add_icecast(ui),
+            _ => {}
         }
         match key {
             SettingKey::EqSavePreset => return self.open_eq_save(ui),
@@ -2883,9 +3066,15 @@ impl State {
             "srv-remove" => {
                 if let SettingKey::Server(n) = key {
                     let login = self.b.server(&n).is_some_and(|c| c.kind.logs_in());
+                    let icecast = self
+                        .b
+                        .server(&n)
+                        .is_some_and(|c| c.kind == patina_core::remote::ServerKind::Icecast);
                     self.confirm(
                         ui,
-                        if login {
+                        if icecast {
+                            format!("Remove {n}? Its streams leave Radio here. Nothing changes on the server.")
+                        } else if login {
                             format!("Remove {n}? Its songs and playlists leave the library here, and its password leaves the keyring. Nothing changes on the server.")
                         } else {
                             format!("Remove {n}? Its songs leave the library here. Nothing changes on the server, and Find servers can add it again.")
@@ -4421,7 +4610,20 @@ impl State {
     fn dlg_accept(&mut self, ui: &AppWindow) {
         let t1 = ui.get_dlg_text1().trim().to_string();
         let t2 = ui.get_dlg_text2().trim().to_string();
+        // The Plex code stays up while you enter it elsewhere.
+        if let Dlg::PlexCode(link) = &self.dlg {
+            if !link.is_empty() && !patina_core::browse::lastfm::open_url(link) {
+                self.b.note(format!("Open {link} in a browser"));
+            }
+            return;
+        }
         match std::mem::replace(&mut self.dlg, Dlg::None) {
+            Dlg::AddPlex => {
+                let t3 = ui.get_dlg_text3().trim().to_string();
+                self.b.add_plex_by_token(&t1, &t2, &t3);
+            }
+            Dlg::AddIcecast => self.b.add_icecast(&t1, &t2),
+            Dlg::PlexCode(_) | Dlg::PlexChoose(_) => {}
             Dlg::AddFolder => {
                 if !self.b.add_folder(&t1) {
                     // Leave the dialog up to fix the path.
@@ -4618,6 +4820,14 @@ impl State {
             self.change_setting(ui, key, Change::Choose(i));
             return;
         }
+        if let Dlg::PlexChoose(ids) = &self.dlg {
+            // Stays up: an account can have more than one server to add.
+            if let Some(id) = ids.get(i) {
+                let id = id.clone();
+                self.b.add_plex_choice(&id);
+            }
+            return;
+        }
         if let Dlg::Dlna(found) = &self.dlg {
             if let Some(f) = found.get(i) {
                 let f = f.clone();
@@ -4749,6 +4959,9 @@ impl State {
             // the app without stopping the music, where the app says how.
             if ui.get_can_back() {
                 self.b.pop();
+            } else if self.back_from_left.get() && ui.get_drawer() && !ui.get_drawer_open() {
+                // A swipe in from the left at the top pulls the sidebar out.
+                ui.set_drawer_open(true);
             } else if let Some(out) = &self.back_out {
                 out();
             } else {
@@ -5589,6 +5802,10 @@ pub fn install(
     on!(on_sleep_act, |s, u, a| s.sleep_act(&u, a.as_str()));
     on!(on_dlg_pick, |s, u, i| s.dlg_pick(&u, i as usize));
     on!(on_dlg_cancel, |s, u| {
+        if matches!(s.dlg, Dlg::PlexCode(_) | Dlg::PlexChoose(_)) {
+            s.b.cancel_plex_sign_in();
+            s.plex_shown = s.b.plex_generation();
+        }
         s.dlg = Dlg::None;
         s.smart_edit = None;
         u.set_dialog(0);

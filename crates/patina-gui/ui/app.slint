@@ -439,6 +439,17 @@ export global Icons {
     // Three dots, filled: more.
     out property <string> more: "M10.4 5a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0M10.4 12a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0M10.4 19a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0";
     out property <string> volume-low: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6";
+    // The Sources pages. Plain shapes, no one's logo.
+    // A media server: a box with a play mark.
+    out property <string> plex: "M4 4h16v16H4zM10 8.5v7l5.5-3.5z";
+    // Two stacked server units.
+    out property <string> servers: "M4 4h16v6H4zM4 14h16v6H4zM7.5 7h.01M7.5 17h.01";
+    // Three linked boxes: a home network.
+    out property <string> dlna: "M10 3h4v4h-4zM3 17h4v4H3zM17 17h4v4h-4zM12 7v5M5 17v-5h14v5";
+    // A mast sending out waves.
+    out property <string> icecast: "M12 11v10M9 21h6M8.5 7.5a5 5 0 0 0 0 7M15.5 7.5a5 5 0 0 1 0 7M5.5 4.5a9 9 0 0 0 0 13M18.5 4.5a9 9 0 0 1 0 13M11 11a1 1 0 1 0 2 0a1 1 0 1 0 -2 0";
+    // Two speakers: rooms.
+    out property <string> snapcast: "M3 4h8v16H3zM13 4h8v16h-8zM5 15a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M15 15a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M7 8h.01M17 8h.01";
 }
 
 // A tooltip with the window's own look, for buttons that only show an
@@ -3948,6 +3959,8 @@ export component AppWindow inherits Window {
     in-out property <string> dlg-text4;
     in property <string> dlg-ok;
     in property <string> dlg-message;
+    // A code to read off and type elsewhere (dialog 7): Plex's PIN.
+    in property <string> dlg-code;
     in property <[string]> dlg-items;
     // The pick list starts with "New playlist…", drawn in the accent.
     in property <bool> dlg-new-first;
@@ -6006,10 +6019,25 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.dialog == 3: Text {
+                    if root.dialog == 3 || root.dialog == 7: Text {
                         text: root.dlg-message;
                         wrap: word-wrap;
                         color: P.text;
+                    }
+                    if root.dialog == 7 && root.dlg-code != "": Text {
+                        text: root.dlg-code;
+                        horizontal-alignment: center;
+                        font-family: P.mono;
+                        font-size: 40px;
+                        font-weight: 700;
+                        letter-spacing: 6px;
+                        color: P.accent-text;
+                    }
+                    if root.dialog == 7 && root.dlg-code != "": Text {
+                        text: "plex.tv/link";
+                        horizontal-alignment: center;
+                        font-size: 13px;
+                        color: P.muted;
                     }
 
                     // Covers found online: tap one to use it.
@@ -6091,6 +6119,12 @@ export component AppWindow inherits Window {
                             clicked => { root.dlg-alt-clicked(); }
                         }
                         if root.dialog == 6: Chip {
+                            text: root.dlg-ok;
+                            h: 36px;
+                            primary: true;
+                            clicked => { root.dlg-accept(); }
+                        }
+                        if root.dialog == 7 && root.dlg-ok != "": Chip {
                             text: root.dlg-ok;
                             h: 36px;
                             primary: true;

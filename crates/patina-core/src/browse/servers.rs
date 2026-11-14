@@ -28,6 +28,22 @@ pub(super) struct QueueSync {
     bookmark_at: Option<Instant>,
 }
 
+/// How often a server that wants it (Plex) hears where a song is, while
+/// it plays. Plex's docs ask for every 10 seconds on a LAN or WAN.
+const TIMELINE_EVERY: Duration = Duration::from_secs(10);
+/// And while paused, so its dashboard doesn't drop the session.
+const TIMELINE_PAUSED: Duration = Duration::from_secs(30);
+
+/// What the server was last told about the song playing.
+#[derive(Default)]
+pub(super) struct TimelineSync {
+    /// The song (server, id) and its length.
+    song: Option<(String, String, Option<Duration>)>,
+    state: Option<crate::remote::Timeline>,
+    pos: Duration,
+    sent_at: Option<Instant>,
+}
+
 /// How long "Find DLNA servers" listens for answers.
 const DLNA_LISTEN: Duration = Duration::from_secs(3);
 
@@ -85,6 +101,7 @@ impl Browser {
         }
         self.dlna_tick();
         self.queue_tick();
+        self.timeline_tick();
         // A big sync reports after every few albums. Redraw at most twice
         // a second, so the views don't rebuild hundreds of times, and less
         // often when reading the open view again is slow (every song of a
@@ -217,7 +234,7 @@ impl Browser {
     // ----- Adding, editing and removing servers -----
 
     /// Check a name for a new server (or a renamed one).
-    fn check_server_name(&self, name: &str, except: Option<&str>) -> Result<(), String> {
+    pub(super) fn check_server_name(&self, name: &str, except: Option<&str>) -> Result<(), String> {
         if name.is_empty() {
             return Err("A server needs a name".into());
         }
@@ -258,6 +275,7 @@ impl Browser {
                 stream: StreamFormat::Raw,
                 bitrate: 192,
                 udn: String::new(),
+                extras: false,
             },
             secret.to_string(),
             None,
@@ -296,6 +314,15 @@ impl Browser {
             );
             return self.note(format!("Renaming {old}…"));
         }
+        // A Plex server's address comes from plex.tv (or was set when it
+        // was added by hand) and its sign-in from the keyring: only the
+        // name changes here.
+        let (url, user) = if cur.kind == ServerKind::Plex {
+            (cur.url.clone(), cur.user.clone())
+        } else {
+            (url.trim().to_string(), user.trim().to_string())
+        };
+        let (url, user) = (url.as_str(), user.as_str());
         let secret = match secret.filter(|s| !s.is_empty()) {
             Some(s) => s.to_string(),
             None => match remote.secrets().get(&cur.secret_key(), &cur.user) {
@@ -374,10 +401,17 @@ impl Browser {
         } else {
             product
         };
-        self.note(format!(
-            "Connected to {} ({product}). Syncing its library now.",
-            cfg.name
-        ));
+        self.note(if cfg.kind.has_songs() {
+            format!(
+                "Connected to {} ({product}). Syncing its library now.",
+                cfg.name
+            )
+        } else {
+            format!(
+                "Connected to {} ({product}). Its streams are on the Icecast page and in Radio.",
+                cfg.name
+            )
+        });
         if let Stored::File(p) = stored {
             self.note(format!(
                 "No keyring answered, so the password is in {} (only you can read it)",
@@ -732,6 +766,81 @@ impl Browser {
                     pos: snap.position,
                 },
             );
+        }
+    }
+
+    /// Tell the server that a song is playing, paused or done, and where it
+    /// is, the way Plex's own players do. That puts PatinaPlayer on Plex's
+    /// dashboard and counts the play once it gets past the end.
+    fn timeline_tick(&mut self) {
+        use crate::remote::Timeline;
+        let snap = self.player.snapshot();
+        let now = snap
+            .track
+            .as_ref()
+            .and_then(|t| {
+                let r = t.remote.as_ref().filter(|r| !r.episode)?;
+                Some((r.server.clone(), r.id.clone(), t.duration))
+            })
+            .filter(|(server, _, _)| {
+                self.server(server)
+                    .is_some_and(|c| c.kind.reports_timeline())
+            });
+        let state = match snap.state {
+            PlayState::Playing => Timeline::Playing,
+            PlayState::Paused => Timeline::Paused,
+            PlayState::Stopped => Timeline::Stopped,
+        };
+        let send = |song: &(String, String, Option<Duration>),
+                    state: Timeline,
+                    pos: Duration,
+                    continuing: bool| {
+            let (server, id, dur) = song.clone();
+            std::thread::spawn(move || {
+                let res = crate::remote::registry()
+                    .client(&server)
+                    .and_then(|c| c.timeline(&id, state, pos, dur, continuing));
+                if let Err(e) = res {
+                    log::debug!("{server} timeline: {e}");
+                }
+            });
+        };
+        let ts = &mut self.timeline;
+        let same = match (&ts.song, &now) {
+            (Some(a), Some(b)) => a.0 == b.0 && a.1 == b.1,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            // The last song ends where it was last seen.
+            if let Some(prev) = ts.song.take()
+                && ts.state != Some(Timeline::Stopped)
+            {
+                let end = prev.2.filter(|d| ts.pos + Duration::from_secs(2) >= *d);
+                send(
+                    &prev,
+                    Timeline::Stopped,
+                    end.unwrap_or(ts.pos),
+                    now.is_some(),
+                );
+            }
+            ts.song = now.clone();
+            ts.state = None;
+            ts.sent_at = None;
+        }
+        let Some(song) = now else { return };
+        ts.pos = snap.position;
+        let every = if state == Timeline::Playing {
+            TIMELINE_EVERY
+        } else {
+            TIMELINE_PAUSED
+        };
+        let due = ts.state != Some(state)
+            || (state != Timeline::Stopped && ts.sent_at.is_none_or(|t| t.elapsed() >= every));
+        if due {
+            ts.state = Some(state);
+            ts.sent_at = Some(Instant::now());
+            send(&song, state, snap.position, false);
         }
     }
 

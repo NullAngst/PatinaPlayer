@@ -133,12 +133,16 @@ fn a_server_is_added_synced_used_and_removed() {
         patina_core::remote::ServerKind::Subsonic
     );
 
-    // The sidebar shows it as a source, and its songs are in the views.
-    assert!(b.sidebar.iter().any(|e| matches!(
+    // The sidebar has its kind's page under Sources, and its songs are
+    // in the views.
+    assert!(
+        b.sidebar
+            .contains(&SideEntry::Section(Section::MusicServers))
+    );
+    assert!(!b.sidebar.iter().any(|e| matches!(
         e,
         SideEntry::Source {
-            server: Some(ServerState::Ready),
-            tracks: 5,
+            server: Some(_),
             ..
         }
     )));
@@ -150,8 +154,14 @@ fn a_server_is_added_synced_used_and_removed() {
     b.switch(Section::Radio);
     assert_eq!(names(&b), vec!["[On your servers]", "Server FM"]);
 
-    // Settings has it, with its streaming choice.
+    // Settings doesn't have it any more: its Sources page does, with its
+    // streaming choice.
     b.switch(Section::Settings);
+    assert!(!b.level().unwrap().items.iter().any(|i| matches!(
+        i,
+        Item::Setting(s) if matches!(s.key, Key::Server(_) | Key::AddServer)
+    )));
+    b.switch(Section::MusicServers);
     let keys: Vec<Key> = b
         .level()
         .unwrap()
@@ -256,4 +266,97 @@ fn a_server_is_added_synced_used_and_removed() {
     let secrets = std::fs::read_to_string(_dir.path().join("secrets.toml")).unwrap_or_default();
     assert!(!secrets.contains("zack"), "{secrets}");
     b.player.send(Command::Quit);
+}
+
+#[test]
+fn sources_pages_hold_their_own_kind() {
+    let Setup {
+        _dir,
+        mut b,
+        config,
+    } = setup();
+    let url = common::serve(Arc::new(|r: &common::Request| match r.path.as_str() {
+        "/status-json.xsl" => common::Response::json(serde_json::json!({"icestats": {
+            "server_id": "Icecast 2.4.4",
+            "source": {"listenurl": "http://localhost:8000/live", "server_name": "Live", "genre": "Jazz"}
+        }})),
+        _ => common::Response::not_found(),
+    }));
+    for s in Section::SOURCES {
+        assert!(
+            b.sidebar.contains(&SideEntry::Section(s)),
+            "{s:?} in the sidebar"
+        );
+    }
+    b.add_icecast("", &url);
+    wait(&mut b, "the Icecast server", |b| {
+        b.servers
+            .iter()
+            .any(|s| s.state == ServerState::Ready && !s.stations.is_empty())
+    });
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("kind = \"icecast\""), "{text}");
+
+    // Its page: the server, its stream under it, and the add button.
+    b.switch(Section::Icecast);
+    let items = &b.level().unwrap().items;
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, Item::Setting(s) if matches!(s.key, Key::Server(_))))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, Item::Setting(s) if s.key == Key::AddIcecast))
+    );
+    let station = items
+        .iter()
+        .find_map(|i| match i {
+            Item::Station { station, .. } => Some(station.clone()),
+            _ => None,
+        })
+        .expect("its stream on the page");
+    assert_eq!(station.url, format!("{url}/live"));
+    assert_eq!(station.name, "Live (Jazz)");
+    // And in Radio.
+    b.switch(Section::Radio);
+    assert!(
+        b.level()
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Station { station: s, .. } if s.url == station.url))
+    );
+
+    // Plex: sign in or add by hand. Snapcast: the snapserver and its rooms.
+    b.switch(Section::Plex);
+    let keys: Vec<Key> = b
+        .level()
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Setting(s) => Some(s.key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(keys, vec![Key::PlexSignIn, Key::AddPlex]);
+    b.switch(Section::Snapcast);
+    assert!(
+        b.level()
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Setting(s) if s.key == Key::CastSnapcast))
+    );
+    // None of it in Settings.
+    b.switch(Section::Settings);
+    assert!(!b.level().unwrap().items.iter().any(|i| matches!(
+        i,
+        Item::Setting(s) if matches!(
+            s.key,
+            Key::Server(_) | Key::PlexSignIn | Key::AddIcecast | Key::CastSnapcast | Key::SnapRefresh
+        )
+    )));
 }
