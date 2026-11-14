@@ -68,7 +68,9 @@ impl Analyzer {
         if !playing || rate == 0 {
             self.samples.iter_mut().for_each(|s| *s = 0.0);
         }
-        self.analyze(rate.max(1))
+        // No rate yet: the renderer hasn't sent anything since the scope
+        // came on (it's all silence then anyway).
+        self.analyze(if rate == 0 { 48_000 } else { rate })
     }
 
     /// The frame for whatever's in `samples`, at `rate`.
@@ -79,17 +81,20 @@ impl Analyzer {
         let _ =
             self.fft
                 .process_with_scratch(&mut self.input, &mut self.spectrum, &mut self.scratch);
+        let rate = rate.max(8_000);
         let bin_hz = rate as f32 / N as f32;
         let n = self.bars.len();
         let high = HIGH.min(rate as f32 / 2.0);
+        // The last bin a band can start at, so every band has at least one.
+        let last = self.spectrum.len() - 1;
         // A Hann window halves the amplitude; this makes a full-scale sine
         // read as 0 dB.
         let scale = 4.0 / N as f32;
         for (b, bar) in self.bars.iter_mut().enumerate() {
             let f0 = LOW * (high / LOW).powf(b as f32 / n as f32);
             let f1 = LOW * (high / LOW).powf((b + 1) as f32 / n as f32);
-            let lo = ((f0 / bin_hz) as usize).max(1);
-            let hi = ((f1 / bin_hz).ceil() as usize).clamp(lo + 1, self.spectrum.len());
+            let lo = ((f0 / bin_hz) as usize).clamp(1, last);
+            let hi = ((f1 / bin_hz).ceil() as usize).clamp(lo + 1, last + 1);
             let mag = self.spectrum[lo..hi]
                 .iter()
                 .map(|c| c.norm())
@@ -167,6 +172,22 @@ mod tests {
             a.analyze(44_100);
         }
         assert!(max(&a.analyze(44_100)) < 0.01);
+    }
+
+    #[test]
+    fn any_rate_or_none_at_all_is_drawn() {
+        // The scope just came on and nothing has played: rate 0. This
+        // panicked in 2026.11.13's build.
+        let s = Scope::default();
+        s.set_on(true);
+        let mut a = Analyzer::new(40);
+        let f = a.frame(&s, true);
+        assert_eq!(f.bars.len(), 40);
+        for rate in [1, 100, 8_000, 22_050, 44_100, 192_000, 384_000] {
+            a.samples = sine(440.0, rate.max(8_000), 0.5);
+            let f = a.analyze(rate);
+            assert!(f.bars.iter().all(|b| (0.0..=1.0).contains(b)), "{rate}");
+        }
     }
 
     #[test]

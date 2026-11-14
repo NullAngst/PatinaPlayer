@@ -323,6 +323,11 @@ ALTER TABLE smart_playlists ADD COLUMN exclude TEXT NOT NULL DEFAULT '';
 "#;
 
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
+    // First: switching to WAL (even when it already is) needs a lock, and
+    // with several threads opening the database at start one of them
+    // holds it. Without a timeout set yet, that failed at once with
+    // "database is locked" instead of waiting its turn.
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -331,7 +336,6 @@ pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     // stay in memory rather than going to a temporary file.
     conn.pragma_update(None, "cache_size", -32_000)?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    conn.busy_timeout(std::time::Duration::from_secs(10))?;
     Ok(())
 }
 

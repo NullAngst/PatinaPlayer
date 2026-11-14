@@ -1,5 +1,13 @@
 # Changes
 
+2026.11.14 - Bug fixes (visualizer crash, database locked at start)
+
+* Turning on the visualizer, or opening Now Playing with one already on, crashed the app. The visualizer read the audio tap before the renderer had written to it, got a sample rate of 0, and worked out FFT bins far past the end of the spectrum. A missing rate now counts as 48 kHz, and every band's bins are kept inside the spectrum whatever the rate.
+* "library database: database is locked" at start: several threads open the database at once, and each set its busy timeout only after switching to WAL, which needs a lock. The one that lost the race failed at once instead of waiting. The timeout is now set first.
+* Test: the analyzer at rate 0 (the case that crashed) and at rates from 1 Hz to 384 kHz.
+
+Reasons for changes: the visualizer crashed the app as soon as it was turned on, and it couldn't be opened again since the choice is saved; the locked database warning showed at start.
+
 2026.11.13 - UX overhaul (Minimal UX, visualizer, backdrop over everything, readable backdrop)
 
 * Minimal UX, in Settings, Appearance: the bottom bar drops the limiter, EQ, amp, gain, bit-perfect and format badges, and the output device chip becomes an icon button beside cast and the sleep timer, with the device's name in its tooltip. Now Playing drops the format, the output line and the sound chain, and on a phone the Sound chain menu entry and the format chip go too.
