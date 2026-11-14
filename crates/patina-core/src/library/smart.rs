@@ -18,6 +18,8 @@
 
 use std::fmt;
 
+pub mod form;
+
 use rusqlite::params;
 use rusqlite::types::Value;
 
@@ -25,8 +27,9 @@ use super::tags::normalize_genre;
 use super::{Library, Result, TrackRow, now_secs, subtree_range};
 
 /// The help line both frontends show next to the query box.
-pub const HELP: &str = "Fields: title, artist, albumartist, album, genre, year, rating, albumrating, plays, \
-played, added, length, format, rate, bits, lossless, folder, source. \
+pub const HELP: &str = "Fields: title, artist, albumartist, album, genre, composer, grouping, category, comment, \
+year, bpm, rating, albumrating, plays, played, added, modified, length, track, disc, format, rate, bits, bitrate, \
+channels, size, lossless, folder, source. \
 Example: rating >= 4 and genre is \"blues rock\" and played > 180d sort by random limit 100";
 
 /// Examples, for an empty query box.
@@ -68,6 +71,19 @@ pub enum Field {
     Lossless,
     Folder,
     Source,
+    Bpm,
+    Composer,
+    Grouping,
+    Category,
+    Comment,
+    TrackNo,
+    DiscNo,
+    Bitrate,
+    /// In MB.
+    Size,
+    Channels,
+    /// When the file last changed on disk.
+    Modified,
 }
 
 impl Field {
@@ -91,15 +107,32 @@ impl Field {
             "lossless" => Field::Lossless,
             "folder" | "path" | "in" => Field::Folder,
             "source" | "server" => Field::Source,
+            "bpm" | "tempo" => Field::Bpm,
+            "composer" => Field::Composer,
+            "grouping" | "group" => Field::Grouping,
+            "category" => Field::Category,
+            "comment" | "comments" => Field::Comment,
+            "track" | "trackno" | "track_no" | "tracknumber" => Field::TrackNo,
+            "disc" | "disk" | "discno" | "disc_no" | "discnumber" => Field::DiscNo,
+            "bitrate" | "kbps" => Field::Bitrate,
+            "size" | "filesize" => Field::Size,
+            "channels" => Field::Channels,
+            "modified" | "changed" | "mtime" => Field::Modified,
             _ => return None,
         })
     }
 
     fn kind(self) -> Kind {
         match self {
-            Field::Title | Field::Artist | Field::AlbumArtist | Field::Album | Field::Format => {
-                Kind::Text
-            }
+            Field::Title
+            | Field::Artist
+            | Field::AlbumArtist
+            | Field::Album
+            | Field::Format
+            | Field::Composer
+            | Field::Grouping
+            | Field::Category
+            | Field::Comment => Kind::Text,
             Field::Genre => Kind::Genre,
             Field::Year
             | Field::Rating
@@ -107,8 +140,14 @@ impl Field {
             | Field::Plays
             | Field::Length
             | Field::Rate
-            | Field::Bits => Kind::Number,
-            Field::Played | Field::Added => Kind::Time,
+            | Field::Bits
+            | Field::Bpm
+            | Field::TrackNo
+            | Field::DiscNo
+            | Field::Bitrate
+            | Field::Size
+            | Field::Channels => Kind::Number,
+            Field::Played | Field::Added | Field::Modified => Kind::Time,
             Field::Lossless => Kind::Bool,
             Field::Folder => Kind::Folder,
             Field::Source => Kind::Source,
@@ -135,6 +174,17 @@ impl Field {
             Field::Lossless => "lossless",
             Field::Folder => "folder",
             Field::Source => "source",
+            Field::Bpm => "bpm",
+            Field::Composer => "composer",
+            Field::Grouping => "grouping",
+            Field::Category => "category",
+            Field::Comment => "comment",
+            Field::TrackNo => "track",
+            Field::DiscNo => "disc",
+            Field::Bitrate => "bitrate",
+            Field::Size => "size",
+            Field::Channels => "channels",
+            Field::Modified => "modified",
         }
     }
 
@@ -160,6 +210,18 @@ impl Field {
             Field::Rate => "sample_rate",
             Field::Bits => "bits",
             Field::Lossless => "lossless",
+            Field::Bpm => "bpm",
+            Field::Composer => "COALESCE(composer, '')",
+            Field::Grouping => "COALESCE(grouping, '')",
+            Field::Category => "COALESCE(category, '')",
+            Field::Comment => "COALESCE(comment, '')",
+            Field::TrackNo => "track_no",
+            Field::DiscNo => "disc_no",
+            Field::Bitrate => "kbps",
+            Field::Size => "(size / 1048576)",
+            Field::Channels => "channels",
+            // A file not looked at since an update (0) counts as unknown.
+            Field::Modified => "NULLIF(mtime, 0)",
             Field::Genre | Field::Folder | Field::Source => "",
         }
     }
@@ -264,6 +326,61 @@ impl SortKey {
     }
 }
 
+/// How much a smart playlist holds at most: songs, or as many as fit in
+/// a length of time or a size, taken in the playlist's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    Songs(u32),
+    Minutes(u32),
+    Hours(u32),
+    Mb(u32),
+    Gb(u32),
+}
+
+impl Limit {
+    /// As the query writes it: "100", "90 minutes", "4 gb".
+    pub fn text(self) -> String {
+        match self {
+            Limit::Songs(n) => n.to_string(),
+            Limit::Minutes(n) => format!("{n} minutes"),
+            Limit::Hours(n) => format!("{n} hours"),
+            Limit::Mb(n) => format!("{n} mb"),
+            Limit::Gb(n) => format!("{n} gb"),
+        }
+    }
+
+    pub fn count(self) -> u32 {
+        match self {
+            Limit::Songs(n) | Limit::Minutes(n) | Limit::Hours(n) | Limit::Mb(n) | Limit::Gb(n) => {
+                n
+            }
+        }
+    }
+
+    /// The most of a song's length (seconds) or size (bytes) it holds,
+    /// for the kinds that aren't counted in songs.
+    fn budget(self) -> Option<(bool, u64)> {
+        match self {
+            Limit::Songs(_) => None,
+            Limit::Minutes(n) => Some((true, u64::from(n) * 60)),
+            Limit::Hours(n) => Some((true, u64::from(n) * 3600)),
+            Limit::Mb(n) => Some((false, u64::from(n) << 20)),
+            Limit::Gb(n) => Some((false, u64::from(n) << 30)),
+        }
+    }
+
+    fn unit(w: &str) -> Option<fn(u32) -> Limit> {
+        Some(match w {
+            "" | "songs" | "song" | "items" | "item" | "tracks" | "track" => Limit::Songs,
+            "minutes" | "minute" | "min" | "mins" | "m" => Limit::Minutes,
+            "hours" | "hour" | "h" | "hr" | "hrs" => Limit::Hours,
+            "mb" | "megabytes" => Limit::Mb,
+            "gb" | "gigabytes" => Limit::Gb,
+            _ => return None,
+        })
+    }
+}
+
 /// A parsed query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
@@ -272,7 +389,7 @@ pub struct Query {
     /// true for goes, whatever the first box says.
     pub exclude: Option<Expr>,
     pub sort: Option<(SortKey, bool)>,
-    pub limit: Option<u32>,
+    pub limit: Option<Limit>,
 }
 
 impl Query {
@@ -608,8 +725,8 @@ impl Parser {
         };
         let Some(field) = Field::parse(&word) else {
             return err(format!(
-                "I don't know the field \"{word}\". Fields: title, artist, albumartist, album, genre, year, \
-                 rating, albumrating, plays, played, added, length, format, rate, bits, lossless, folder, source"
+                "I don't know the field \"{word}\". {}",
+                HELP.split(". Example").next().unwrap_or(HELP)
             ));
         };
         if field == Field::Lossless && !self.at_op() {
@@ -724,14 +841,32 @@ impl Parser {
                 };
                 q.sort = Some((key, desc));
             } else if self.eat_word("limit") || self.eat_word("first") {
-                let n = match self.next() {
-                    Some(Tok::Word(w)) => w.parse::<u32>().ok().filter(|n| *n > 0),
-                    _ => None,
+                // "100", "90 minutes", "2 hours", "700 mb", or "4gb" as one word.
+                let w = match self.next() {
+                    Some(Tok::Word(w)) => w.to_lowercase(),
+                    _ => String::new(),
                 };
+                let (num, mut unit) = split_unit(&w);
+                let n = num.parse::<u32>().ok().filter(|n| *n > 0);
                 let Some(n) = n else {
-                    return err("limit needs a number of songs, like limit 100");
+                    return err(
+                        "limit needs a number: limit 100 (songs), limit 90 minutes, limit 2 hours, limit 700 mb, limit 4 gb",
+                    );
                 };
-                q.limit = Some(n);
+                let next = self.peek_word().unwrap_or_default();
+                if unit.is_empty()
+                    && !next.is_empty()
+                    && !matches!(next.as_str(), "sort" | "order" | "limit" | "first")
+                {
+                    self.pos += 1;
+                    unit = next.as_str();
+                }
+                let Some(make) = Limit::unit(unit) else {
+                    return err(format!(
+                        "limit takes songs, minutes, hours, mb or gb, not \"{unit}\""
+                    ));
+                };
+                q.limit = Some(make(n));
             } else if self.peek().is_none() {
                 return Ok(());
             } else {
@@ -1236,7 +1371,7 @@ impl Library {
         let (key, desc) = q.sort.unwrap_or((SortKey::Album, false));
         clause.push_str(&format!(" ORDER BY {}", key.order_by(desc)));
         if key != SortKey::Random
-            && let Some(n) = q.limit
+            && let Some(Limit::Songs(n)) = q.limit
         {
             clause.push_str(&format!(" LIMIT {n}"));
         }
@@ -1252,9 +1387,27 @@ impl Library {
                 &mut rows,
                 seed() ^ (salt as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
             );
-            if let Some(n) = q.limit {
+            if let Some(Limit::Songs(n)) = q.limit {
                 rows.truncate(n as usize);
             }
+        }
+        // As many as fit in the time or size, in the playlist's order.
+        if let Some((by_time, budget)) = q.limit.and_then(Limit::budget) {
+            let mut used = 0u64;
+            let mut keep = 0;
+            for r in &rows {
+                let cost = if by_time {
+                    r.duration.map_or(0, |d| d.as_secs())
+                } else {
+                    r.size
+                };
+                if used + cost > budget {
+                    break;
+                }
+                used += cost;
+                keep += 1;
+            }
+            rows.truncate(keep);
         }
         Ok(rows)
     }
@@ -1272,7 +1425,9 @@ impl Library {
             |r| r.get(0),
         )?;
         Ok(match q.limit {
-            Some(l) => n.min(l as i64),
+            Some(Limit::Songs(l)) => n.min(l as i64),
+            // Time and size: only counting them out says how many fit.
+            Some(_) => self.query_tracks(q, 0)?.len() as i64,
             None => n,
         })
     }
@@ -1389,6 +1544,10 @@ mod tests {
         parse("never played").unwrap();
         parse("lossy sort by plays limit 5").unwrap();
         parse("length > 4:30 rate >= 96k bits = 24").unwrap();
+        parse("bpm 120-130 and composer contains bach and grouping is \"Side A\"").unwrap();
+        parse("category is jazz or comment contains live").unwrap();
+        parse("track <= 3 and disc = 1 and bitrate >= 256 and size < 20 and channels = 2").unwrap();
+        parse("modified < 30d").unwrap();
     }
 
     #[test]
@@ -1402,7 +1561,20 @@ mod tests {
         let q = parse("sort by added limit 20").unwrap();
         assert_eq!(q.expr, None);
         assert_eq!(q.sort, Some((SortKey::Added, true)));
-        assert_eq!(q.limit, Some(20));
+        assert_eq!(q.limit, Some(Limit::Songs(20)));
+        for (text, want) in [
+            ("limit 90 minutes", Limit::Minutes(90)),
+            ("limit 2 hours", Limit::Hours(2)),
+            ("limit 700 MB", Limit::Mb(700)),
+            ("limit 4gb", Limit::Gb(4)),
+            ("limit 25 songs", Limit::Songs(25)),
+        ] {
+            assert_eq!(parse(text).unwrap().limit, Some(want), "{text}");
+            assert_eq!(
+                parse(&format!("limit {}", want.text())).unwrap().limit,
+                Some(want)
+            );
+        }
         let q = parse("sort by year asc").unwrap();
         assert_eq!(q.sort, Some((SortKey::Year, false)));
     }
@@ -1420,6 +1592,7 @@ mod tests {
             ("rating 5)", "no \"(\""),
             ("sort by colour", "can't sort by"),
             ("limit lots", "limit needs"),
+            ("limit 5 fortnights", "limit takes"),
             ("length > forever", "isn't a length"),
         ] {
             let e = parse(q).expect_err(q);

@@ -33,6 +33,13 @@ pub struct TrackMeta {
     pub rg_track_peak: Option<f64>,
     pub rg_album_gain: Option<f64>,
     pub rg_album_peak: Option<f64>,
+    /// For smart playlists.
+    pub bpm: Option<u32>,
+    pub composer: Option<String>,
+    pub grouping: Option<String>,
+    /// iTunes' and podcasts' category.
+    pub category: Option<String>,
+    pub comment: Option<String>,
 }
 
 pub fn read(path: &Path) -> Option<TrackMeta> {
@@ -153,6 +160,28 @@ fn read_lofty(path: &Path) -> Option<TrackMeta> {
     m.rg_track_peak = gain(ItemKey::ReplayGainTrackPeak);
     m.rg_album_gain = gain(ItemKey::ReplayGainAlbumGain);
     m.rg_album_peak = gain(ItemKey::ReplayGainAlbumPeak);
+
+    let key = |k: ItemKey| text(&|t| t.get_string(k).map(str::to_string));
+    m.composer = key(ItemKey::Composer);
+    m.grouping = key(ItemKey::ContentGroup).or_else(|| key(ItemKey::AppleId3v2ContentGroup));
+    m.category = key(ItemKey::PodcastSeriesCategory);
+    // Vorbis comments often carry it as DESCRIPTION (FFmpeg writes it
+    // there, for one).
+    m.comment =
+        text(&|t| t.comment().map(|s| s.into_owned())).or_else(|| key(ItemKey::Description));
+    // "120", "120.5" or "120 BPM".
+    m.bpm = key(ItemKey::IntegerBpm)
+        .or_else(|| key(ItemKey::Bpm))
+        .and_then(|s| {
+            let n: String = s
+                .trim()
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            n.parse::<f64>().ok()
+        })
+        .map(|f| f.round() as u32)
+        .filter(|&n| n > 0 && n < 1000);
     Some(m)
 }
 

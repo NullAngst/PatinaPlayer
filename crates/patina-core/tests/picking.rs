@@ -1016,8 +1016,15 @@ fn the_car_browses_playlists_and_plays_from_a_song() {
     let favs = auto::children(lib, "favorites");
     assert_eq!(favs.len(), 1);
     assert_eq!(auto::children(lib, &favs[0].id).len(), 3);
+    // Its own, among the three rating playlists every library starts with.
     let smart = auto::children(lib, "smart");
-    assert_eq!(auto::children(lib, &smart[0].id).len(), 3);
+    let grunge = smart.iter().find(|i| i.title == "Grunge").expect("Grunge");
+    assert_eq!(auto::children(lib, &grunge.id).len(), 3);
+    assert!(
+        ["One Star", "Mid Tier", "Best Rated"]
+            .iter()
+            .all(|n| smart.iter().any(|i| i.title == *n))
+    );
 
     // Playing it from the car plays the list from that song.
     let id = songs[2].id.clone();
@@ -1160,4 +1167,53 @@ fn an_artist_picture_comes_from_the_artist_folder() {
     // artist's.
     img.save(fx.root.join("folder.jpg")).unwrap();
     assert_eq!(patina_core::artist_art::local_file(lib, "Someone"), None);
+}
+
+/// The tags added in 2026.11.14 (BPM, composer, grouping, comment) come in
+/// from the files and work in smart playlists, and limits can be a length
+/// of time as well as a number of songs.
+#[test]
+fn smart_new_fields_and_time_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap().join("Music");
+    for (n, (bpm, composer)) in [("128", "J.S. Bach"), ("90", "Erik Satie")]
+        .iter()
+        .enumerate()
+    {
+        make(
+            &root.join(format!("Class/{n}.flac")),
+            &[
+                ("title", &format!("Piece {n}")),
+                ("artist", "Ensemble"),
+                ("BPM", bpm),
+                ("composer", composer),
+                ("grouping", "Side A"),
+                ("comment", "recorded live"),
+            ],
+        );
+    }
+    let db = dir.path().join("l.db");
+    let mut lib = Library::open(&db).unwrap();
+    lib.index_folders(std::slice::from_ref(&root)).unwrap();
+    let n = |q: &str| lib.query_count(&smart::parse(q).unwrap()).unwrap();
+    assert_eq!(n("composer contains bach"), 1);
+    assert_eq!(n("bpm > 100"), 1);
+    assert_eq!(n("bpm 80-95"), 1);
+    assert_eq!(n("grouping is \"side a\""), 2);
+    assert_eq!(n("comment contains live"), 2);
+    assert_eq!(n("channels = 1 and track < 1"), 0);
+    // Two one-second songs: a minute holds both, and a limit of one song
+    // holds one.
+    assert_eq!(n("limit 1 minutes"), 2);
+    assert_eq!(n("limit 1"), 1);
+    // The rating playlists every library starts with.
+    let names: Vec<String> = lib
+        .smart_playlists()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    for want in ["One Star", "Mid Tier", "Best Rated"] {
+        assert!(names.iter().any(|n| n == want), "{names:?}");
+    }
 }

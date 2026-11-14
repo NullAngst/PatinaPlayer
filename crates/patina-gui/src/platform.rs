@@ -81,6 +81,11 @@ pub trait Hooks: Send + Sync {
     /// The theme's colors for a home screen widget, sent whenever they
     /// change: see [`WidgetColors`].
     fn widget_colors(&self, _c: &WidgetColors) {}
+    /// The phone is in car mode: Android Auto, or a driving mode that
+    /// puts the system in it. Asked every couple of seconds.
+    fn driving(&self) -> bool {
+        false
+    }
 }
 
 /// The colors a home screen widget takes from the app's theme, as ARGB.
@@ -181,6 +186,10 @@ pub fn set_hooks(h: Box<dyn Hooks>) {
 }
 
 /// The system's colors, if the platform has any.
+pub(crate) fn driving() -> bool {
+    hooks().is_some_and(|h| h.driving())
+}
+
 pub(crate) fn system_colors() -> Option<crate::system_theme::SystemColors> {
     hooks().and_then(|h| h.system_colors())
 }

@@ -272,6 +272,19 @@ export struct Row {
     marked: bool,
 }
 
+// A rule row in the smart playlist editor. `kind` is what the value part
+// looks like: 0 text, 1 number, 2 stars, 3 a range, 4 an age with its
+// unit, 5 a date, 6 nothing.
+export struct SmartRule {
+    field: int,
+    ops: [string],
+    op: int,
+    kind: int,
+    value: string,
+    value2: string,
+    unit: int,
+}
+
 // A cover found online, in the picker.
 export struct CoverPick {
     art: image,
@@ -1131,6 +1144,174 @@ component Field inherits Rectangle {
 
 // ----- Rows -----
 
+// A menu button: shows the choice, opens the list on a click.
+component Pick inherits Rectangle {
+    in property <[string]> options;
+    in property <int> index;
+    callback picked(int);
+    height: 32px;
+    min-width: 60px;
+    border-radius: 6px * P.round;
+    border-width: 1px;
+    border-color: P.border;
+    background: ta.has-hover ? P.chip-hover : P.raised;
+    accessible-role: combobox;
+    accessible-value: root.options[root.index];
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 6px;
+        Text {
+            horizontal-stretch: 1;
+            text: root.options[root.index];
+            overflow: elide;
+            font-size: 13px;
+            color: P.text;
+            vertical-alignment: center;
+        }
+        Text { text: "▾"; font-size: 11px; color: P.muted; vertical-alignment: center; }
+    }
+    cma := ContextMenuArea {
+        Menu {
+            for o[i] in root.options: MenuItem {
+                title: o;
+                activated => { root.picked(i); }
+            }
+        }
+        ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { cma.show({ x: 0px, y: root.height }); }
+        }
+    }
+}
+
+// A one-line box for a rule's value.
+component SmallField inherits Rectangle {
+    in property <string> initial;
+    in property <string> placeholder;
+    callback edited(string);
+    height: 32px;
+    min-width: 50px;
+    border-radius: 6px * P.round;
+    border-width: 1px;
+    border-color: si.has-focus ? P.verdigris-dim : P.border;
+    background: P.bg;
+    si := ScrollingInput {
+        x: 8px;
+        width: parent.width - 16px;
+        text: root.initial;
+        font-size: 13px;
+        edited => { root.edited(self.text); }
+    }
+    if si.text == "": Text {
+        x: 8px;
+        height: parent.height;
+        text: root.placeholder;
+        font-size: 13px;
+        color: P.wave;
+        vertical-alignment: center;
+    }
+}
+
+// The value part of a rule row.
+component RuleValue inherits HorizontalLayout {
+    in property <SmartRule> rule;
+    in property <[string]> age-units;
+    callback value(string);
+    callback value2(string);
+    callback unit(int);
+    spacing: 6px;
+    if root.rule.kind == 0 || root.rule.kind == 1 || root.rule.kind == 5: SmallField {
+        horizontal-stretch: 1;
+        initial: root.rule.value;
+        placeholder: root.rule.kind == 5 ? "2024-01-31" : "";
+        edited(t) => { root.value(t); }
+    }
+    if root.rule.kind == 2: HorizontalLayout {
+        horizontal-stretch: 1;
+        spacing: 2px;
+        alignment: start;
+        for n in [1, 2, 3, 4, 5]: Rectangle {
+            width: 26px;
+            height: 32px;
+            Text {
+                text: n <= root.rule.value.to-float() ? "★" : "☆";
+                font-size: 20px;
+                color: n <= root.rule.value.to-float() ? P.butter : P.wave;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                // The same star again clears it.
+                clicked => { root.value(n == root.rule.value.to-float() ? "0" : "" + n); }
+            }
+        }
+    }
+    if root.rule.kind == 3: HorizontalLayout {
+        horizontal-stretch: 1;
+        spacing: 6px;
+        SmallField { horizontal-stretch: 1; initial: root.rule.value; edited(t) => { root.value(t); } }
+        Text { text: "to"; color: P.muted; font-size: 13px; vertical-alignment: center; }
+        SmallField { horizontal-stretch: 1; initial: root.rule.value2; edited(t) => { root.value2(t); } }
+    }
+    if root.rule.kind == 4: HorizontalLayout {
+        horizontal-stretch: 1;
+        spacing: 6px;
+        SmallField { width: 64px; initial: root.rule.value; edited(t) => { root.value(t); } }
+        Pick { horizontal-stretch: 1; options: root.age-units; index: root.rule.unit; picked(i) => { root.unit(i); } }
+    }
+    if root.rule.kind == 6: Rectangle { horizontal-stretch: 1; }
+}
+
+// The smart playlist editor's rows, like iTunes': field, condition, value,
+// and - and + to take a row out or add one under it.
+component RuleRow inherits VerticalLayout {
+    in property <SmartRule> rule;
+    in property <[string]> fields;
+    in property <[string]> age-units;
+    in property <bool> narrow;
+    in property <bool> only;
+    callback field(int);
+    callback op(int);
+    callback value(string);
+    callback value2(string);
+    callback unit(int);
+    callback add;
+    callback remove;
+    spacing: 6px;
+    HorizontalLayout {
+        spacing: 6px;
+        // Side by side on a narrow screen, sharing the width; otherwise a
+        // set width, with the value taking the rest.
+        Pick { preferred-width: 150px; horizontal-stretch: root.narrow ? 1 : 0; options: root.fields; index: root.rule.field; picked(i) => { root.field(i); } }
+        Pick { preferred-width: 160px; horizontal-stretch: root.narrow ? 1 : 0; options: root.rule.ops; index: root.rule.op; picked(i) => { root.op(i); } }
+        if !root.narrow: RuleValue {
+            horizontal-stretch: 1;
+            rule: root.rule;
+            age-units: root.age-units;
+            value(t) => { root.value(t); }
+            value2(t) => { root.value2(t); }
+            unit(i) => { root.unit(i); }
+        }
+        if !root.narrow: Chip { text: "−"; h: 32px; peek: "Take this rule out"; clicked => { root.remove(); } }
+        if !root.narrow: Chip { text: "+"; h: 32px; peek: "Add a rule under this one"; clicked => { root.add(); } }
+    }
+    if root.narrow: HorizontalLayout {
+        spacing: 6px;
+        RuleValue {
+            horizontal-stretch: 1;
+            rule: root.rule;
+            age-units: root.age-units;
+            value(t) => { root.value(t); }
+            value2(t) => { root.value2(t); }
+            unit(i) => { root.unit(i); }
+        }
+        Chip { text: "−"; h: 32px; clicked => { root.remove(); } }
+        Chip { text: "+"; h: 32px; clicked => { root.add(); } }
+    }
+}
+
 component Switch inherits Rectangle {
     in property <bool> on;
     callback toggled;
@@ -1815,6 +1996,7 @@ component AlbumTile inherits Rectangle {
                 art: item.art;
                 has-art: item.has-art;
                 waiting: item.wait;
+                empty-icon: item.kind == 2 ? Icons.artists : Icons.disc;
                 radius: 6px;
                 // Its server is away and none of it is kept: faded.
                 opacity: item.off ? 0.35 : 1.0;
@@ -3652,6 +3834,35 @@ export component AppWindow inherits Window {
     in property <string> vis-wave;
     in property <string> vis-ring;
     callback vis-next;
+    // The smart playlist editor (dialog 6).
+    in property <string> smart-name;
+    in property <[string]> smart-fields;
+    in property <[SmartRule]> smart-rules;
+    in property <[string]> smart-age-units;
+    in property <[string]> smart-limit-units;
+    in property <[string]> smart-orders;
+    in property <bool> smart-any;
+    in property <bool> smart-limit-on;
+    in property <string> smart-limit-n;
+    in property <int> smart-limit-unit;
+    in property <int> smart-order;
+    callback smart-name-edited(string);
+    callback smart-field(int, int);
+    callback smart-op(int, int);
+    callback smart-value(int, string);
+    callback smart-value2(int, string);
+    callback smart-unit(int, int);
+    callback smart-add(int);
+    callback smart-remove(int);
+    callback smart-any-set(bool);
+    callback smart-limit-toggle;
+    callback smart-limit-n-edited(string);
+    callback smart-limit-unit-set(int);
+    callback smart-order-set(int);
+    callback smart-as-text;
+    // In the text form of a smart playlist: back to the rows.
+    in property <string> dlg-alt;
+    callback dlg-alt-clicked;
     // Minimal UX: the technical readouts left out of the bottom bar and
     // Now Playing, and the output device a plain button.
     in property <bool> minimal;
@@ -5612,7 +5823,7 @@ export component AppWindow inherits Window {
             background: P.scrim;
             TouchArea { clicked => { root.dlg-cancel(); } }
             Rectangle {
-                width: min(root.dialog == 4 || root.dialog == 5 ? 620px : 460px, keys.width - 24px);
+                width: min(root.dialog == 6 ? 760px : (root.dialog == 4 || root.dialog == 5 ? 620px : 460px), keys.width - 24px);
                 height: min(dlg.preferred-height, parent.kb-top - 24px);
                 y: (parent.kb-top - self.height) / 2;
                 clip: true;
@@ -5679,6 +5890,87 @@ export component AppWindow inherits Window {
                             accepted => { root.dlg-accept(); }
                         }
                     }
+                    if root.dialog == 6: ed := VerticalLayout {
+                        property <bool> narrow: keys.width < 640px;
+                        spacing: 12px;
+                        Field {
+                            label: "Name";
+                            text: root.smart-name;
+                            edited(t) => { root.smart-name-edited(t); }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Text { text: "Match"; color: P.text; font-size: 13px; vertical-alignment: center; }
+                            Pick {
+                                width: 80px;
+                                options: ["all", "any"];
+                                index: root.smart-any ? 1 : 0;
+                                picked(i) => { root.smart-any-set(i == 1); }
+                            }
+                            Text { text: "of these rules:"; color: P.text; font-size: 13px; vertical-alignment: center; }
+                        }
+                        Flickable {
+                            height: min(rl.preferred-height, max(120px, keys.height * 0.42));
+                            content-height: rl.preferred-height;
+                            rl := VerticalLayout {
+                                width: parent.width;
+                                spacing: ed.narrow ? 14px : 8px;
+                                for r[i] in root.smart-rules: RuleRow {
+                                    rule: r;
+                                    fields: root.smart-fields;
+                                    age-units: root.smart-age-units;
+                                    narrow: ed.narrow;
+                                    field(f) => { root.smart-field(i, f); }
+                                    op(o) => { root.smart-op(i, o); }
+                                    value(t) => { root.smart-value(i, t); }
+                                    value2(t) => { root.smart-value2(i, t); }
+                                    unit(u) => { root.smart-unit(i, u); }
+                                    add => { root.smart-add(i); }
+                                    remove => { root.smart-remove(i); }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Switch {
+                                y: (parent.height - self.height) / 2;
+                                on: root.smart-limit-on;
+                                toggled => { root.smart-limit-toggle(); }
+                            }
+                            Text { text: "Limit to"; color: P.text; font-size: 13px; vertical-alignment: center; }
+                            SmallField {
+                                width: 70px;
+                                initial: root.smart-limit-n;
+                                edited(t) => { root.smart-limit-n-edited(t); }
+                            }
+                            Pick {
+                                width: 100px;
+                                options: root.smart-limit-units;
+                                index: root.smart-limit-unit;
+                                picked(i) => { root.smart-limit-unit-set(i); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Text { text: root.smart-limit-on ? "Picked by" : "Sorted by"; color: P.text; font-size: 13px; vertical-alignment: center; }
+                            Pick {
+                                width: 220px;
+                                options: root.smart-orders;
+                                index: root.smart-order;
+                                picked(i) => { root.smart-order-set(i); }
+                            }
+                        }
+                        if root.dlg-note != "": Text {
+                            text: root.dlg-note;
+                            wrap: word-wrap;
+                            font-size: 12px;
+                            color: root.dlg-note-warn ? P.copper : P.muted;
+                        }
+                    }
+
                     if root.dialog == 1 && root.dlg-note != "": Text {
                         text: root.dlg-note;
                         wrap: word-wrap;
@@ -5787,6 +6079,22 @@ export component AppWindow inherits Window {
                             text: "Use an image file…";
                             h: 36px;
                             clicked => { root.cover-file(); }
+                        }
+                        if root.dialog == 6: Chip {
+                            text: "Edit as text";
+                            h: 36px;
+                            clicked => { root.smart-as-text(); }
+                        }
+                        if root.dialog == 1 && root.dlg-alt != "": Chip {
+                            text: root.dlg-alt;
+                            h: 36px;
+                            clicked => { root.dlg-alt-clicked(); }
+                        }
+                        if root.dialog == 6: Chip {
+                            text: root.dlg-ok;
+                            h: 36px;
+                            primary: true;
+                            clicked => { root.dlg-accept(); }
                         }
                         if root.dialog == 1 || root.dialog == 3: Chip {
                             text: root.dlg-ok;

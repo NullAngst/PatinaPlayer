@@ -64,13 +64,29 @@ impl Browser {
             return;
         }
         match &t {
+            // A snapserver is checked (and given a source if it has none)
+            // straight away, so a wrong address or a closed port shows now
+            // rather than at the next play.
+            // Not while playing: the player connects straight away then,
+            // and a second connection would knock its own off.
+            Some(t)
+                if t.kind == crate::cast::Kind::Snapcast
+                    && self.player.snapshot().state != crate::PlayState::Playing =>
+            {
+                self.note(format!("Setting up {}…", t.name));
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let t = t.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::cast::snapcast::check(&t));
+                });
+                self.cast_check = Some(rx);
+            }
+            Some(t) if t.kind == crate::cast::Kind::Snapcast => {
+                self.note(format!("Playing on {}", t.name))
+            }
             Some(t) => self.note(format!(
-                "Playing on {}. {}",
-                t.name,
-                match t.kind {
-                    crate::cast::Kind::Snapcast => "",
-                    _ => "It starts a few seconds behind, and pause takes as long.",
-                }
+                "Playing on {}. It starts a few seconds behind, and pause takes as long.",
+                t.name
             )),
             None => self.note("Playing here again"),
         }
@@ -210,6 +226,20 @@ impl Browser {
     // ----- Every poll -----
 
     pub(super) fn poll_cast(&mut self) {
+        if let Some(rx) = &self.cast_check
+            && let Ok(r) = rx.try_recv()
+        {
+            self.cast_check = None;
+            match r {
+                Ok(msg) => self.note(msg),
+                Err(msg) => {
+                    self.error(msg);
+                    // Not left pointing at a snapserver that isn't there.
+                    self.player.send(Command::SetCast(None));
+                    self.cast_generation += 1;
+                }
+            }
+        }
         if let Some(rx) = &self.cast_job
             && let Ok(found) = rx.try_recv()
         {

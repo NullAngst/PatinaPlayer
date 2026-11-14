@@ -375,6 +375,9 @@ pub struct AppearanceConfig {
     pub minimal: bool,
     /// What Now Playing draws over the cover.
     pub visualizer: Visualizer,
+    /// Minimal UX on its own while the phone is in car mode (Android Auto
+    /// or a driving mode).
+    pub minimal_driving: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -388,6 +391,7 @@ impl Default for AppearanceConfig {
             cover_accent: false,
             minimal: false,
             visualizer: Visualizer::Off,
+            minimal_driving: true,
         }
     }
 }
@@ -889,6 +893,7 @@ struct RawAppearance {
     cover_accent: Option<bool>,
     minimal: Option<bool>,
     visualizer: Option<String>,
+    minimal_driving: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1297,6 +1302,7 @@ impl Config {
                 cover_accent: look.cover_accent.unwrap_or(false),
                 minimal: look.minimal.unwrap_or(false),
                 visualizer,
+                minimal_driving: look.minimal_driving.unwrap_or(true),
             },
             servers,
             cache,
@@ -1493,6 +1499,9 @@ minimal = false
 # What Now Playing draws over the cover: off, bars, mirror, scope or ring.
 # Clicking the cover steps through them. Window only.
 visualizer = "off"
+# Android: Minimal UX on its own while the phone is in car mode (Android
+# Auto, or a driving mode that turns car mode on).
+minimal_driving = true
 
 [playback]
 # Starting volume, 0 to 100.

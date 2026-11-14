@@ -441,6 +441,9 @@ pub struct ViewPrefs {
     pub song_desc: bool,
     /// Genre level shows songs instead of albums.
     pub genre_songs: bool,
+    /// Artists as a list rather than a grid of pictures (the window's
+    /// choice; the terminal app always lists).
+    pub artist_list: bool,
 }
 
 /// What the Settings view is built from.

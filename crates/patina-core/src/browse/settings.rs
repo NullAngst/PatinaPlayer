@@ -30,6 +30,7 @@ pub enum Key {
     /// The cover's color on the transport and Now Playing.
     CoverAccent,
     MinimalUi,
+    MinimalDriving,
     Visualizer,
     StartVolume,
     FadeMs,
@@ -992,6 +993,18 @@ pub fn rows(
             control: Control::Toggle(cfg.appearance.minimal),
         },
     );
+    if cfg!(target_os = "android") {
+        push(
+            "Appearance",
+            Setting {
+                disabled: None,
+                key: Key::MinimalDriving,
+                label: "Minimal UX while driving".into(),
+                help: "Switch to Minimal UX on its own while the phone is in car mode: when Android Auto runs, or a driving mode that puts the phone in car mode. Back to how it was after.",
+                control: Control::Toggle(cfg.appearance.minimal_driving),
+            },
+        );
+    }
     push(
         "Appearance",
         Setting {

@@ -644,6 +644,13 @@ pub fn set_bit_perfect(device: i32, rate: u32, bits: u32, channels: u16) -> Resu
 /// The system's Material You colors and dark mode, as one flat list (see
 /// `patina_gui::system_theme::SystemColors::from_flat`). None before
 /// Android 12, which has none.
+/// The phone is in car mode (Android Auto, or a driving mode that turns
+/// it on): Native.isDriving.
+pub fn driving() -> bool {
+    with_java(|env, class| env.call_static_method(class, "isDriving", "()Z", &[])?.z())
+        .unwrap_or(false)
+}
+
 pub fn system_colors() -> Option<Vec<i32>> {
     with_java(|env, class| {
         let r = env

@@ -29,7 +29,7 @@ use crate::desktop::Action;
 use crate::platform::{self, Picked, Prompt, PromptEvent, PromptField};
 use crate::{
     AmpKnob, AmpUnit, AppWindow, ChainRow, CoverPick, EqBand, Hero, Icons, P, QueueRow, Row,
-    SideItem, Tint, Ui,
+    SideItem, SmartRule, Tint, Ui,
 };
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
@@ -78,6 +78,8 @@ enum Dlg {
     Help,
     /// Picking a cover found online.
     Covers,
+    /// The smart playlist editor's rows (dialog 6).
+    SmartRows,
     /// Where to play: this device, or one found on the network.
     Cast(Vec<CastRow>),
     /// Typing a snapserver's address.
@@ -191,6 +193,8 @@ pub struct State {
     /// The System theme: when the system's colors were last asked for,
     /// and what was put on screen from them.
     system_checked: Option<Instant>,
+    /// Car mode, as last asked, and when.
+    driving: (bool, Option<Instant>),
     system_shown: Option<Option<crate::system_theme::SystemColors>>,
     /// The colors last sent to the home screen widget.
     widget_sent: Option<platform::WidgetColors>,
@@ -252,6 +256,8 @@ pub struct State {
     players_shown: u64,
     /// Another player being steered from here.
     remote: Option<crate::remote_view::RemoteView>,
+    /// The smart playlist editor, while it's open as rows.
+    smart_edit: Option<SmartEdit>,
     /// Now Playing's visualizer: the analyzer and its bars' model.
     vis: patina_core::visual::Analyzer,
     vis_bars: Rc<VecModel<f32>>,
@@ -449,6 +455,7 @@ impl State {
             last_activate: None,
             theme: None,
             system_checked: None,
+            driving: (false, None),
             system_shown: None,
             widget_sent: None,
             desktop,
@@ -478,6 +485,7 @@ impl State {
             cast_shown: u64::MAX,
             players_shown: u64::MAX,
             remote: None,
+            smart_edit: None,
             vis: patina_core::visual::Analyzer::new(VIS_BARS),
             vis_bars: Rc::new(VecModel::default()),
         }
@@ -882,16 +890,35 @@ impl State {
                     ),
                 ],
             ),
+            // A grid of pictures, like Albums, or a list.
             (Section::Artists, Some(Source::Section(_))) => (
-                0,
-                vec!["", "Artist", "Albums", "", "Tracks"],
-                vec![(
-                    "mode",
-                    match prefs.artist_mode {
-                        patina_core::library::ArtistMode::AlbumArtist => "By album artist".into(),
-                        patina_core::library::ArtistMode::TrackArtist => "By track artist".into(),
-                    },
-                )],
+                if prefs.artist_list { 0 } else { 1 },
+                if prefs.artist_list {
+                    vec!["", "Artist", "Albums", "", "Tracks"]
+                } else {
+                    vec![]
+                },
+                vec![
+                    (
+                        "mode",
+                        match prefs.artist_mode {
+                            patina_core::library::ArtistMode::AlbumArtist => {
+                                "By album artist".into()
+                            }
+                            patina_core::library::ArtistMode::TrackArtist => {
+                                "By track artist".into()
+                            }
+                        },
+                    ),
+                    (
+                        "view",
+                        if prefs.artist_list {
+                            "Grid".into()
+                        } else {
+                            "List".into()
+                        },
+                    ),
+                ],
             ),
             (Section::Genres, Some(Source::Section(_))) => {
                 (0, vec!["", "Genre", "Albums", "", "Tracks"], vec![])
@@ -2294,6 +2321,10 @@ impl State {
             "sort" => self.b.cycle_sort(),
             "reverse" => self.b.reverse_songs(),
             "mode" => self.b.toggle_mode(),
+            "view" => {
+                self.b.prefs.artist_list = !self.b.prefs.artist_list;
+                self.last_gen = u64::MAX;
+            }
             "new" if self.b.section == Section::Radio => self.open_station(ui, None),
             "new" => {
                 self.dlg = Dlg::NewPlaylist(Vec::new());
@@ -3382,8 +3413,15 @@ impl State {
     /// The playing song's cover, blurred, for the backdrop, made again
     /// when the song or its cover changes.
     fn sync_backdrop(&mut self, ui: &AppWindow) {
+        if self
+            .driving
+            .1
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+        {
+            self.driving = (platform::driving(), Some(Instant::now()));
+        }
         let look = &self.b.config.appearance;
-        ui.set_minimal(look.minimal);
+        ui.set_minimal(look.minimal || (look.minimal_driving && self.driving.0));
         ui.set_backdrop(look.backdrop.index());
         ui.set_backdrop_strength(f32::from(look.backdrop_strength) / 100.0);
         let want_blur = look.backdrop != patina_core::config::Backdrop::Off;
@@ -3847,16 +3885,163 @@ impl State {
                 "Create",
             ),
         };
+        if let Some(form) = patina_core::library::smart::form::Form::from_text(&query, &exclude) {
+            return self.open_smart_rows(ui, SmartEdit::new(edit.map(|p| p.id), name, form));
+        }
         self.dlg = match &edit {
             Some(p) => Dlg::SmartEdit(p.id),
             None => Dlg::SmartNew,
         };
         open_text(ui, title, "Name", &name, Some(("Songs where", &query)), ok);
+        ui.set_dlg_alt(ss("Edit as rules"));
         // The songs to leave out, under the songs to take.
         ui.set_dlg_label3(ss("Leave out songs where (optional)"));
         ui.set_dlg_text3(ss(&exclude));
         ui.set_dlg_three_fields(true);
         self.smart_note(ui, &query, &exclude);
+    }
+
+    /// The smart playlist editor as rows, like iTunes'.
+    fn open_smart_rows(&mut self, ui: &AppWindow, e: SmartEdit) {
+        use patina_core::library::smart::form::{AGE_UNITS, FIELDS, LIMIT_UNITS, ORDERS};
+        let strings = |v: Vec<&str>| {
+            ModelRc::from(Rc::new(VecModel::from(
+                v.into_iter().map(ss).collect::<Vec<_>>(),
+            )))
+        };
+        ui.set_dlg_title(ss(if e.id.is_some() {
+            "Edit smart playlist"
+        } else {
+            "New smart playlist"
+        }));
+        ui.set_dlg_ok(ss(if e.id.is_some() { "Save" } else { "Create" }));
+        ui.set_smart_fields(strings(FIELDS.iter().map(|f| f.1).collect()));
+        ui.set_smart_age_units(strings(AGE_UNITS.iter().map(|u| u.1).collect()));
+        ui.set_smart_limit_units(strings(LIMIT_UNITS.to_vec()));
+        ui.set_smart_orders(strings(ORDERS.iter().map(|o| o.0).collect()));
+        ui.set_smart_name(ss(&e.name));
+        ui.set_smart_limit_n(ss(&e.limit_n));
+        self.smart_edit = Some(e);
+        self.dlg = Dlg::SmartRows;
+        self.smart_rows_fill(ui);
+        ui.set_dialog(6);
+    }
+
+    /// Redraw the rows from the form: after a change to their shape (a
+    /// field, a condition, a row added), not on each key typed.
+    fn smart_rows_fill(&mut self, ui: &AppWindow) {
+        use patina_core::library::smart::form::{FIELDS, ValueKind, op_label, ops};
+        let Some(e) = &self.smart_edit else { return };
+        let rows: Vec<SmartRule> = e
+            .form
+            .rules
+            .iter()
+            .map(|r| {
+                let field_ops = ops(r.field);
+                SmartRule {
+                    field: FIELDS.iter().position(|f| f.0 == r.field).unwrap_or(0) as i32,
+                    ops: ModelRc::from(Rc::new(VecModel::from(
+                        field_ops
+                            .iter()
+                            .map(|o| ss(op_label(r.field, *o)))
+                            .collect::<Vec<_>>(),
+                    ))),
+                    op: field_ops.iter().position(|o| *o == r.op).unwrap_or(0) as i32,
+                    kind: match r.value_kind() {
+                        ValueKind::Text => 0,
+                        ValueKind::Number => 1,
+                        ValueKind::Stars => 2,
+                        ValueKind::Range => 3,
+                        ValueKind::Age => 4,
+                        ValueKind::Date => 5,
+                        ValueKind::None => 6,
+                    },
+                    value: ss(&r.value),
+                    value2: ss(&r.value2),
+                    unit: r.unit as i32,
+                }
+            })
+            .collect();
+        ui.set_smart_rules(ModelRc::from(Rc::new(VecModel::from(rows))));
+        ui.set_smart_any(e.form.any);
+        ui.set_smart_limit_on(e.limit_on);
+        ui.set_smart_limit_unit(e.limit_unit as i32);
+        ui.set_smart_order(e.form.order as i32);
+        self.smart_rows_note(ui);
+    }
+
+    /// What the rows match so far, or what's wrong.
+    fn smart_rows_note(&mut self, ui: &AppWindow) {
+        let Some(e) = &mut self.smart_edit else {
+            return;
+        };
+        let text = e.text();
+        let c = self.b.check_smart(&text, "");
+        ui.set_dlg_note(ss(c.message));
+        ui.set_dlg_note_warn(!c.ok);
+    }
+
+    /// A change in the editor. `reshape` redraws the rows too.
+    fn smart_rows_change(&mut self, ui: &AppWindow, reshape: bool, f: impl FnOnce(&mut SmartEdit)) {
+        if let Some(e) = &mut self.smart_edit {
+            f(e);
+        }
+        if reshape {
+            self.smart_rows_fill(ui);
+        } else {
+            self.smart_rows_note(ui);
+        }
+    }
+
+    /// From the rows to the text form, for what the rows can't say.
+    fn smart_rows_to_text(&mut self, ui: &AppWindow) {
+        let Some(mut e) = self.smart_edit.take() else {
+            return;
+        };
+        let text = e.text();
+        self.dlg = match e.id {
+            Some(id) => Dlg::SmartEdit(id),
+            None => Dlg::SmartNew,
+        };
+        let title = if e.id.is_some() {
+            "Edit smart playlist"
+        } else {
+            "New smart playlist"
+        };
+        let ok = if e.id.is_some() { "Save" } else { "Create" };
+        open_text(ui, title, "Name", &e.name, Some(("Songs where", &text)), ok);
+        ui.set_dlg_label3(ss("Leave out songs where (optional)"));
+        ui.set_dlg_text3(SharedString::new());
+        ui.set_dlg_three_fields(true);
+        ui.set_dlg_alt(ss("Edit as rules"));
+        self.smart_note(ui, &text, "");
+    }
+
+    /// From the text form back to rows, when the rules fit them.
+    fn smart_text_to_rows(&mut self, ui: &AppWindow) {
+        let id = match self.dlg {
+            Dlg::SmartEdit(id) => Some(id),
+            Dlg::SmartNew => None,
+            _ => return,
+        };
+        let (name, q, x) = (
+            ui.get_dlg_text1().to_string(),
+            ui.get_dlg_text2().to_string(),
+            ui.get_dlg_text3().to_string(),
+        );
+        match patina_core::library::smart::form::Form::from_text(&q, &x) {
+            Some(form) => self.open_smart_rows(ui, SmartEdit::new(id, name, form)),
+            None => {
+                ui.set_dlg_note(ss(if !x.trim().is_empty() {
+                    "Rows can't show the leave-out box. Clear it to edit these as rows, or keep them as text."
+                } else if patina_core::library::smart::parse(&q).is_err() {
+                    "Fix the rules first: they don't read yet."
+                } else {
+                    "These rules mix \"and\" with \"or\", group them in brackets, or use something rows can't show, so they stay as text."
+                }));
+                ui.set_dlg_note_warn(true);
+            }
+        }
     }
 
     /// Under the rules: what they match and how many the second box
@@ -4303,6 +4488,22 @@ impl State {
                 }
             }
             Dlg::RenameServer(old) => self.b.edit_server(&old, &t1, "", "", None),
+            Dlg::SmartRows => {
+                let Some(e) = &mut self.smart_edit else {
+                    return;
+                };
+                let text = e.text();
+                let ok = match e.id {
+                    Some(id) => self.b.update_smart(id, &e.name, &text, ""),
+                    None => self.b.create_smart(&e.name, &text, ""),
+                };
+                if !ok {
+                    self.dlg = Dlg::SmartRows;
+                    self.smart_rows_note(ui);
+                    return;
+                }
+                self.smart_edit = None;
+            }
             Dlg::SmartNew => {
                 let t3 = ui.get_dlg_text3().trim().to_string();
                 if !self.b.create_smart(&t1, &t2, &t3) {
@@ -4887,7 +5088,64 @@ fn open_text(
     ui.set_dlg_ok(ss(ok));
     ui.set_dlg_note(SharedString::new());
     ui.set_dlg_note_warn(false);
+    ui.set_dlg_alt(SharedString::new());
     ui.set_dialog(1);
+}
+
+/// The smart playlist editor's rows being worked on.
+struct SmartEdit {
+    /// The playlist being changed; None for a new one.
+    id: Option<i64>,
+    name: String,
+    form: patina_core::library::smart::form::Form,
+    limit_on: bool,
+    limit_n: String,
+    limit_unit: usize,
+}
+
+impl SmartEdit {
+    fn new(id: Option<i64>, name: String, form: patina_core::library::smart::form::Form) -> Self {
+        use patina_core::library::smart::Limit;
+        let (limit_on, limit_n, limit_unit) = match form.limit {
+            None => (false, "25".to_string(), 0),
+            Some(l) => (
+                true,
+                l.count().to_string(),
+                match l {
+                    Limit::Songs(_) => 0,
+                    Limit::Minutes(_) => 1,
+                    Limit::Hours(_) => 2,
+                    Limit::Mb(_) => 3,
+                    Limit::Gb(_) => 4,
+                },
+            ),
+        };
+        Self {
+            id,
+            name,
+            form,
+            limit_on,
+            limit_n,
+            limit_unit,
+        }
+    }
+
+    /// The query, with the limit as the form shows it.
+    fn text(&mut self) -> String {
+        use patina_core::library::smart::Limit;
+        let n = self.limit_n.trim().parse::<u32>().ok().filter(|n| *n > 0);
+        self.form.limit = match (self.limit_on, n) {
+            (true, Some(n)) => Some(match self.limit_unit {
+                1 => Limit::Minutes(n),
+                2 => Limit::Hours(n),
+                3 => Limit::Mb(n),
+                4 => Limit::Gb(n),
+                _ => Limit::Songs(n),
+            }),
+            _ => None,
+        };
+        self.form.to_text()
+    }
 }
 
 /// Keeps the timer (and so the bridge) alive for the window's lifetime.
@@ -5180,6 +5438,129 @@ pub fn install(
     on!(on_trim_toggle, |s, _u| s.b.toggle_trim());
     on!(on_dlg_accept, |s, u| s.dlg_accept(&u));
     on!(on_cast_clicked, |s, u| s.open_cast(&u));
+    on!(on_smart_name_edited, |s, _u, t| {
+        if let Some(e) = &mut s.smart_edit {
+            e.name = t.to_string();
+        }
+    });
+    on!(on_smart_field, |s, u, i, f| s.smart_rows_change(
+        &u,
+        true,
+        |e| {
+            use patina_core::library::smart::form::FIELDS;
+            if let (Some(r), Some(f)) = (e.form.rules.get_mut(i as usize), FIELDS.get(f as usize)) {
+                r.set_field(f.0);
+            }
+        }
+    ));
+    on!(on_smart_op, |s, u, i, o| s.smart_rows_change(
+        &u,
+        true,
+        |e| {
+            if let Some(r) = e.form.rules.get_mut(i as usize)
+                && let Some(op) = patina_core::library::smart::form::ops(r.field).get(o as usize)
+            {
+                let was = r.value_kind();
+                r.op = *op;
+                if r.value_kind() != was {
+                    r.value.clear();
+                    r.value2.clear();
+                }
+            }
+        }
+    ));
+    on!(on_smart_value, |s, u, i, t| {
+        // Stars redraw; typing doesn't, so the box keeps its cursor.
+        let stars = s.smart_edit.as_ref().is_some_and(|e| {
+            e.form.rules.get(i as usize).is_some_and(|r| {
+                r.value_kind() == patina_core::library::smart::form::ValueKind::Stars
+            })
+        });
+        s.smart_rows_change(&u, stars, |e| {
+            if let Some(r) = e.form.rules.get_mut(i as usize) {
+                r.value = t.to_string();
+            }
+        })
+    });
+    on!(on_smart_value2, |s, u, i, t| s.smart_rows_change(
+        &u,
+        false,
+        |e| {
+            if let Some(r) = e.form.rules.get_mut(i as usize) {
+                r.value2 = t.to_string();
+            }
+        }
+    ));
+    on!(on_smart_unit, |s, u, i, x| s.smart_rows_change(
+        &u,
+        true,
+        |e| {
+            if let Some(r) = e.form.rules.get_mut(i as usize) {
+                r.unit = x.max(0) as usize;
+            }
+        }
+    ));
+    on!(on_smart_add, |s, u, i| s.smart_rows_change(&u, true, |e| {
+        use patina_core::library::smart::form::Rule;
+        let at = (i.max(0) as usize + 1).min(e.form.rules.len());
+        let field = e
+            .form
+            .rules
+            .get(at.saturating_sub(1))
+            .map_or(patina_core::library::smart::Field::Artist, |r| r.field);
+        e.form.rules.insert(at, Rule::new(field));
+    }));
+    on!(on_smart_remove, |s, u, i| s.smart_rows_change(
+        &u,
+        true,
+        |e| {
+            if e.form.rules.len() > 1 {
+                e.form
+                    .rules
+                    .remove((i.max(0) as usize).min(e.form.rules.len() - 1));
+            } else {
+                e.form.rules = patina_core::library::smart::form::Form::default().rules;
+            }
+        }
+    ));
+    on!(on_smart_any_set, |s, u, any| s.smart_rows_change(
+        &u,
+        true,
+        |e| e.form.any = any
+    ));
+    on!(on_smart_limit_toggle, |s, u| s.smart_rows_change(
+        &u,
+        true,
+        |e| e.limit_on = !e.limit_on
+    ));
+    on!(on_smart_limit_n_edited, |s, u, t| s.smart_rows_change(
+        &u,
+        false,
+        |e| {
+            e.limit_n = t.to_string();
+            // Typing a number means wanting the limit.
+            if !t.trim().is_empty() {
+                e.limit_on = true;
+            }
+        }
+    ));
+    on!(on_smart_limit_unit_set, |s, u, x| s.smart_rows_change(
+        &u,
+        true,
+        |e| {
+            e.limit_unit = x.max(0) as usize;
+            e.limit_on = true;
+        }
+    ));
+    on!(on_smart_order_set, |s, u, x| s.smart_rows_change(
+        &u,
+        true,
+        |e| {
+            e.form.order = x.max(0) as usize;
+        }
+    ));
+    on!(on_smart_as_text, |s, u| s.smart_rows_to_text(&u));
+    on!(on_dlg_alt_clicked, |s, u| s.smart_text_to_rows(&u));
     on!(on_vis_next, |s, u| {
         s.b.next_visualizer();
         s.vis_tick(&u);
@@ -5209,6 +5590,7 @@ pub fn install(
     on!(on_dlg_pick, |s, u, i| s.dlg_pick(&u, i as usize));
     on!(on_dlg_cancel, |s, u| {
         s.dlg = Dlg::None;
+        s.smart_edit = None;
         u.set_dialog(0);
         u.invoke_focus_root();
     });

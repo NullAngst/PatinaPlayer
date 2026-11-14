@@ -1,5 +1,18 @@
 # Changes
 
+2026.11.14 - Feature addition (smart playlist editor, new tag fields, rating playlists, Artists grid, Minimal UX while driving) / Bug fixes (Snapcast setup)
+
+* The smart playlist editor is rows now, like iTunes': Match all or any, a row per rule (field, condition, value) with − and + beside it, Limit to N songs, minutes, hours, MB or GB, and the order songs are picked or sorted by. Ratings are stars, ranges two boxes, ages a number and days, weeks, months or years. The count updates as anything changes. Edit as text switches to the text form for what rows can't show, and Edit as rules goes back when they fit. On a phone each row takes two lines.
+* New fields for smart playlists: BPM, composer, grouping, category, comment (read from the tags), track and disc number, bit rate, channels, size in MB and date modified. The first scan after updating reads every local file's tags again to fill the new ones in. A comment stored as DESCRIPTION, as FFmpeg writes it, counts.
+* Limits by time and size: `limit 90 minutes`, `limit 2 hours`, `limit 700 mb`, `limit 4 gb`, taking songs in the playlist's order until the next wouldn't fit.
+* Three smart playlists every library starts with: One Star, Mid Tier (2 and 3 stars) and Best Rated (4 and 5).
+* Artists shows as a grid of big squares with the artists' pictures, like Albums. List, at the top of the view, goes back to rows.
+* Snapcast: picking a snapserver now sets it up. PatinaPlayer asks it over its JSON-RPC control API (TCP 1705, or HTTP 1780) whether a TCP source is listening on the port it will use, and adds one ("Patina", server mode, 48000:16:2) with Stream.AddStream when there isn't, so it works with a snapserver in Docker that ignores the edited config. Picked while nothing plays, it's checked straight away: the note says it's ready and to set rooms to the Patina stream, or says which port didn't answer. Before, picking one while stopped did nothing at all until the next play.
+* Android: Minimal UX while driving, on by default. When the phone is in car mode (Android Auto, or a driving mode that turns it on), the app switches to Minimal UX by itself and back after.
+* Tests: the form writing queries that read back as the same rows, any and all, half-filled rows, quoting, rules that stay text; time and size limits; the new fields from real files; the rating playlists; finding a snapserver's TCP source in its status, and adding one through a stand-in control port.
+
+Reasons for changes: asked for an iTunes-style smart playlist editor with BPM, category and the rest, default playlists by stars, Artists as big squares like Albums, Minimal UX in driving mode, and the Snapcast stream not showing up because the snapserver in Docker uses its own config.
+
 2026.11.14 - Bug fixes (visualizer crash, database locked at start)
 
 * Turning on the visualizer, or opening Now Playing with one already on, crashed the app. The visualizer read the audio tap before the renderer had written to it, got a sample rate of 0, and worked out FFT bins far past the end of the spectrum. A missing rate now counts as 48 kHz, and every band's bins are kept inside the spectrum whatever the rate.

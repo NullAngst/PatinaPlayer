@@ -240,6 +240,21 @@ final class Native {
      * Null before Android 12, which has no Material You. Looked up by name,
      * so this builds against any SDK.
      */
+    /**
+     * Whether the phone is in car mode: Android Auto sets it while it
+     * runs, and so do driving modes built on it. The window switches to
+     * Minimal UX then, if that's turned on.
+     */
+    static boolean isDriving() {
+        if (app == null) {
+            return false;
+        }
+        android.app.UiModeManager um =
+            (android.app.UiModeManager) app.getSystemService(Context.UI_MODE_SERVICE);
+        return um != null
+            && um.getCurrentModeType() == android.content.res.Configuration.UI_MODE_TYPE_CAR;
+    }
+
     static int[] systemColors() {
         if (android.os.Build.VERSION.SDK_INT < 31 || app == null) {
             return null;

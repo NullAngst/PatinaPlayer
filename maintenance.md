@@ -64,6 +64,11 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 2. Click the cover on Now Playing through every visualizer style while a song plays, then pause: the bars should fall away. A Slint update that changes how `Path` takes its `commands` would show up here first.
 3. Turn on Minimal UX and check the bottom bar and Now Playing have no badges, format or sound chain, and that the output button still opens the device list.
 
+## 5.8. Smart playlist editor and Snapcast setup
+
+1. Open each of the three rating playlists in the editor: they should open as rows, not text. Add a row of each kind (stars, a range, "in the last", a date, lossless) and save; reopening it should show the same rows. `cargo test -p patina-core form` covers the round trip.
+2. After a Snapcast update, check `crates/patina-core/src/cast/snapcast.rs` still matches its JSON-RPC: `Server.GetStatus` (streams under `server.streams`, each with `uri.scheme`, `uri.host`, `uri.query`) and `Stream.AddStream` with `streamUri`. The control API's doc is `doc/json_rpc_api/control.md` in the Snapcast repo. If Snapcast ever requires authentication for AddStream, the note will say it wouldn't add a source; the fix is then the line in `snapserver.conf`.
+
 ## 6. ListenBrainz and Last.fm
 
 1. In Settings, check the ListenBrainz row still shows your user name. If it says the token is refused, make a new one at listenbrainz.org/settings and paste it in.

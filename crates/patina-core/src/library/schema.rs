@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-pub const VERSION: i64 = 10;
+pub const VERSION: i64 = 11;
 
 /// Paths and dirs are stored as BLOBs of their raw bytes, since Linux
 /// filenames don't have to be UTF-8 and a lossy copy can't be opened.
@@ -322,6 +322,24 @@ const V10: &str = r#"
 ALTER TABLE smart_playlists ADD COLUMN exclude TEXT NOT NULL DEFAULT '';
 "#;
 
+/// More tags for smart playlists: BPM, composer, grouping, category (the
+/// podcast and iTunes one) and comment. Every local file's tags are read
+/// again on the next scan to fill them in, which on a big library takes
+/// about as long as the first scan did. Three smart playlists by rating
+/// to start with.
+const V11: &str = r#"
+ALTER TABLE tracks ADD COLUMN bpm INTEGER;
+ALTER TABLE tracks ADD COLUMN composer TEXT;
+ALTER TABLE tracks ADD COLUMN grouping TEXT;
+ALTER TABLE tracks ADD COLUMN category TEXT;
+ALTER TABLE tracks ADD COLUMN comment TEXT;
+UPDATE tracks SET mtime = 0 WHERE remote_id IS NULL;
+INSERT INTO smart_playlists (name, query, exclude, created_at, updated_at) VALUES
+    ('One Star', 'rating = 1', '', CAST(strftime('%s', 'now') AS INTEGER), CAST(strftime('%s', 'now') AS INTEGER)),
+    ('Mid Tier', 'rating >= 2 and rating <= 3', '', CAST(strftime('%s', 'now') AS INTEGER), CAST(strftime('%s', 'now') AS INTEGER)),
+    ('Best Rated', 'rating >= 4 sort by rating', '', CAST(strftime('%s', 'now') AS INTEGER), CAST(strftime('%s', 'now') AS INTEGER));
+"#;
+
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     // First: switching to WAL (even when it already is) needs a lock, and
     // with several threads opening the database at start one of them
@@ -374,6 +392,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if current < 10 {
         tx.execute_batch(V10)?;
+    }
+    if current < 11 {
+        tx.execute_batch(V11)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()

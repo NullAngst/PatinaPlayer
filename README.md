@@ -17,7 +17,7 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 
 ### Views
 
-- Folders, Artists (by album artist or track artist), Albums (by name, artist, year, recently added, most played, rating or random), Songs (sortable on seven columns), Genres, Playlists, Radio, Podcasts, Queue and Downloads.
+- Folders, Artists (by album artist or track artist, as a grid of pictures or a list), Albums (by name, artist, year, recently added, most played, rating or random), Songs (sortable on seven columns), Genres, Playlists, Radio, Podcasts, Queue and Downloads.
 - Search over everything at once. Every word has to match somewhere, so `nirv blea` finds Bleach.
 - Recently played: every song you've heard, newest first, under Today, Yesterday, the weekday or the date. Albums and Songs can sort by recently played too.
 - Listening stats: Most listened (top five songs, albums and artists), Top albums and Top artists, built from your play counts. A song counts once you've heard half of it or four minutes, whichever comes first.
@@ -40,7 +40,13 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 
 ### Smart playlists
 
-A smart playlist is a saved search that keeps itself up to date. Make one from Playlists with New smart playlist (`S` in the terminal app). Type the rules and the dialog says how many songs match as you type, or what's wrong with the rules.
+A smart playlist is a saved search that keeps itself up to date. Make one from Playlists with New smart playlist (`S` in the terminal app).
+
+In the window it opens as rows, like iTunes: Match all or any of the rules, then a row per rule with a field, a condition and a value, and − and + to take a row out or add one under it. Rating rows take stars, ranges take two numbers, Last played and the dates take "in the last 6 months" or a date. Under the rows, Limit to N songs, minutes, hours, MB or GB, and the order they're picked or sorted by (random, highest rating, most recently played, and so on). The count of matching songs updates as you change anything. Edit as text switches to the rules as text, for what rows can't say (groups in brackets, "and" mixed with "or", the leave-out box), and Edit as rules goes back when they fit. The terminal app uses the text.
+
+Every library starts with three by rating: One Star, Mid Tier (2 and 3 stars) and Best Rated (4 and 5 stars). Change or delete them like any other.
+
+As text:
 
 ```
 rating >= 4 and genre is "blues rock" and played > 180d sort by random limit 100
@@ -55,7 +61,8 @@ Leave out songs where:  artist = "the beatles" or artist = beatles
 
 The check under the boxes says how many songs match and how many the second box left out, so a leave-out rule that misses (a misspelled artist) shows as `0 left out`. In the terminal app the second box comes after the first, when you press Enter. Sort and limit go in the first box.
 
-- Fields: `title`, `artist`, `albumartist`, `album`, `genre`, `year`, `rating`, `albumrating`, `plays`, `played`, `added`, `length`, `format`, `rate`, `bits`, `lossless`, `folder`, `source`.
+- Fields: `title`, `artist`, `albumartist`, `album`, `genre`, `composer`, `grouping`, `category`, `comment`, `year`, `bpm`, `rating`, `albumrating`, `plays`, `played`, `added`, `modified`, `length`, `track`, `disc`, `format`, `rate`, `bits`, `bitrate` (kbps), `channels`, `size` (MB), `lossless`, `folder`, `source`.
+- BPM, composer, grouping, category (the iTunes and podcast one) and comment come from the files' tags. After updating from a version without them, the first scan reads every file's tags again to fill them in, which on a big library takes about as long as the first scan did. Server songs don't have them.
 - Text: `is` (or `=`), `isnt` (or `!=`), `contains`, `starts`, `ends`, and `~` for contains. Case doesn't matter. Quote anything with a space in it.
 - Numbers: `=`, `!=`, `<`, `<=`, `>`, `>=`, and ranges like `year = 1960-1969` (or just `year 1960-1969`).
 - Times are ages: `played > 180d` is not played in six months (or never), `added < 2w` is added in the last two weeks. `h`, `d`, `w`, `mo` and `y` all work, and so do dates like `added > 2024-06`.
@@ -63,7 +70,7 @@ The check under the boxes says how many songs match and how many the second box 
 - `and`, `or`, `not` and parentheses. Two rules side by side mean `and`.
 - A song without a tag is never caught by a rule about that tag, either way: `artist isnt "the beatles"`, `not (artist is "the beatles")` and the leave-out box all keep songs with no artist at all.
 - Shortcuts: `played never`, `lossless`, `lossy`, `unrated`.
-- At the end, `sort by <field> [asc|desc]` (or `sort by random`) and `limit N`.
+- At the end, `sort by <field> [asc|desc]` (or `sort by random`) and `limit N`, where N is songs unless it says otherwise: `limit 90 minutes`, `limit 2 hours`, `limit 700 mb`, `limit 4 gb`. A time or size limit takes songs in the playlist's order until the next one wouldn't fit.
 
 The rules look a bit like SQL, but what you type never becomes part of a database statement. The app reads the rules into its own list of conditions first, then builds the query from fixed pieces: field names, operators and sort orders come from lists in the code, and every value you type goes to SQLite as a bound parameter, so it's only ever compared against, never run. `%` and `_` in a value match those characters literally. Anything outside the language is turned away with a message, before the database sees it. Rules are capped at 4000 characters, 200 conditions and 32 levels of nesting, far past anything you'd type, so a pasted wall of text gets a message instead of hanging the app.
 
@@ -136,7 +143,7 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 ### Other devices
 
 - **Play on** another device: the cast button on the bottom bar or on Now Playing, or the last entry in the output picker. It lists Chromecasts, DLNA renderers (network speakers, AV receivers, TVs, Kodi) and Snapcast servers found on the network. The sound still comes from this app's player, after the EQ, the amp stack and leveling, so the queue, gapless and crossfades all carry on. Chromecasts and DLNA renderers fetch it from the app as a live 48 kHz WAV stream; a snapserver gets it over TCP. Pick This device to come back.
-- For Snapcast, the snapserver needs a TCP source in server mode, on its default format: `source = tcp://0.0.0.0:4953?name=Patina&mode=server` in `snapserver.conf`. A snapserver that doesn't announce itself goes in by address, from the same list or Settings, Other devices.
+- For Snapcast, nothing has to change on the snapserver. When you pick it, PatinaPlayer asks the snapserver over its control API (port 1705, or 1780) for a TCP source on port 4953 and adds one called "Patina" if there isn't one, then checks it can connect, and says what's wrong if it can't. Then set your rooms to the Patina stream in Snapweb or the Snapcast app. A source added that way lasts until the snapserver restarts, and PatinaPlayer adds it again the next time. To keep it for good, put `source = tcp://0.0.0.0:4953?name=Patina&mode=server` in the `[stream]` section of the `snapserver.conf` the snapserver actually reads (in Docker, the one mounted into the container), and publish port 4953 if it runs in Docker. A snapserver that doesn't announce itself goes in by address, from the same list or Settings, Other devices.
 - **Remote control**: turn it on in Settings, Other devices, and PatinaPlayer on a phone (or another computer) on the same network can steer this one: the song, its cover, play, pause, skip, seek, volume, shuffle, repeat, the heart, and the queue, where tapping a song plays it. It asks for the six-digit code shown there; New code makes a fresh one and shuts out whoever had the old one. On the other side, Settings, Other devices, Control another player lists the players on the network (or takes an address) and opens their Now Playing. Back or Escape leaves it. The code from last time is kept, so the second time it's one tap.
 
 ### The desktop
@@ -163,6 +170,7 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 - A home screen widget with the cover, the song, and back, play or pause, and next, in the app's theme. It keeps the theme after a restart.
 - The System theme (Android 12 and later) follows your wallpaper's Material You colors and the phone's light or dark mode.
 - The volume button opens a tall slider, easier to hit with a thumb than the bar's.
+- Minimal UX while driving (Settings, Appearance, on by default): when the phone goes into car mode, which Android Auto turns on and so do driving modes built on it, the app switches to Minimal UX by itself, and back after.
 - Gestures: swipe up on the bottom bar to open Now Playing, swipe down anywhere on Now Playing to close it (the page follows your finger), and swipe the cover left or right for the next or previous song.
 - Android Auto has a queue screen: what's coming up, with covers, and tapping a song plays it.
 - Bit-perfect to a USB DAC on Android 14 and later, where the phone's maker offers it.
@@ -308,6 +316,7 @@ backdrop = "off"         # off, now-playing or everywhere: the playing cover, bl
 backdrop_strength = 60   # 10 to 100 percent
 cover_accent = false     # color the transport from the playing cover
 minimal = false          # leave the technical readouts off the bar and Now Playing
+minimal_driving = true   # Android: Minimal UX on its own in car mode
 visualizer = "off"       # off, bars, mirror, scope or ring; clicking the cover steps through
 
 [playback]

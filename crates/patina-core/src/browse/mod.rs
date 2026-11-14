@@ -192,6 +192,8 @@ pub struct Browser {
     /// Devices found to play on, and the search for them.
     cast_found: Vec<crate::cast::Target>,
     cast_job: Option<Receiver<Vec<crate::cast::Target>>>,
+    /// A snapserver just picked, being checked and set up.
+    cast_check: Option<Receiver<Result<String, String>>>,
     /// Bumped when `cast_found` changes or a search starts or ends.
     pub cast_generation: u64,
     /// Other players controlling this one: the server, what it asks the
@@ -340,6 +342,7 @@ impl Browser {
             defer_builds: false,
             cast_found: Vec::new(),
             cast_job: None,
+            cast_check: None,
             cast_generation: 0,
             remote_server: None,
             remote_asks: unbounded(),
@@ -1947,6 +1950,15 @@ impl Browser {
                         v.as_str(),
                     ))?;
                     self.config.appearance.visualizer = v.parse().unwrap_or_default();
+                }
+                (Key::MinimalDriving, Control::Toggle(on)) => {
+                    w(config::set_value(
+                        &path,
+                        "appearance",
+                        "minimal_driving",
+                        *on,
+                    ))?;
+                    self.config.appearance.minimal_driving = *on;
                 }
                 (Key::MinimalUi, Control::Toggle(on)) => {
                     w(config::set_value(&path, "appearance", "minimal", *on))?;

@@ -163,6 +163,10 @@ impl Hooks for AndroidHooks {
     fn widget_colors(&self, c: &patina_gui::platform::WidgetColors) {
         jni_glue::widget_colors(&c.to_array());
     }
+
+    fn driving(&self) -> bool {
+        jni_glue::driving()
+    }
 }
 
 /// Point the app's folders (config, library, cache) at Android's app

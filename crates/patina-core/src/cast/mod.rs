@@ -24,6 +24,7 @@
 
 pub mod chromecast;
 pub mod dlna;
+pub mod snapcast;
 mod stream;
 
 use std::net::{IpAddr, TcpStream, ToSocketAddrs, UdpSocket};
@@ -232,17 +233,18 @@ impl Session {
         let mut threads = Vec::new();
         let sink = match target.kind {
             Kind::Snapcast => {
-                let addr = target
-                    .addr
-                    .to_socket_addrs()
-                    .ok()
-                    .and_then(|mut a| a.next())
-                    .ok_or_else(|| format!("can't find {}", target.addr))?;
-                let s = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).map_err(|e| {
-                    format!(
-                        "can't reach the snapserver at {} ({e}). Is its TCP source on, in server mode?",
+                // Its TCP source, added over its control API if it isn't
+                // in snapserver.conf.
+                let ready = snapcast::ensure_source(target);
+                let s = snapcast::open(target).map_err(|e| match &ready {
+                    snapcast::Ready::NoControl(why) => format!(
+                        "can't reach the snapserver at {} ({e}); its control API didn't answer either ({why})",
                         target.addr
-                    )
+                    ),
+                    _ => format!(
+                        "the snapserver at {} won't take the connection ({e})",
+                        target.addr
+                    ),
                 })?;
                 let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
                 let _ = s.set_nodelay(true);

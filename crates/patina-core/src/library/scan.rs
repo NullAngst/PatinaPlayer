@@ -248,9 +248,9 @@ pub fn scan_tree(
             "INSERT INTO tracks (source_id, path, dir, filename, mtime, size, title, artist, \
                album_artist, album, album_key, track_no, disc_no, year, genre, duration_ms, codec, \
                sample_rate, bits, channels, kbps, lossless, rg_track_gain, rg_track_peak, \
-               rg_album_gain, rg_album_peak, added_at) \
+               rg_album_gain, rg_album_peak, added_at, bpm, composer, grouping, category, comment) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-               ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27) \
+               ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32) \
              ON CONFLICT(path) DO UPDATE SET source_id = excluded.source_id, dir = excluded.dir, \
                filename = excluded.filename, mtime = excluded.mtime, size = excluded.size, \
                title = excluded.title, artist = excluded.artist, album_artist = excluded.album_artist, \
@@ -260,7 +260,9 @@ pub fn scan_tree(
                sample_rate = excluded.sample_rate, bits = excluded.bits, channels = excluded.channels, \
                kbps = excluded.kbps, lossless = excluded.lossless, \
                rg_track_gain = excluded.rg_track_gain, rg_track_peak = excluded.rg_track_peak, \
-               rg_album_gain = excluded.rg_album_gain, rg_album_peak = excluded.rg_album_peak \
+               rg_album_gain = excluded.rg_album_gain, rg_album_peak = excluded.rg_album_peak, \
+               bpm = excluded.bpm, composer = excluded.composer, grouping = excluded.grouping, \
+               category = excluded.category, comment = excluded.comment \
              RETURNING id",
             params![
                 source_id,
@@ -290,6 +292,11 @@ pub fn scan_tree(
                 meta.rg_album_gain,
                 meta.rg_album_peak,
                 now,
+                meta.bpm,
+                meta.composer,
+                meta.grouping,
+                meta.category,
+                meta.comment,
             ],
             |r| r.get(0),
         )?;
