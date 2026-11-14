@@ -212,6 +212,14 @@ fn plex(seen: Arc<Mutex<Seen>>) -> String {
                 mc(json!({"Metadata": [track("101", 1, true), track("102", 2, true)]}))
             }
             ("GET", "/library/metadata/101") => mc(json!({"Metadata": [track("101", 1, true)]})),
+            // A song whose file Plex can't open, asked with checkFiles.
+            ("GET", "/library/metadata/103") => {
+                assert_eq!(r.get("checkFiles"), Some("1"));
+                let mut t = track("103", 3, true);
+                t["Media"][0]["Part"][0]["accessible"] = json!(false);
+                t["Media"][0]["Part"][0]["exists"] = json!(true);
+                mc(json!({"Metadata": [t]}))
+            }
             ("GET", "/library/metadata/101/nearest") => {
                 mc(json!({"Metadata": [track("102", 2, false), track("101", 1, false)]}))
             }
@@ -343,6 +351,13 @@ fn connecting_finds_a_working_address_and_reads_the_library() {
     assert!(original);
     assert!(u.starts_with(&format!("{url}/library/parts/1010/")), "{u}");
     assert!(u.contains("X-Plex-Token=SERVERTOKEN"));
+    // A file Plex can't open says so, instead of a 500 from the download.
+    let e = c.stream_url("103").unwrap_err().to_string();
+    assert!(
+        e.contains("Plex can't open the file /data/music/Band/Album/03 Song 3.flac"),
+        "{e}"
+    );
+    assert!(!e.contains("error 0"), "{e}");
     // A conversion goes through the universal transcoder, as HLS.
     let (u, original) = c.stream_url_as("101", StreamFormat::Mp3, 320).unwrap();
     assert!(!original);

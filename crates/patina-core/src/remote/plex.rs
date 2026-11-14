@@ -87,6 +87,10 @@ struct Stream {
 struct Part {
     key: Option<String>,
     file: Option<String>,
+    /// With checkFiles=1: whether the file is there, and whether Plex
+    /// can open it. True or 1 (XML gives "1").
+    exists: Option<Value>,
+    accessible: Option<Value>,
     container: Option<String>,
     #[serde(deserialize_with = "num")]
     size: Option<f64>,
@@ -668,17 +672,61 @@ impl Plex {
     }
 
     /// The part to stream for a song.
+    /// The song's file, asked for fresh each time it's fetched: the key
+    /// carries a timestamp that changes when Plex reads the file again, so
+    /// one saved at sync can go stale. checkFiles has Plex say whether it
+    /// can find and open the file, which is the usual reason it answers a
+    /// download with 500. The key from the sync is the fallback when the
+    /// question itself fails.
     fn part_key(&self, id: &str) -> Result<String> {
-        if let Some(k) = self.parts.lock().unwrap().get(id) {
-            return Ok(k.clone());
-        }
-        let v = self.get(&format!("/library/metadata/{id}"), &[])?;
-        let key = items(&v)
+        let v = match self.get(
+            &format!("/library/metadata/{id}"),
+            &[("checkFiles", "1".into())],
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                return match self.parts.lock().unwrap().get(id) {
+                    Some(k) => {
+                        log::info!(
+                            "Plex didn't say where song {id}'s file is ({e}); using the synced one"
+                        );
+                        Ok(k.clone())
+                    }
+                    None => Err(e),
+                };
+            }
+        };
+        let part = items(&v)
             .into_iter()
             .next()
             .and_then(|t| t.media.into_iter().next())
             .and_then(|m| m.part.into_iter().next())
-            .and_then(|p| p.key)
+            .ok_or_else(|| RemoteError::Parse(format!("Plex has no file for song {id}")))?;
+        let no = |f: &Option<Value>| match f {
+            Some(Value::Bool(b)) => !b,
+            Some(Value::Number(n)) => n.as_f64() == Some(0.0),
+            Some(Value::String(s)) => s == "0",
+            _ => false,
+        };
+        let file = part.file.clone().unwrap_or_else(|| format!("song {id}"));
+        if no(&part.exists) {
+            return Err(RemoteError::Server {
+                code: 0,
+                message: format!(
+                    "Plex can't find the file {file} on its side. Has it moved? A scan of the library in Plex picks up where it went"
+                ),
+            });
+        }
+        if no(&part.accessible) {
+            return Err(RemoteError::Server {
+                code: 0,
+                message: format!(
+                    "Plex can't open the file {file} on its side. Check its permissions, and the characters in its name if the music is on a network share"
+                ),
+            });
+        }
+        let key = part
+            .key
             .ok_or_else(|| RemoteError::Parse(format!("Plex has no file for song {id}")))?;
         self.parts.lock().unwrap().insert(id.into(), key.clone());
         Ok(key)

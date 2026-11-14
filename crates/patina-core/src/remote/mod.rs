@@ -244,7 +244,8 @@ pub enum RemoteError {
     Http(String),
     #[error("wrong user name or password")]
     Auth,
-    #[error("the server said: {message} (error {code})")]
+    /// Code 0 is a refusal with no number of its own.
+    #[error("the server said: {message}{}", if *code == 0 { String::new() } else { format!(" (error {code})") })]
     Server { code: i64, message: String },
     #[error("the server sent something unexpected: {0}")]
     Parse(String),
