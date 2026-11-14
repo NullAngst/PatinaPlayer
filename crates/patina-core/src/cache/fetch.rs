@@ -104,7 +104,7 @@ impl Progress {
         self.state.store(s as u8, Ordering::Release);
     }
 
-    fn fail(&self, e: &str) {
+    pub(crate) fn fail(&self, e: &str) {
         *self.error.lock().unwrap() = Some(e.to_string());
         self.set_state(State::Failed);
     }
@@ -213,7 +213,7 @@ fn fetch_once(
     if have > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={have}-"));
     }
-    let mut resp = req.send().map_err(|e| FetchError::Http(e.to_string()))?;
+    let mut resp = req.send().map_err(net_err)?;
     let status = resp.status();
     if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && have > 0 {
         // The .part already holds all of it.
@@ -296,6 +296,16 @@ fn fetch_once(
     progress.total.store(done, Ordering::Release);
     std::fs::rename(part, dest)?;
     Ok(Outcome::Done)
+}
+
+/// A request that failed, with its causes (a refused connection, a
+/// certificate it didn't trust) and without its URL, which carries the
+/// login. reqwest's own message alone is only "error sending request".
+fn net_err(e: reqwest::Error) -> FetchError {
+    match crate::remote::http::http_err(e) {
+        crate::remote::RemoteError::Http(m) => FetchError::Http(m),
+        other => FetchError::Http(other.to_string()),
+    }
 }
 
 /// An HLS playlist rather than a file: Plex's universal transcoder.
@@ -383,15 +393,11 @@ fn fetch_hls(
     stop: &AtomicBool,
 ) -> Result<Outcome, FetchError> {
     let get_text = |u: &url::Url| -> Result<String, FetchError> {
-        let resp = http
-            .get(u.as_str())
-            .send()
-            .map_err(|e| FetchError::Http(e.without_url().to_string()))?;
+        let resp = http.get(u.as_str()).send().map_err(net_err)?;
         if !resp.status().is_success() {
             return Err(FetchError::Http(format!("HTTP {}", resp.status())));
         }
-        resp.text()
-            .map_err(|e| FetchError::Http(e.without_url().to_string()))
+        resp.text().map_err(net_err)
     };
     let mut playlist = url::Url::parse(url).map_err(|e| FetchError::Http(e.to_string()))?;
     // A master playlist points at the real one.
@@ -428,10 +434,7 @@ fn fetch_hls(
                 file.flush()?;
                 return Ok(Outcome::Stopped);
             }
-            let mut resp = http
-                .get(seg.as_str())
-                .send()
-                .map_err(|e| FetchError::Http(e.without_url().to_string()))?;
+            let mut resp = http.get(seg.as_str()).send().map_err(net_err)?;
             if !resp.status().is_success() {
                 let what = if is_init { "init segment" } else { "segment" };
                 return Err(FetchError::Http(format!("{what}: HTTP {}", resp.status())));

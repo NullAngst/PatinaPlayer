@@ -139,6 +139,9 @@ struct Feeder {
     cmds: Receiver<FeedCmd>,
     msgs: Sender<FeedMsg>,
     source: Option<Source>,
+    /// Where the open source's download reader leaves why a read failed,
+    /// for a server song playing from its download.
+    read_why: Option<crate::cache::reader::Why>,
     entry: EntryId,
     /// What the queue says about the open entry, with the technical fields
     /// filled in from the stream.
@@ -272,6 +275,14 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_secs((1u64 << attempt.saturating_sub(1).min(5)).min(30))
 }
 
+/// The reason a download's reader gave for its last failed read.
+fn read_reason(w: &crate::cache::reader::Why) -> Option<String> {
+    w.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .map(|r| format!("reading the download failed: {r}"))
+}
+
 impl Feeder {
     fn new(
         shared: SharedRef,
@@ -285,6 +296,7 @@ impl Feeder {
             cmds,
             msgs,
             source: None,
+            read_why: None,
             entry: 0,
             entry_info: TrackInfo::default(),
             ring: None,
@@ -498,6 +510,7 @@ impl Feeder {
         // Whether this is the file as it sits on disk (or as the server
         // has it, untouched), which is what bit-perfect needs.
         let mut original = info.kind == MediaKind::File;
+        let mut why: Option<crate::cache::reader::Why> = None;
         let opened = if info.is_live() {
             self.open_station(&info)
         } else if let Some(r) = &info.remote {
@@ -517,11 +530,14 @@ impl Feeder {
                 })) => {
                     original &= o;
                     // When the download fails, the decoder only sees a read
-                    // error ("I/O error"); the download knows the reason.
+                    // error ("I/O error"); the download and the reader know
+                    // the reason.
                     let progress = reader.progress();
+                    let slot = reader.why();
+                    why = Some(slot.clone());
                     Source::open_reader(reader, &name, opts).map_err(|e| match progress.error() {
-                        Some(why) => format!("couldn't download it: {why}"),
-                        None => e.to_string(),
+                        Some(w) => format!("couldn't download it: {w}"),
+                        None => read_reason(&slot).unwrap_or_else(|| e.to_string()),
                     })
                 }
                 Some(Err(e)) => Err(e),
@@ -669,6 +685,7 @@ impl Feeder {
         self.entry = entry;
         self.entry_info = merged;
         self.source = Some(src);
+        self.read_why = why;
         self.last_mark = 0;
         self.hold = self.track_hold();
         self.set_level(true);
@@ -1010,6 +1027,13 @@ impl Feeder {
                         .url
                         .clone()
                         .unwrap_or_else(|| self.entry_info.path.display().to_string());
+                    // A read that failed under FFmpeg shows as "I/O error";
+                    // the download's reader says what it was.
+                    let e = self
+                        .read_why
+                        .as_ref()
+                        .and_then(read_reason)
+                        .unwrap_or_else(|| e.to_string());
                     log::warn!("decode error in {label}: {e}");
                     let _ = self.msgs.send(FeedMsg::TrackError {
                         entry: self.entry,

@@ -21,8 +21,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::fetch::{Progress, State};
@@ -67,7 +67,13 @@ pub struct PartReader {
     refilling: bool,
     /// Bytes downloaded when the reader opened, and when, for the speed.
     opened: (u64, Instant),
+    /// Why the last read failed. FFmpeg turns every read error into a
+    /// plain "I/O error", so the player asks here for the real reason.
+    why: Arc<Mutex<Option<String>>>,
 }
+
+/// Where a reader leaves the reason for its last failed read.
+pub type Why = Arc<Mutex<Option<String>>>;
 
 /// A range request reading ahead of the download.
 struct Ahead {
@@ -104,7 +110,21 @@ impl PartReader {
             duration: None,
             refilling: false,
             opened,
+            why: Arc::default(),
         })
+    }
+
+    /// The slot this reader leaves its last error's reason in.
+    pub fn why(&self) -> Why {
+        self.why.clone()
+    }
+
+    /// Note why a read failed (for the player, and the log) and pass the
+    /// error on.
+    fn failed(&self, e: io::Error) -> io::Error {
+        log::warn!("reading the download failed: {e}");
+        *self.why.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
+        e
     }
 
     /// The download this reads from, so a failure to open can say why the
@@ -207,9 +227,20 @@ impl PartReader {
                         resp: r,
                     });
                 }
-                Ok(_) | Err(_) => {
+                Ok(r) => {
                     // No ranges here: wait for the download from now on.
-                    log::info!("the server doesn't take ranges; waiting for the download");
+                    log::info!(
+                        "the server answered a range with {}; waiting for the download",
+                        r.status()
+                    );
+                    self.url = None;
+                    return None;
+                }
+                Err(e) => {
+                    log::info!(
+                        "a range request failed ({}); waiting for the download",
+                        e.without_url()
+                    );
                     self.url = None;
                     return None;
                 }
@@ -224,7 +255,7 @@ impl PartReader {
             }
             Err(e) => {
                 self.ahead = None;
-                Err(e)
+                Err(self.failed(e))
             }
         })
     }
@@ -251,7 +282,10 @@ impl Read for PartReader {
                 // Behind the download: from the file.
                 self.ahead = None;
                 let n = (done - self.pos).min(buf.len() as u64) as usize;
-                let got = self.file.read_at(&mut buf[..n], self.pos)?;
+                let got = self
+                    .file
+                    .read_at(&mut buf[..n], self.pos)
+                    .map_err(|e| self.failed(e))?;
                 self.pos += got as u64;
                 return Ok(got);
             }
@@ -265,10 +299,10 @@ impl Read for PartReader {
                     last = done;
                     moved = Instant::now();
                 } else if moved.elapsed() > STALL {
-                    return Err(io::Error::new(
+                    return Err(self.failed(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "the download stopped moving",
-                    ));
+                    )));
                 }
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
@@ -276,11 +310,11 @@ impl Read for PartReader {
             match state {
                 State::Done => return Ok(0),
                 State::Failed => {
-                    return Err(io::Error::other(
+                    return Err(self.failed(io::Error::other(
                         self.progress
                             .error()
                             .unwrap_or_else(|| "download failed".into()),
-                    ));
+                    )));
                 }
                 // Stopped for a moment to let something else go first, or
                 // between tries: it comes back, or the stall check gives up.
@@ -310,10 +344,10 @@ impl Read for PartReader {
                 last = done;
                 moved = Instant::now();
             } else if moved.elapsed() > STALL {
-                return Err(io::Error::new(
+                return Err(self.failed(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "the download stopped moving",
-                ));
+                )));
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -348,6 +382,28 @@ impl Seek for PartReader {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn a_failed_download_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.flac");
+        let part = dir.path().join("a.flac.part");
+        std::fs::write(&part, b"").unwrap();
+        let p = Arc::new(Progress::new());
+        p.preset(0, Some(10));
+        p.set_state(State::Running);
+        let mut r = PartReader::open(&dest, &part, p.clone(), None, None).unwrap();
+        let why = r.why();
+        assert!(why.lock().unwrap().is_none());
+        p.fail("HTTP 401 Unauthorized");
+        let e = r.read(&mut [0u8; 4]).unwrap_err();
+        assert_eq!(e.to_string(), "HTTP 401 Unauthorized");
+        // What FFmpeg will call "I/O error" is kept for the player.
+        assert_eq!(
+            why.lock().unwrap().as_deref(),
+            Some("HTTP 401 Unauthorized")
+        );
+    }
 
     #[test]
     fn reads_follow_the_download() {
