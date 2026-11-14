@@ -51,6 +51,10 @@ ebur128 = "0.1"
 # between songs at different rates.
 rubato = "5"
 libloading = "0.8"
+# Playing to another device: Chromecast's protocol, and mDNS to find
+# Chromecasts, Snapcast servers and other PatinaPlayers on the network.
+rust_cast = "0.21"
+mdns-sd = "0.21"
 
 [dev-dependencies]
 tempfile = "3"

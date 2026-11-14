@@ -1208,6 +1208,10 @@ impl App {
                     };
                 }
                 Control::Action(_) if st.key == SettingKey::FindDlna => self.b.find_dlna(),
+                Control::Action(_) if st.key == SettingKey::RemoteCode => self.b.new_remote_code(),
+                Control::Action(_) if st.key == SettingKey::ControlAnother => self
+                    .b
+                    .note("Controlling another player is in the window app"),
                 Control::Action(_) if st.key == SettingKey::AddServer => {
                     self.modal = Modal::Input {
                         purpose: InputPurpose::ServerName(ServerForm::default()),

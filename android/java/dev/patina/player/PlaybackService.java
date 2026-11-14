@@ -43,7 +43,8 @@ import java.util.List;
  * Playlists and Folders; the tree comes from the Rust library
  * (patina_core::browse::auto) and picking a song there plays its list from
  * that song. Beside the transport the car shows a heart for the song
- * playing and a shuffle button.
+ * playing and a shuffle button, and its queue screen lists what's
+ * coming up (picking a song there plays it).
  *
  * A car can bind this with the app closed. Then there's no player yet,
  * and this starts one without the window (Native.initWithoutWindow), so
@@ -93,6 +94,9 @@ public class PlaybackService extends MediaBrowserService {
     // 0 can't be hearted, 1 not hearted, 2 hearted.
     private static int loved;
     private static boolean shuffle;
+    // The car's queue screen: part of the queue around the song playing.
+    private static List<MediaSession.QueueItem> queue = new ArrayList<>();
+    private static long queueActive = -1;
 
     private MediaSession session;
     private AudioManager audio;
@@ -133,6 +137,31 @@ public class PlaybackService extends MediaBrowserService {
             } else {
                 ctx.startService(i);
             }
+        }
+    }
+
+    /** From Native.onQueue, on the main thread. */
+    static void queue(long[] ids, String[] texts, long current) {
+        List<MediaSession.QueueItem> q = new ArrayList<>(ids.length);
+        for (int i = 0; i < ids.length && i * 3 + 2 < texts.length; i++) {
+            MediaDescription.Builder d = new MediaDescription.Builder()
+                .setMediaId("queue:" + ids[i])
+                .setTitle(texts[i * 3]);
+            String sub = texts[i * 3 + 1];
+            if (sub != null && !sub.isEmpty()) {
+                d.setSubtitle(sub);
+            }
+            String art = texts[i * 3 + 2];
+            if (art != null && !art.isEmpty()) {
+                d.setIconUri(ArtProvider.uriFor(art));
+            }
+            q.add(new MediaSession.QueueItem(d.build(), ids[i]));
+        }
+        queue = q;
+        queueActive = current;
+        if (running != null) {
+            running.session.setQueue(queue.isEmpty() ? null : queue);
+            running.refresh();
         }
     }
 
@@ -189,6 +218,10 @@ public class PlaybackService extends MediaBrowserService {
                     Native.playMediaId("search:" + (query == null ? "" : query));
                 }
             }
+            // Picked in the car's queue screen.
+            @Override public void onSkipToQueueItem(long id) {
+                Native.command(Native.QUEUE_ITEM, id);
+            }
             // The car's heart and shuffle buttons.
             @Override public void onCustomAction(String action, Bundle extras) {
                 if (ACT_LOVE.equals(action)) {
@@ -202,6 +235,10 @@ public class PlaybackService extends MediaBrowserService {
         extras.putBoolean(RESERVE_NEXT, true);
         extras.putBoolean(RESERVE_PREV, true);
         session.setExtras(extras);
+        session.setQueueTitle("Queue");
+        if (!queue.isEmpty()) {
+            session.setQueue(queue);
+        }
         session.setActive(true);
         // Android Auto and other media browsers reach the session through this.
         setSessionToken(session.getSessionToken());
@@ -282,8 +319,12 @@ public class PlaybackService extends MediaBrowserService {
                 | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_STOP
                 | PlaybackState.ACTION_PLAY_FROM_MEDIA_ID
                 | PlaybackState.ACTION_PLAY_FROM_SEARCH
+                | PlaybackState.ACTION_SKIP_TO_QUEUE_ITEM
                 | (duration > 0 ? PlaybackState.ACTION_SEEK_TO : 0))
             .setState(ps, position, state == Native.PLAYING ? 1f : 0f, positionAt);
+        if (queueActive >= 0) {
+            pb.setActiveQueueItemId(queueActive);
+        }
         // The car shows these beside the transport: heart first, then
         // shuffle, each drawn as it is now.
         if (loved > 0) {

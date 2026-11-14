@@ -22,6 +22,8 @@ pub enum Req {
     Track(PathBuf),
     /// A folder: a cover image inside it.
     Dir(PathBuf),
+    /// An artist's picture, by name: from their folder or a server.
+    Artist(String),
 }
 
 impl Req {
@@ -32,6 +34,7 @@ impl Req {
                 d.starts_with(dir) || patina_core::library::tags::album_dir(d) == dir
             }),
             Req::Dir(d) => d.starts_with(dir) || patina_core::library::tags::album_dir(d) == dir,
+            Req::Artist(_) => false,
         }
     }
 }
@@ -54,6 +57,23 @@ type Done = (Key, Option<SharedPixelBuffer<Rgba8Pixel>>);
 struct Waiting {
     keys: Mutex<VecDeque<Key>>,
     ready: Condvar,
+}
+
+thread_local! {
+    /// Each worker's own connection to the library, for finding an
+    /// artist's folder and servers.
+    static LIB: std::cell::RefCell<Option<patina_core::library::Library>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn with_library<T>(f: impl FnOnce(&patina_core::library::Library) -> Option<T>) -> Option<T> {
+    LIB.with(|l| {
+        let mut l = l.borrow_mut();
+        if l.is_none() {
+            *l = patina_core::library::Library::open(&patina_core::config::library_db_path()).ok();
+        }
+        f(l.as_ref()?)
+    })
 }
 
 pub struct ArtCache {
@@ -92,6 +112,9 @@ impl ArtCache {
                         let img = match &key.0 {
                             Req::Track(p) => patina_core::art::load(p, key.1),
                             Req::Dir(d) => patina_core::art::load_dir(d, key.1),
+                            Req::Artist(name) => {
+                                with_library(|lib| patina_core::artist_art::load(lib, name, key.1))
+                            }
                         };
                         let buf = img.map(|i| {
                             SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
@@ -135,6 +158,12 @@ impl ArtCache {
             self.waiting.ready.notify_one();
         }
         None
+    }
+
+    /// Asked for and still loading, so a placeholder can shimmer
+    /// instead of showing "no cover".
+    pub fn loading(&self, req: &Req, size: u32) -> bool {
+        self.pending.contains(&(req.clone(), size))
     }
 
     /// Take finished loads. True if anything new arrived.

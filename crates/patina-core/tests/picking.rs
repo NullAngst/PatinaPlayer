@@ -1142,3 +1142,22 @@ fn smart_playlists_leave_songs_out() {
         leave_out
     );
 }
+
+#[test]
+fn an_artist_picture_comes_from_the_artist_folder() {
+    let fx = fixture();
+    let b = browser(&fx);
+    let lib = b.lib.as_ref().unwrap();
+    // Nothing there yet.
+    assert_eq!(patina_core::artist_art::local_file(lib, "Nirvana"), None);
+    let img = image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3]));
+    img.save(fx.root.join("Nirvana/artist.jpg")).unwrap();
+    assert_eq!(
+        patina_core::artist_art::local_file(lib, "nirvana"),
+        Some(fx.root.join("Nirvana/artist.jpg"))
+    );
+    // A folder.jpg in the library folder itself is the library's, not an
+    // artist's.
+    img.save(fx.root.join("folder.jpg")).unwrap();
+    assert_eq!(patina_core::artist_art::local_file(lib, "Someone"), None);
+}

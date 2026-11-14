@@ -3,10 +3,13 @@
 
 pub mod amp;
 pub mod art;
+pub mod artist_art;
 pub mod audio;
 pub mod browse;
 pub mod cache;
+pub mod cast;
 pub mod config;
+pub mod control;
 pub mod cover;
 pub mod dsp;
 pub mod eq;

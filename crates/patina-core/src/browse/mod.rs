@@ -5,6 +5,7 @@
 
 pub mod amp;
 pub mod auto;
+mod cast;
 pub mod covers;
 mod downloads;
 pub mod eq;
@@ -188,6 +189,29 @@ pub struct Browser {
     /// Sections whose levels are out of date, refreshed when next opened.
     /// Background changes (a sync, a scan) refresh only what's on screen.
     stale: HashSet<Section>,
+    /// Devices found to play on, and the search for them.
+    cast_found: Vec<crate::cast::Target>,
+    cast_job: Option<Receiver<Vec<crate::cast::Target>>>,
+    /// Bumped when `cast_found` changes or a search starts or ends.
+    pub cast_generation: u64,
+    /// Other players controlling this one: the server, what it asks the
+    /// browser to do, and the heart it reports.
+    remote_server: Option<crate::control::Server>,
+    remote_asks: (
+        crossbeam_channel::Sender<crate::control::Ask>,
+        Receiver<crate::control::Ask>,
+    ),
+    remote_loved: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    /// Players found to control.
+    control_found: Vec<crate::control::Found>,
+    control_job: Option<Receiver<Vec<crate::control::Found>>>,
+    pub control_generation: u64,
+    /// A section opened from the sidebar whose first build waits a moment,
+    /// so the window can draw placeholder rows while it's read.
+    pending: Option<Section>,
+    /// Set by a front end that calls `finish_pending` on its next frame.
+    /// Off, `switch_soon` builds right away like `switch`.
+    pub defer_builds: bool,
     /// How long refreshing the open views took last time, so a long sync
     /// doesn't keep the window busy re-reading a huge list.
     pub(crate) refresh_cost: Duration,
@@ -312,6 +336,17 @@ impl Browser {
             generation: 0,
             side_generation: 0,
             stale: HashSet::new(),
+            pending: None,
+            defer_builds: false,
+            cast_found: Vec::new(),
+            cast_job: None,
+            cast_generation: 0,
+            remote_server: None,
+            remote_asks: unbounded(),
+            remote_loved: Default::default(),
+            control_found: Vec::new(),
+            control_job: None,
+            control_generation: 0,
             refresh_cost: Duration::ZERO,
             devices_job: None,
             roots_checked: Instant::now(),
@@ -324,6 +359,7 @@ impl Browser {
             ipod: crate::ipod::IpodState::default(),
         };
         b.rebuild_sidebar();
+        b.apply_remote_control();
         b
     }
 
@@ -410,6 +446,7 @@ impl Browser {
         self.amp_tick();
         self.poll_lyrics();
         self.poll_ipod();
+        self.poll_cast();
         for ev in &events {
             if let Event::Played(path) = ev {
                 self.after_played(path);
@@ -628,7 +665,7 @@ impl Browser {
     /// Open a sidebar entry. A source opens its folder tree under Folders.
     pub fn activate_sidebar(&mut self, index: usize) {
         match self.sidebar.get(index).cloned() {
-            Some(SideEntry::Section(s)) => self.switch(s),
+            Some(SideEntry::Section(s)) => self.switch_soon(s),
             Some(SideEntry::Source { path, .. }) => {
                 self.switch(Section::Folders);
                 if let Some(stack) = self.stacks.get_mut(&Section::Folders) {
@@ -655,6 +692,46 @@ impl Browser {
     // ----- Levels -----
 
     pub fn switch(&mut self, s: Section) {
+        self.open_section(s, false);
+    }
+
+    /// Switch, but leave a first build that could take a while (a big
+    /// library, a server) for `finish_pending`. The window draws
+    /// placeholder rows in between, so the click shows at once.
+    pub fn switch_soon(&mut self, s: Section) {
+        self.open_section(s, true);
+    }
+
+    /// The open section is waiting on its first build.
+    pub fn loading(&self) -> bool {
+        self.pending == Some(self.section) && !self.stacks.contains_key(&self.section)
+    }
+
+    /// Build what `switch_soon` left. Nothing if it was built since, or
+    /// another section was opened instead.
+    pub fn finish_pending(&mut self) {
+        let Some(s) = self.pending.take() else {
+            return;
+        };
+        if s == self.section && !self.stacks.contains_key(&s) {
+            self.build_section(s);
+            self.touch();
+        }
+    }
+
+    fn build_section(&mut self, s: Section) {
+        let level = self.build(&Source::Section(s));
+        if level.is_none() {
+            log::info!(
+                "nav: {s:?} opened with nothing to show ({:?})",
+                self.view_error
+            );
+        }
+        self.stacks.insert(s, level.into_iter().collect());
+    }
+
+    fn open_section(&mut self, s: Section, soon: bool) {
+        self.pending = None;
         self.section = s;
         self.view_error = None;
         if s == Section::Settings {
@@ -667,14 +744,11 @@ impl Browser {
             self.refresh_section(s);
         }
         if s != Section::Queue && !self.stacks.contains_key(&s) {
-            let level = self.build(&Source::Section(s));
-            if level.is_none() {
-                log::info!(
-                    "nav: {s:?} opened with nothing to show ({:?})",
-                    self.view_error
-                );
+            if soon && self.defer_builds && s.slow_first_build() {
+                self.pending = Some(s);
+            } else {
+                self.build_section(s);
             }
-            self.stacks.insert(s, level.into_iter().collect());
         }
         log::info!("nav: switch to {s:?}, depth {}", self.depth());
         self.sync_sidebar_sel();
@@ -695,6 +769,7 @@ impl Browser {
                 lastfm: self.scrobble.as_ref().map(|s| s.status()),
                 listenbrainz: self.listenbrainz.as_ref().map(|l| l.status()),
                 outputs: &self.outputs,
+                remote_port: self.remote_server.as_ref().map(|s| s.port()),
             },
             stations: &self.stations,
             checks: &self.checks,
@@ -761,6 +836,8 @@ impl Browser {
     }
 
     pub fn push(&mut self, src: Source) {
+        // Opened on top of a section still waiting: its root goes first.
+        self.finish_pending();
         if let Some(l) = self.build(&src) {
             log::info!(
                 "nav: open {src:?} in {:?}, {} items, title {:?}",
@@ -1770,6 +1847,7 @@ impl Browser {
                 lastfm: self.scrobble.as_ref().map(|s| s.status()),
                 listenbrainz: self.listenbrainz.as_ref().map(|l| l.status()),
                 outputs: self.outputs.clone(),
+                remote_port: self.remote_server.as_ref().map(|s| s.port()),
             },
         )
         .into_iter()
@@ -1846,6 +1924,10 @@ impl Browser {
                     let v = &options[*index].0;
                     w(config::set_value(&path, "appearance", "theme", v.as_str()))?;
                     self.config.appearance.theme = v.parse().unwrap_or_default();
+                }
+                (Key::CoverAccent, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "appearance", "cover_accent", *on))?;
+                    self.config.appearance.cover_accent = *on;
                 }
                 (Key::Backdrop, Control::Choice { options, index }) => {
                     let v = &options[*index].0;
@@ -2000,6 +2082,10 @@ impl Browser {
                     _,
                 ) => self.change_lastfm_setting(key, &new)?,
                 (Key::IpodFormat, _) => self.change_ipod_setting(&new)?,
+                (
+                    Key::CastSnapcast | Key::RemoteEnabled | Key::RemoteCode | Key::ControlAnother,
+                    _,
+                ) => self.change_cast_setting(key, &new)?,
                 (Key::Limiter | Key::LimiterCeiling, _) => self.change_limiter(key, &new)?,
                 (
                     Key::ChannelOn

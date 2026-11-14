@@ -596,6 +596,19 @@ impl Client for Ampache {
         Ok(songs.into_iter().filter_map(|n| n.id).collect())
     }
 
+    fn artist_image(&self, name: &str, size: u32) -> Result<Option<Vec<u8>>> {
+        let v = self.get("artists", &[("filter", name.into()), ("exact", "1".into())])?;
+        let hits: Vec<super::Named> = self.items(v, "artist")?;
+        let Some(id) = hits
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .and_then(|a| a.id)
+        else {
+            return Ok(None);
+        };
+        Ok(self.cover(&format!("artist:{id}"), size).ok())
+    }
+
     fn similar_artists(&self, artist: &str, count: usize) -> Result<Vec<String>> {
         let v = self.get(
             "artists",

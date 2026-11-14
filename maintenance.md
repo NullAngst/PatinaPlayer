@@ -40,6 +40,7 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 1. Install the latest APK from a release on your phone and open it.
 2. Long press the home screen, add the PatinaPlayer widget, play something, and check the cover, title and buttons follow it.
 3. In the car, or in the Android Auto desktop head unit (`desktop-head-unit` from the SDK's extras), browse each tab (Home, Artists, Albums, Playlists, Folders) and play something from each. Tap the heart and shuffle buttons beside the transport and check the app agrees, and that they show a heart and the shuffle arrows (not a blank square or circle). Albums, a letter and Recently added should show covers. If the buttons go blank after an Android Auto update, check the `ICON_` numbers in `PlaybackService.java` against `CommandButton.java` in androidx/media; if covers go missing, `adb logcat` while browsing shows any error from `ArtProvider`.
+3.25. Play an album from the car, then open the car's queue screen (the list icon on Now Playing). It should list what's coming up with covers, the playing song marked, and tapping one should play it. The queue goes over in `Media::report_queue` (`crates/patina-android/src/lib.rs`) and `PlaybackService.queue`.
 3.5. Close the app (swipe it away), then connect the car or start the head unit. It should browse and play without the app being opened. Then open the app on the phone: the same song keeps playing, with no restart. If the car says "Open PatinaPlayer on the phone" instead, the player couldn't start without the window; `adb logcat -s PatinaPlayer` says why.
 4. The target SDK is whatever platform is newest on the runner (`TARGET_SDK` in `packaging/build-apk.sh`), so it moves up on its own. When it does, a new Android version's rules can change how background playback or notifications behave. If something stops working after a runner update, that's the first place to look.
 
@@ -48,6 +49,14 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 1. Right-click an album, Find cover art. If one of iTunes, Deezer or MusicBrainz stops answering, its results just go missing: the parsers are `parse_itunes`, `parse_deezer` and `parse_musicbrainz` in `crates/patina-core/src/cover.rs`, each with a test of the answer's shape. Compare against a real answer (open the URL the code builds in a browser) and fix the field names there.
 2. MusicBrainz asks for a User-Agent naming the app and a contact. It's in `http()` in the same file; keep the URL in it current.
 3. Speed on a big library: `cargo run --release -p patina-core --example bigbench` makes a made-up 85,000 song library and times every view's query. Run it before and after anything that touches `library/mod.rs` or the queries in `browse/model.rs`. Nothing there should take more than a quarter of a second on a desktop.
+
+## 5.6. Other devices and the remote control
+
+1. Play on a Chromecast: cast button, pick it, and check the song comes out of it within a few seconds and that pause and skip follow. If it stops connecting after a Chromecast update, check `rust_cast` for a new version (it speaks Google's protocol) and the steps in `crates/patina-core/src/cast/chromecast.rs`.
+2. Play on a DLNA renderer (gmrender-resurrect or Kodi will do, on any Linux box). `crates/patina-core/src/cast/dlna.rs` sends SetAVTransportURI, then Play. A renderer that refuses the stream usually says why in its SOAP fault; the app shows it.
+3. Play on Snapcast: a snapserver with `source = tcp://0.0.0.0:4953?name=Patina&mode=server`. `cargo test -p patina-core --test cast` already checks the PCM that goes out, with a stand-in snapserver.
+4. Remote control: turn it on in Settings on the desktop, then from a phone, Settings, Other devices, Control another player. The desktop should be listed by its machine name. `cargo test -p patina-core --test control` drives a real player through the client.
+5. `mdns-sd` and `rust_cast` move fast. When updating either, run the two tests above and steps 1 and 4 by hand, since mDNS needs a real network.
 
 ## 6. ListenBrainz and Last.fm
 

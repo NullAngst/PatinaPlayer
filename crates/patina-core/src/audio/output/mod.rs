@@ -202,6 +202,9 @@ pub struct OutputConfig {
     pub dither: bool,
     /// Crossfade between songs, 0 to 12000 ms.
     pub crossfade_ms: u32,
+    /// Playing on another device instead (a Chromecast, a DLNA renderer,
+    /// a snapserver). Not saved: each launch starts on this one.
+    pub cast: Option<crate::cast::Target>,
 }
 
 impl Default for OutputConfig {
@@ -217,6 +220,7 @@ impl Default for OutputConfig {
             format: SampleFormat::Auto,
             dither: true,
             crossfade_ms: 0,
+            cast: None,
         }
     }
 }
@@ -236,6 +240,9 @@ pub enum OutputError {
     /// The device can't play this rate. It offered `got`.
     #[error("{device} can't play {want} Hz (it offered {got} Hz)")]
     Rate { device: String, want: u32, got: u32 },
+    /// Couldn't start playing on another device.
+    #[error("{0}")]
+    Cast(String),
 }
 
 /// A running output. Stops when dropped.
@@ -337,6 +344,13 @@ fn alsa_outputs() -> Vec<OutDevice> {
 
 /// Open an output for this renderer's format.
 pub fn open(cfg: &OutputConfig, renderer: Renderer) -> Result<Box<dyn Output>, OutputError> {
+    if let Some(t) = &cfg.cast {
+        return Ok(Box::new(crate::cast::CastOutput::start(
+            t,
+            "PatinaPlayer",
+            renderer,
+        )?));
+    }
     match cfg.backend {
         Backend::Null => Ok(Box::new(null::NullOutput::start(renderer, None))),
         // Android has one way out: AAudio.

@@ -233,6 +233,8 @@ export struct Row {
     selectable: bool,
     art: image,
     has-art: bool,
+    // Its cover is still being read: a shimmer, not the "no cover" mark.
+    wait: bool,
     downloaded: bool,
     // Settings rows (kind 12): 1 toggle, 2 choice, 3 number, 4 text,
     // 5 library folder, 6 add folder, 7 read-only.
@@ -274,6 +276,7 @@ export struct QueueRow {
     marked: bool,
     art: image,
     has-art: bool,
+    wait: bool,
 }
 
 // One EQ band as the EQ panel draws it.
@@ -393,6 +396,8 @@ export global Icons {
     out property <string> top-albums: "M8 4h8v5a4 4 0 0 1 -8 0zM8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1 -3 4M12 13v4M8 20h8M10 17h4";
     out property <string> top-artists: "M12 3l2.7 5.6 6.1 .9 -4.4 4.3 1 6.1 -5.4 -2.9 -5.4 2.9 1 -6.1 -4.4 -4.3 6.1 -.9z";
     out property <string> output: "M6 3h12v18H6zM9 14a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M12 7h0";
+    // A screen with waves from its corner: playing on another device.
+    out property <string> cast: "M3 8V6a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-6M3 19h.01M3 15a4 4 0 0 1 4 4M3 11a8 8 0 0 1 8 8";
     out property <string> heart: "M12 21C10 19 3 14 3 8.5A4.5 4.5 0 0 1 12 6a4.5 4.5 0 0 1 9 2.5C21 14 14 19 12 21z";
     // A four-point sparkle.
     out property <string> sparkle: "M12 2C12.8 8 16 11.2 22 12C16 12.8 12.8 16 12 22C11.2 16 8 12.8 2 12C8 11.2 11.2 8 12 2z";
@@ -429,10 +434,25 @@ component Tip inherits Rectangle {
     }
 }
 
+// The cover's own color for the transport and Now Playing, when Settings
+// turns that on; the theme's accent otherwise. Rust picks it from the
+// cover playing.
+export global Tint {
+    in property <bool> on;
+    in property <color> c;
+    // What reads on top of it: dark or light.
+    in property <color> on-c;
+    out property <color> accent: root.on ? root.c : P.verdigris;
+    out property <color> on-accent: root.on ? root.on-c : P.on-accent;
+    out property <color> hover: root.on ? root.c.brighter(0.12) : P.accent-hover;
+}
+
 component IconButton inherits Rectangle {
     in property <string> icon;
     in property <bool> filled: false;
     in property <bool> active: false;
+    // The color it lights up in when active.
+    in property <color> tint: P.verdigris;
     in property <bool> enabled: true;
     in property <length> icon-size: 18px;
     in property <string> tip;
@@ -450,14 +470,14 @@ component IconButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         d: icon;
         size: icon-size;
-        stroke: !enabled ? P.border : (active ? P.verdigris : (ta.has-hover ? P.text : P.muted));
+        stroke: !enabled ? P.border : (active ? root.tint : (ta.has-hover ? P.text : P.muted));
     }
     if filled: FilledIcon {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         d: icon;
         size: icon-size;
-        fill: !enabled ? P.border : (active ? P.verdigris : (ta.has-hover ? P.text : P.muted));
+        fill: !enabled ? P.border : (active ? root.tint : (ta.has-hover ? P.text : P.muted));
     }
     ta := TouchArea {
         mouse-cursor: enabled ? pointer : default;
@@ -612,11 +632,61 @@ component SleepButton inherits Rectangle {
     }
 }
 
+// A soft pulse where something is still loading.
+component Shimmer inherits Rectangle {
+    in property <length> radius: 0px;
+    in property <float> dim: 1;
+    border-radius: radius;
+    background: P.border;
+    opacity: (0.35 + 0.25 * sin(animation-tick() / 1ms * 0.3deg)) * dim;
+}
+
+// Rows standing in for a section that's still being read.
+component SkeletonRows inherits VerticalLayout {
+    in property <bool> thumbs: true;
+    padding-top: 6px;
+    spacing: 0px;
+    for w[i] in [0.62, 0.48, 0.71, 0.55, 0.66, 0.42, 0.58, 0.69, 0.5, 0.6]: HorizontalLayout {
+        height: 44px;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        alignment: start;
+        if root.thumbs: Shimmer {
+            y: 7px;
+            width: 30px;
+            height: 30px;
+            radius: 4px * P.round;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 6px;
+            Shimmer {
+                width: 320px * w;
+                height: 10px;
+                radius: 5px;
+            }
+            Shimmer {
+                width: 200px * w;
+                height: 8px;
+                radius: 4px;
+                dim: 0.7;
+            }
+        }
+    }
+}
+
 component Cover inherits Rectangle {
     in property <image> art;
     in property <bool> has-art;
     in property <length> radius: 6px;
-    border-radius: radius * P.round;
+    // Round, for an artist's picture.
+    in property <bool> round;
+    // What shows when there's no picture.
+    in property <string> empty-icon: Icons.disc;
+    // The picture is still being read.
+    in property <bool> waiting;
+    border-radius: root.round ? min(self.width, self.height) / 2 : radius * P.round;
     background: P.raised;
     border-width: has-art ? 0px : 1px;
     border-color: P.border;
@@ -627,10 +697,14 @@ component Cover inherits Rectangle {
         height: parent.height;
         image-fit: cover;
     }
-    if !has-art: Icon {
+    if !has-art && waiting: Shimmer {
+        width: parent.width;
+        height: parent.height;
+    }
+    if !has-art && !waiting: Icon {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        d: Icons.disc;
+        d: root.empty-icon;
         size: min(parent.width, parent.height) * 0.35;
         stroke: P.wave;
         stroke-width: 1.2px;
@@ -690,6 +764,69 @@ component CoverMenu inherits Rectangle {
                 }
                 if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
                     hold.running = false;
+                }
+            }
+        }
+    }
+}
+
+// Speed and silence skipping for a podcast, on its speed chip. A click
+// steps the speed (or opens the menu where `tap-opens`); a right click
+// or a long press opens the menu.
+component SpeedMenu inherits Rectangle {
+    in property <float> tempo: 1;
+    in property <bool> trim;
+    in property <bool> tap-opens;
+    callback clicked;
+    callback set-speed(float);
+    callback toggle-trim;
+    cma := ContextMenuArea {
+        Menu {
+            for v in [0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.5, 3.0]: MenuItem {
+                title: (v == 1 ? "Normal speed" : v + "x") + (abs(root.tempo - v) < 0.05 ? "  (now)" : "");
+                activated => { root.set-speed(v); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: root.trim ? "Skip silence: on" : "Skip silence: off";
+                activated => { root.toggle-trim(); }
+            }
+        }
+        hold := Timer {
+            interval: LongPress.after;
+            running: false;
+            triggered => {
+                self.running = false;
+                if ta.pressed {
+                    ta.held = true;
+                    cma.show({ x: ta.mouse-x, y: ta.mouse-y });
+                }
+            }
+        }
+        ta := TouchArea {
+            in-out property <bool> held;
+            mouse-cursor: pointer;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    self.held = false;
+                    if e.button == PointerEventButton.right {
+                        cma.show({ x: self.mouse-x, y: self.mouse-y });
+                    } else if e.button == PointerEventButton.left && Ui.touch && !root.tap-opens {
+                        hold.running = false;
+                        hold.running = true;
+                    }
+                }
+                if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                    hold.running = false;
+                }
+            }
+            clicked => {
+                if self.held {
+                    self.held = false;
+                } else if root.tap-opens {
+                    cma.show({ x: self.mouse-x, y: self.mouse-y });
+                } else {
+                    root.clicked();
                 }
             }
         }
@@ -1079,15 +1216,18 @@ component ListRow inherits Rectangle {
                 color: item.marked || item.playing || (item.kind == 4 && item.on) || (item.kind == 5 && item.fixed) ? P.accent-text : (P.kawaii ? P.muted : P.wave);
             }
         }
-        if item.kind == 1 || item.kind == 3: Rectangle {
+        if item.kind == 1 || item.kind == 3 || item.kind == 2: Rectangle {
             width: 30px;
             Cover {
                 y: (parent.height - self.height) / 2;
                 width: 30px;
                 height: 30px;
                 radius: 4px;
+                round: item.kind == 2;
+                empty-icon: item.kind == 2 ? Icons.artists : Icons.disc;
                 art: item.art;
                 has-art: item.has-art;
+                waiting: item.wait;
             }
         }
         Text {
@@ -1603,6 +1743,7 @@ component AlbumTile inherits Rectangle {
                 height: parent.height;
                 art: item.art;
                 has-art: item.has-art;
+                waiting: item.wait;
                 radius: 6px;
                 // Its server is away and none of it is kept: faded.
                 opacity: item.off ? 0.35 : 1.0;
@@ -1803,7 +1944,7 @@ component QueueLine inherits Rectangle {
             font-size: 12px;
             color: q.playing ? P.accent-text : (P.kawaii ? P.muted : P.wave);
         }
-        Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; }
+        Cover { width: 40px; height: 40px; radius: 4px; art: q.art; has-art: q.has-art; waiting: q.wait; }
         VerticalLayout {
             alignment: center;
             line-title := Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.failed ? P.copper : (q.playing ? P.accent-text : (q.off ? P.wave : P.text)); }
@@ -2212,8 +2353,21 @@ component NowPlayingPhone inherits Rectangle {
     in property <string> sleep-label;
     in property <bool> lyrics-open;
     in property <bool> queue-open;
+    // Steering another player: no sleep timer, menu, lyrics or casting
+    // here, and the heading names it.
+    in property <bool> remote;
+    in property <string> heading: P.kawaii ? "いま きいてる" : "Now Playing";
+    // Playing on another device: the cast button lights up.
+    in property <bool> casting;
+    callback cast;
+    // A podcast's speed ("1.5x trim"); empty for music.
+    in property <string> speed-label;
+    in property <float> speed-tempo: 1;
+    in property <bool> speed-trim;
     callback close;
     callback act(string);
+    callback speed-set(float);
+    callback trim-toggle;
     callback play-pause;
     callback prev;
     callback next;
@@ -2230,6 +2384,10 @@ component NowPlayingPhone inherits Rectangle {
     // The room everything but the cover takes, so the cover gets the rest.
     property <length> rest: 438px;
     property <length> side: max(120px, min(self.width - 48px, self.height - self.rest, 560px));
+    // How far a swipe down has the page moved.
+    property <length> drag: down.swiping ? max(0px, down.current-position.y - down.pressed-position.y) : 0px;
+    // How far a swipe across has the cover moved.
+    property <length> slide: across.swiping ? across.current-position.x - across.pressed-position.x : 0px;
     background: P.bg;
     // Nothing under it takes a tap.
     TouchArea {}
@@ -2239,360 +2397,442 @@ component NowPlayingPhone inherits Rectangle {
         art: root.blur;
         strength: root.wash;
     }
-    VerticalLayout {
-        padding-left: 24px;
-        padding-right: 24px;
-        padding-top: 6px;
-        padding-bottom: 14px;
-        spacing: 0px;
-        // Top: close, the name, the sleep timer and the menu.
-        HorizontalLayout {
-            height: 52px;
-            IconButton {
-                y: (parent.height - self.height) / 2;
-                width: 44px;
-                height: 44px;
-                icon: Icons.chevron-down;
-                icon-size: 24px;
-                tip: "Close";
-                clicked => { root.close(); }
+    // Swipe down anywhere to close: the page follows the finger, and
+    // closes past a third of the way or so.
+    down := SwipeGestureHandler {
+        width: parent.width;
+        height: parent.height;
+        handle-swipe-down: true;
+        swiped => {
+            if self.current-position.y - self.pressed-position.y > min(140px, root.height / 4) {
+                root.close();
             }
-            Text {
-                horizontal-stretch: 1;
-                text: P.kawaii ? "いま きいてる" : "Now Playing";
-                font-size: 14px;
-                font-weight: 600;
-                color: P.text;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-            SleepButton {
-                y: (parent.height - self.height) / 2;
-                active: root.sleep-on;
-                label: root.sleep-label;
-                live: root.live;
-                act(a) => { root.sleep(a); }
-            }
-            Rectangle {
-                width: 44px;
-                more := ContextMenuArea {
-                    Menu {
-                        if root.has-track && root.rating >= 0: Menu {
-                            title: root.rating > 0 ? "Rated " + root.rating + " of 5" : "Rate";
-                            MenuItem { title: "★★★★★"; activated => { root.rate(5); } }
-                            MenuItem { title: "★★★★"; activated => { root.rate(4); } }
-                            MenuItem { title: "★★★"; activated => { root.rate(3); } }
-                            MenuItem { title: "★★"; activated => { root.rate(2); } }
-                            MenuItem { title: "★"; activated => { root.rate(1); } }
-                            MenuItem { title: "No rating"; activated => { root.rate(0); } }
+        }
+        VerticalLayout {
+            y: root.drag;
+            width: parent.width;
+            height: parent.height;
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 6px;
+            padding-bottom: 14px;
+            spacing: 0px;
+            // Top: close, the name, the sleep timer and the menu.
+            HorizontalLayout {
+                height: 52px;
+                IconButton {
+                    tint: Tint.accent;
+                    y: (parent.height - self.height) / 2;
+                    width: 44px;
+                    height: 44px;
+                    icon: Icons.chevron-down;
+                    icon-size: 24px;
+                    tip: "Close";
+                    clicked => { root.close(); }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.heading;
+                    overflow: elide;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: P.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                if root.remote: Rectangle { width: 44px; }
+                if !root.remote: SleepButton {
+                    y: (parent.height - self.height) / 2;
+                    active: root.sleep-on;
+                    label: root.sleep-label;
+                    live: root.live;
+                    act(a) => { root.sleep(a); }
+                }
+                if !root.remote: Rectangle {
+                    width: 44px;
+                    more := ContextMenuArea {
+                        Menu {
+                            if root.has-track && root.rating >= 0: Menu {
+                                title: root.rating > 0 ? "Rated " + root.rating + " of 5" : "Rate";
+                                MenuItem { title: "★★★★★"; activated => { root.rate(5); } }
+                                MenuItem { title: "★★★★"; activated => { root.rate(4); } }
+                                MenuItem { title: "★★★"; activated => { root.rate(3); } }
+                                MenuItem { title: "★★"; activated => { root.rate(2); } }
+                                MenuItem { title: "★"; activated => { root.rate(1); } }
+                                MenuItem { title: "No rating"; activated => { root.rate(0); } }
+                            }
+                            if root.has-track && !root.live: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
+                            if root.has-track && !root.live: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
+                            if root.has-track && !root.live: MenuSeparator {}
+                            if root.has-track && !root.live: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
+                            if root.has-track && !root.live: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
+                            if root.has-track: MenuSeparator {}
+                            if root.has-track: MenuItem { title: "Sound chain…"; activated => { root.act("chain"); } }
                         }
-                        if root.has-track && !root.live: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
-                        if root.has-track && !root.live: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
-                        if root.has-track && !root.live: MenuSeparator {}
-                        if root.has-track && !root.live: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
-                        if root.has-track && !root.live: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
-                        if root.has-track: MenuSeparator {}
-                        if root.has-track: MenuItem { title: "Sound chain…"; activated => { root.act("chain"); } }
+                        IconButton {
+                            tint: Tint.accent;
+                            y: (parent.height - self.height) / 2;
+                            width: 44px;
+                            height: 44px;
+                            icon: Icons.more;
+                            filled: true;
+                            icon-size: 20px;
+                            tip: "More";
+                            clicked => { more.show({ x: 0px, y: 0px }); }
+                        }
                     }
+                }
+            }
+            Rectangle { vertical-stretch: 1; min-height: 6px; }
+            // The cover.
+            HorizontalLayout {
+                alignment: center;
+                across := SwipeGestureHandler {
+                    width: root.side;
+                    height: root.side;
+                    // Swipe the cover left for the next song, right for
+                    // the one before.
+                    handle-swipe-left: root.has-track;
+                    handle-swipe-right: root.has-track;
+                    swiped => {
+                        if self.current-position.x - self.pressed-position.x < -60px {
+                            root.next();
+                        } else if self.current-position.x - self.pressed-position.x > 60px {
+                            root.prev();
+                        }
+                    }
+                    Cover {
+                        x: root.slide;
+                        opacity: 1 - min(0.6, abs(root.slide) / root.side);
+                        width: root.side;
+                        height: root.side;
+                        art: root.art;
+                        has-art: root.has-art;
+                        radius: 14px;
+                        drop-shadow-blur: 24px;
+                        drop-shadow-offset-y: 6px;
+                        drop-shadow-color: P.shadow;
+                        if !root.remote: CoverMenu {
+                            width: parent.width;
+                            height: parent.height;
+                            act(a) => { root.act(a); }
+                        }
+                    }
+                }
+            }
+            Rectangle { vertical-stretch: 1; min-height: 14px; }
+            // Title and artist, with the heart.
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { width: 40px; }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 3px;
+                    Text {
+                        text: root.has-track ? root.title : "Nothing playing";
+                        font-family: P.serif;
+                        font-weight: P.kawaii ? 900 : 700;
+                        font-size: 22px;
+                        color: root.has-track ? P.text : P.muted;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                        PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
+                    }
+                    Text {
+                        text: root.artist;
+                        font-size: 15px;
+                        color: P.muted;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                        PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
+                    }
+                }
+                Rectangle {
+                    width: 40px;
+                    if root.love-state > 0: IconButton {
+                        tint: Tint.accent;
+                        y: (parent.height - self.height) / 2;
+                        width: 40px;
+                        height: 40px;
+                        icon: Icons.heart;
+                        icon-size: 22px;
+                        tip: root.love-state == 2 ? "Hearted" : "Heart";
+                        filled: root.love-state == 2;
+                        active: root.love-state == 2;
+                        clicked => { root.love(); }
+                    }
+                }
+            }
+            // Stars, small, for a song that's been rated.
+            HorizontalLayout {
+                height: 22px;
+                alignment: center;
+                if root.has-track && root.rating > 0: HorizontalLayout {
+                    for n in [1, 2, 3, 4, 5]: Text {
+                        width: 18px;
+                        text: n <= root.rating ? "★" : "☆";
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        color: n <= root.rating ? P.copper : P.wave;
+                        TouchArea { clicked => { root.rate(n == root.rating ? 0 : n); } }
+                    }
+                }
+            }
+            // Seek, with the times at its ends and the format between them.
+            VerticalLayout {
+                spacing: 2px;
+                if !root.live: Bar {
+                    height: 28px;
+                    label: "Seek";
+                    fill: Tint.accent;
+                    value: root.position;
+                    enabled: root.has-track;
+                    show-knob: true;
+                    knob: 16px;
+                    changed(v) => { root.seek(v); }
+                }
+                if root.live: Text {
+                    height: 28px;
+                    text: "live";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    color: P.verdigris;
+                }
+                HorizontalLayout {
+                    height: 26px;
+                    Text { width: 60px; text: root.elapsed; font-family: P.mono; font-size: 12px; color: P.muted; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.format != "": Rectangle {
+                        width: fmt.preferred-width + 20px;
+                        height: 24px;
+                        y: 1px;
+                        border-radius: 12px;
+                        background: P.raised;
+                        fmt := Text {
+                            text: root.format;
+                            font-family: P.mono;
+                            font-size: 11px;
+                            color: P.accent-text;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.format != "" && root.speed-label != "": Rectangle { width: 8px; }
+                    // A podcast: tap for speed and silence skipping.
+                    if root.speed-label != "": Rectangle {
+                        width: spd.preferred-width + 20px;
+                        height: 24px;
+                        y: 1px;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: root.speed-label == "1.0x" ? P.border : P.copper-dim;
+                        background: P.raised;
+                        spd := Text {
+                            text: root.speed-label;
+                            font-family: P.mono;
+                            font-size: 11px;
+                            color: root.speed-label == "1.0x" ? P.muted : P.copper;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        SpeedMenu {
+                            width: parent.width;
+                            height: parent.height;
+                            tap-opens: true;
+                            tempo: root.speed-tempo;
+                            trim: root.speed-trim;
+                            set-speed(v) => { root.speed-set(v); }
+                            toggle-trim => { root.trim-toggle(); }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text { width: 60px; text: root.remaining; font-family: P.mono; font-size: 12px; color: P.muted; horizontal-alignment: right; vertical-alignment: center; }
+                }
+            }
+            Rectangle { height: 10px; }
+            // Transport.
+            HorizontalLayout {
+                height: 64px;
+                alignment: space-between;
+                Rectangle {
+                    width: 44px;
                     IconButton {
+                        tint: Tint.accent;
                         y: (parent.height - self.height) / 2;
                         width: 44px;
                         height: 44px;
-                        icon: Icons.more;
-                        filled: true;
-                        icon-size: 20px;
-                        tip: "More";
-                        clicked => { more.show({ x: 0px, y: 0px }); }
+                        icon: Icons.shuffle;
+                        icon-size: 22px;
+                        tip: "Shuffle";
+                        active: root.shuffle;
+                        clicked => { root.toggle-shuffle(); }
+                    }
+                }
+                Rectangle {
+                    width: 64px;
+                    height: 52px;
+                    y: 6px;
+                    border-radius: 16px * P.round;
+                    background: pv.pressed ? P.chip-hover : P.raised;
+                    FilledIcon {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        d: Icons.prev;
+                        size: 22px;
+                        fill: P.text;
+                    }
+                    pv := TouchArea { clicked => { root.prev(); } }
+                    accessible-role: button;
+                    accessible-label: "Back";
+                }
+                Rectangle {
+                    width: 96px;
+                    height: 64px;
+                    border-radius: 32px;
+                    background: pp.pressed ? Tint.hover : Tint.accent;
+                    drop-shadow-offset-y: P.kawaii ? 3px : 0px;
+                    drop-shadow-color: P.kawaii ? P.accent-edge : transparent;
+                    accessible-role: button;
+                    accessible-label: root.playing ? "Pause" : "Play";
+                    if root.playing: Rectangle {
+                        x: parent.width / 2 - 10px;
+                        y: (parent.height - 22px) / 2;
+                        width: 7px;
+                        height: 22px;
+                        border-radius: 1.5px;
+                        background: Tint.on-accent;
+                    }
+                    if root.playing: Rectangle {
+                        x: parent.width / 2 + 3px;
+                        y: (parent.height - 22px) / 2;
+                        width: 7px;
+                        height: 22px;
+                        border-radius: 1.5px;
+                        background: Tint.on-accent;
+                    }
+                    if !root.playing: FilledIcon {
+                        x: (parent.width - self.width) / 2 + 2px;
+                        y: (parent.height - self.height) / 2;
+                        d: Icons.play;
+                        size: 24px;
+                        fill: Tint.on-accent;
+                    }
+                    pp := TouchArea { clicked => { root.play-pause(); } }
+                }
+                Rectangle {
+                    width: 64px;
+                    height: 52px;
+                    y: 6px;
+                    border-radius: 16px * P.round;
+                    background: nx.pressed ? P.chip-hover : P.raised;
+                    FilledIcon {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        d: Icons.next;
+                        size: 22px;
+                        fill: P.text;
+                    }
+                    nx := TouchArea { clicked => { root.next(); } }
+                    accessible-role: button;
+                    accessible-label: "Next";
+                }
+                Rectangle {
+                    width: 44px;
+                    IconButton {
+                        tint: Tint.accent;
+                        y: (parent.height - self.height) / 2;
+                        width: 44px;
+                        height: 44px;
+                        icon: Icons.repeat;
+                        icon-size: 22px;
+                        tip: root.repeat == 0 ? "Repeat off" : (root.repeat == 1 ? "Repeat all" : "Repeat one");
+                        active: root.repeat != 0;
+                        clicked => { root.cycle-repeat(); }
+                    }
+                    if root.repeat == 2: Text {
+                        x: 29px;
+                        y: 12px;
+                        text: "1";
+                        font-size: 10px;
+                        font-weight: 700;
+                        color: Tint.accent;
                     }
                 }
             }
-        }
-        Rectangle { vertical-stretch: 1; min-height: 6px; }
-        // The cover.
-        HorizontalLayout {
-            alignment: center;
-            Cover {
-                width: root.side;
-                height: root.side;
-                art: root.art;
-                has-art: root.has-art;
-                radius: 14px;
-                drop-shadow-blur: 24px;
-                drop-shadow-offset-y: 6px;
-                drop-shadow-color: P.shadow;
-                CoverMenu {
-                    width: parent.width;
-                    height: parent.height;
-                    act(a) => { root.act(a); }
-                }
-            }
-        }
-        Rectangle { vertical-stretch: 1; min-height: 14px; }
-        // Title and artist, with the heart.
-        HorizontalLayout {
-            spacing: 8px;
-            Rectangle { width: 40px; }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                spacing: 3px;
-                Text {
-                    text: root.has-track ? root.title : "Nothing playing";
-                    font-family: P.serif;
-                    font-weight: P.kawaii ? 900 : 700;
-                    font-size: 22px;
-                    color: root.has-track ? P.text : P.muted;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                    PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
-                }
-                Text {
-                    text: root.artist;
-                    font-size: 15px;
-                    color: P.muted;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                    PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
-                }
-            }
-            Rectangle {
-                width: 40px;
-                if root.love-state > 0: IconButton {
-                    y: (parent.height - self.height) / 2;
-                    width: 40px;
-                    height: 40px;
-                    icon: Icons.heart;
-                    icon-size: 22px;
-                    tip: root.love-state == 2 ? "Hearted" : "Heart";
-                    filled: root.love-state == 2;
-                    active: root.love-state == 2;
-                    clicked => { root.love(); }
-                }
-            }
-        }
-        // Stars, small, for a song that's been rated.
-        HorizontalLayout {
-            height: 22px;
-            alignment: center;
-            if root.has-track && root.rating > 0: HorizontalLayout {
-                for n in [1, 2, 3, 4, 5]: Text {
-                    width: 18px;
-                    text: n <= root.rating ? "★" : "☆";
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    color: n <= root.rating ? P.copper : P.wave;
-                    TouchArea { clicked => { root.rate(n == root.rating ? 0 : n); } }
-                }
-            }
-        }
-        // Seek, with the times at its ends and the format between them.
-        VerticalLayout {
-            spacing: 2px;
-            if !root.live: Bar {
-                height: 28px;
-                label: "Seek";
-                value: root.position;
-                enabled: root.has-track;
-                show-knob: true;
-                knob: 16px;
-                changed(v) => { root.seek(v); }
-            }
-            if root.live: Text {
-                height: 28px;
-                text: "live";
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                font-size: 13px;
-                color: P.verdigris;
-            }
+            Rectangle { height: 10px; }
+            // Volume.
             HorizontalLayout {
-                height: 26px;
-                Text { width: 60px; text: root.elapsed; font-family: P.mono; font-size: 12px; color: P.muted; vertical-alignment: center; }
-                Rectangle { horizontal-stretch: 1; }
-                if root.format != "": Rectangle {
-                    width: fmt.preferred-width + 20px;
-                    height: 24px;
-                    y: 1px;
-                    border-radius: 12px;
-                    background: P.raised;
-                    fmt := Text {
-                        text: root.format;
-                        font-family: P.mono;
-                        font-size: 11px;
-                        color: P.accent-text;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                height: 40px;
+                spacing: 10px;
+                IconButton {
+                    tint: Tint.accent;
+                    y: (parent.height - self.height) / 2;
+                    icon: root.muted ? Icons.muted : Icons.volume-low;
+                    tip: root.muted ? "Unmute" : "Mute";
+                    active: root.muted;
+                    enabled: !root.volume-locked;
+                    clicked => { root.toggle-mute(); }
+                }
+                Bar {
+                    horizontal-stretch: 1;
+                    label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
+                    value: root.volume-locked ? 1.0 : root.volume;
+                    enabled: !root.volume-locked;
+                    fill: root.muted ? P.wave : (Tint.on ? Tint.accent : (P.kawaii ? P.mint : P.verdigris));
+                    show-knob: true;
+                    knob: 14px;
+                    live: true;
+                    changed(v) => { root.set-volume(v); }
+                }
+                Rectangle {
+                    width: 36px;
+                    Icon {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        d: Icons.volume;
+                        size: 18px;
                     }
                 }
+            }
+            Rectangle { height: 6px; }
+            // Lyrics, playing on another device, and the queue.
+            HorizontalLayout {
+                height: 44px;
+                if !root.remote: IconButton {
+                    tint: Tint.accent;
+                    width: 44px;
+                    height: 44px;
+                    icon: Icons.lyrics;
+                    icon-size: 20px;
+                    tip: "Lyrics";
+                    active: root.lyrics-open;
+                    clicked => { root.lyrics(); }
+                }
                 Rectangle { horizontal-stretch: 1; }
-                Text { width: 60px; text: root.remaining; font-family: P.mono; font-size: 12px; color: P.muted; horizontal-alignment: right; vertical-alignment: center; }
-            }
-        }
-        Rectangle { height: 10px; }
-        // Transport.
-        HorizontalLayout {
-            height: 64px;
-            alignment: space-between;
-            Rectangle {
-                width: 44px;
-                IconButton {
-                    y: (parent.height - self.height) / 2;
+                if !root.remote: IconButton {
+                    tint: Tint.accent;
                     width: 44px;
                     height: 44px;
-                    icon: Icons.shuffle;
-                    icon-size: 22px;
-                    tip: "Shuffle";
-                    active: root.shuffle;
-                    clicked => { root.toggle-shuffle(); }
+                    icon: Icons.cast;
+                    icon-size: 20px;
+                    tip: root.casting ? "Playing on another device" : "Play on another device";
+                    active: root.casting;
+                    clicked => { root.cast(); }
                 }
-            }
-            Rectangle {
-                width: 64px;
-                height: 52px;
-                y: 6px;
-                border-radius: 16px * P.round;
-                background: pv.pressed ? P.chip-hover : P.raised;
-                FilledIcon {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    d: Icons.prev;
-                    size: 22px;
-                    fill: P.text;
-                }
-                pv := TouchArea { clicked => { root.prev(); } }
-                accessible-role: button;
-                accessible-label: "Back";
-            }
-            Rectangle {
-                width: 96px;
-                height: 64px;
-                border-radius: 32px;
-                background: pp.pressed ? P.accent-hover : P.verdigris;
-                drop-shadow-offset-y: P.kawaii ? 3px : 0px;
-                drop-shadow-color: P.kawaii ? P.accent-edge : transparent;
-                accessible-role: button;
-                accessible-label: root.playing ? "Pause" : "Play";
-                if root.playing: Rectangle {
-                    x: parent.width / 2 - 10px;
-                    y: (parent.height - 22px) / 2;
-                    width: 7px;
-                    height: 22px;
-                    border-radius: 1.5px;
-                    background: P.on-accent;
-                }
-                if root.playing: Rectangle {
-                    x: parent.width / 2 + 3px;
-                    y: (parent.height - 22px) / 2;
-                    width: 7px;
-                    height: 22px;
-                    border-radius: 1.5px;
-                    background: P.on-accent;
-                }
-                if !root.playing: FilledIcon {
-                    x: (parent.width - self.width) / 2 + 2px;
-                    y: (parent.height - self.height) / 2;
-                    d: Icons.play;
-                    size: 24px;
-                    fill: P.on-accent;
-                }
-                pp := TouchArea { clicked => { root.play-pause(); } }
-            }
-            Rectangle {
-                width: 64px;
-                height: 52px;
-                y: 6px;
-                border-radius: 16px * P.round;
-                background: nx.pressed ? P.chip-hover : P.raised;
-                FilledIcon {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    d: Icons.next;
-                    size: 22px;
-                    fill: P.text;
-                }
-                nx := TouchArea { clicked => { root.next(); } }
-                accessible-role: button;
-                accessible-label: "Next";
-            }
-            Rectangle {
-                width: 44px;
+                if !root.remote: Rectangle { horizontal-stretch: 1; }
                 IconButton {
-                    y: (parent.height - self.height) / 2;
+                    tint: Tint.accent;
                     width: 44px;
                     height: 44px;
-                    icon: Icons.repeat;
-                    icon-size: 22px;
-                    tip: root.repeat == 0 ? "Repeat off" : (root.repeat == 1 ? "Repeat all" : "Repeat one");
-                    active: root.repeat != 0;
-                    clicked => { root.cycle-repeat(); }
+                    icon: Icons.queue-panel;
+                    icon-size: 20px;
+                    tip: "Queue";
+                    active: root.queue-open;
+                    clicked => { root.queue(); }
                 }
-                if root.repeat == 2: Text {
-                    x: 29px;
-                    y: 12px;
-                    text: "1";
-                    font-size: 10px;
-                    font-weight: 700;
-                    color: P.verdigris;
-                }
-            }
-        }
-        Rectangle { height: 10px; }
-        // Volume.
-        HorizontalLayout {
-            height: 40px;
-            spacing: 10px;
-            IconButton {
-                y: (parent.height - self.height) / 2;
-                icon: root.muted ? Icons.muted : Icons.volume-low;
-                tip: root.muted ? "Unmute" : "Mute";
-                active: root.muted;
-                enabled: !root.volume-locked;
-                clicked => { root.toggle-mute(); }
-            }
-            Bar {
-                horizontal-stretch: 1;
-                label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
-                value: root.volume-locked ? 1.0 : root.volume;
-                enabled: !root.volume-locked;
-                fill: root.muted ? P.wave : (P.kawaii ? P.mint : P.verdigris);
-                show-knob: true;
-                knob: 14px;
-                live: true;
-                changed(v) => { root.set-volume(v); }
-            }
-            Rectangle {
-                width: 36px;
-                Icon {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    d: Icons.volume;
-                    size: 18px;
-                }
-            }
-        }
-        Rectangle { height: 6px; }
-        // Lyrics and the queue.
-        HorizontalLayout {
-            height: 44px;
-            IconButton {
-                width: 44px;
-                height: 44px;
-                icon: Icons.lyrics;
-                icon-size: 20px;
-                tip: "Lyrics";
-                active: root.lyrics-open;
-                clicked => { root.lyrics(); }
-            }
-            Rectangle { horizontal-stretch: 1; }
-            IconButton {
-                width: 44px;
-                height: 44px;
-                icon: Icons.queue-panel;
-                icon-size: 20px;
-                tip: "Queue";
-                active: root.queue-open;
-                clicked => { root.queue(); }
             }
         }
     }
@@ -3125,6 +3365,9 @@ export component AppWindow inherits Window {
     in property <string> view-title;
     in property <string> view-sub;
     in property <string> empty-text;
+    // The open section is still being read: placeholder rows.
+    in property <bool> loading;
+    in property <bool> loading-thumbs;
     // 0 list, 1 album grid, 2 queue
     in property <int> layout;
     in property <[Row]> rows;
@@ -3294,11 +3537,40 @@ export component AppWindow inherits Window {
     // Bit-perfect on a DAC with no volume control: fixed at 100%.
     in property <bool> volume-locked;
     in property <string> output-label;
+    // Playing on another device, and its name.
+    in property <bool> casting;
+    in property <string> cast-name;
+    callback cast-clicked;
+    // Steering another player: its Now Playing over everything.
+    in property <bool> rm-open;
+    in property <string> rm-name;
+    in property <bool> rm-has-track;
+    in property <string> rm-title;
+    in property <string> rm-artist;
+    in property <image> rm-art;
+    in property <bool> rm-has-art;
+    in property <bool> rm-playing;
+    in property <bool> rm-live;
+    in property <float> rm-position;
+    in property <string> rm-elapsed;
+    in property <string> rm-remaining;
+    in property <bool> rm-shuffle;
+    in property <int> rm-repeat;
+    in property <float> rm-volume;
+    in property <bool> rm-muted;
+    in property <int> rm-love-state;
+    callback rm-cmd(string);
+    callback rm-seek(float);
+    callback rm-set-volume(float);
+    callback rm-close;
+    callback rm-queue;
     // Click the output chip to pick a device.
     callback output-clicked;
     // "44.1→48k" while the song is resampled.
     in property <string> resample-label;
     in property <string> speed-label;
+    in property <float> speed-tempo: 1;
+    in property <bool> speed-trim;
     in property <string> status-line;
     in property <bool> status-warn;
     in property <bool> shuffle;
@@ -3320,6 +3592,8 @@ export component AppWindow inherits Window {
     callback toggle-mute;
     callback toggle-queue;
     callback speed-clicked;
+    callback speed-set(float);
+    callback trim-toggle;
 
     // Toast
     in property <string> toast;
@@ -3871,7 +4145,11 @@ export component AppWindow inherits Window {
                                         drag-to(d) => { if d != 0 { root.row-drag(i, i + d); } keys.focus(); }
                                     }
                                 }
-                                if root.rows.length == 0: Text {
+                                if root.rows.length == 0 && root.loading: SkeletonRows {
+                                    width: parent.width;
+                                    thumbs: root.loading-thumbs;
+                                }
+                                if root.rows.length == 0 && !root.loading: Text {
                                     y: 24px;
                                     text: root.empty-text;
                                     color: P.muted;
@@ -4172,66 +4450,82 @@ export component AppWindow inherits Window {
                 }
 
                     // Now playing.
-                    np := HorizontalLayout {
+                    // On a phone, swiping up on what's playing opens Now
+                    // Playing, as a tap on the cover does.
+                    SwipeGestureHandler {
                         x: bar.bp;
                         y: 0;
                         width: bar.two-row ? bar.width - 2 * bar.bp - bar.gap - bar.rw : bar.tx - bar.gap - bar.bp;
                         height: bar.row-h;
-                        spacing: bar.two-row ? 10px : 12px;
-                        Cover {
-                            width: bar.two-row ? 44px : 56px;
-                            height: bar.two-row ? 44px : 56px;
-                            y: (parent.height - self.height) / 2;
-                            art: root.np-art;
-                            has-art: root.np-has-art;
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.np-open = !root.np-open; keys.focus(); }
-                            }
-                            if !Ui.touch: Tooltip { Tip { text: root.np-open ? "Close Now Playing" : "Now Playing"; } }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                text: root.has-track ? root.np-title : "Nothing playing";
-                                overflow: elide;
-                                font-weight: 600;
-                                color: root.has-track ? P.text : P.muted;
-                                PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
-                            }
-                            Text { text: root.np-sub; overflow: elide; font-size: 12px; color: P.muted; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
-                            if root.status-line != "": Text {
-                                text: root.status-line;
-                                overflow: elide;
-                                font-size: 11.5px;
-                                color: root.status-warn ? P.copper : P.verdigris;
-                                PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
+                        enabled: root.tiny && root.has-track;
+                        handle-swipe-up: true;
+                        swiped => {
+                            if self.pressed-position.y - self.current-position.y > 24px {
+                                root.np-open = true;
+                                keys.focus();
                             }
                         }
-                        if root.love-state > 0: IconButton {
-                            y: (parent.height - self.height) / 2;
-                            icon: Icons.heart;
-                            tip: root.love-state == 2 ? "Hearted (l)" : "Heart (l)";
-                            // Filled in when the song playing is hearted.
-                            filled: root.love-state == 2;
-                            active: root.love-state == 2;
-                            clicked => { root.love-clicked(); keys.focus(); }
-                        }
-                        // Stars for the song playing; click one to rate,
-                        // the same one again to clear.
-                        // Only where the title still has room beside them.
-                        if root.np-rating >= 0 && !root.compact && np.width >= 400px: HorizontalLayout {
-                            spacing: 0px;
-                            for n in [1, 2, 3, 4, 5]: Text {
-                                width: 15px;
-                                text: n <= root.np-rating ? "★" : "☆";
-                                font-size: 13px;
-                                vertical-alignment: center;
-                                color: n <= root.np-rating ? P.copper : (nsa.has-hover ? P.copper-dim : P.wave);
-                                nsa := TouchArea {
+                        np := HorizontalLayout {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            spacing: bar.two-row ? 10px : 12px;
+                            Cover {
+                                width: bar.two-row ? 44px : 56px;
+                                height: bar.two-row ? 44px : 56px;
+                                y: (parent.height - self.height) / 2;
+                                art: root.np-art;
+                                has-art: root.np-has-art;
+                                TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.np-rate(n == root.np-rating ? 0 : n); keys.focus(); }
+                                    clicked => { root.np-open = !root.np-open; keys.focus(); }
+                                }
+                                if !Ui.touch: Tooltip { Tip { text: root.np-open ? "Close Now Playing" : "Now Playing"; } }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: root.has-track ? root.np-title : "Nothing playing";
+                                    overflow: elide;
+                                    font-weight: 600;
+                                    color: root.has-track ? P.text : P.muted;
+                                    PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
+                                }
+                                Text { text: root.np-sub; overflow: elide; font-size: 12px; color: P.muted; PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; } }
+                                if root.status-line != "": Text {
+                                    text: root.status-line;
+                                    overflow: elide;
+                                    font-size: 11.5px;
+                                    color: root.status-warn ? P.copper : P.verdigris;
+                                    PeekArea { full: parent.text; cut: parent.preferred-width > parent.width + 0.5px; }
+                                }
+                            }
+                            if root.love-state > 0: IconButton {
+                                y: (parent.height - self.height) / 2;
+                                icon: Icons.heart;
+                                tip: root.love-state == 2 ? "Hearted (l)" : "Heart (l)";
+                                // Filled in when the song playing is hearted.
+                                filled: root.love-state == 2;
+                                active: root.love-state == 2;
+                                clicked => { root.love-clicked(); keys.focus(); }
+                            }
+                            // Stars for the song playing; click one to rate,
+                            // the same one again to clear.
+                            // Only where the title still has room beside them.
+                            if root.np-rating >= 0 && !root.compact && np.width >= 400px: HorizontalLayout {
+                                spacing: 0px;
+                                for n in [1, 2, 3, 4, 5]: Text {
+                                    width: 15px;
+                                    text: n <= root.np-rating ? "★" : "☆";
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    color: n <= root.np-rating ? P.copper : (nsa.has-hover ? P.copper-dim : P.wave);
+                                    nsa := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.np-rate(n == root.np-rating ? 0 : n); keys.focus(); }
+                                    }
                                 }
                             }
                         }
@@ -4248,13 +4542,13 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             alignment: center;
                             spacing: 6px;
-                            IconButton { icon: Icons.shuffle; tip: "Shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); keys.focus(); } }
+                            IconButton { icon: Icons.shuffle; tint: Tint.accent; tip: "Shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); keys.focus(); } }
                             IconButton { icon: Icons.prev; filled: true; icon-size: 20px; tip: "Back"; clicked => { root.prev(); keys.focus(); } }
                             Rectangle {
                                 width: 44px;
                                 height: 44px;
                                 border-radius: 22px;
-                                background: pp.has-hover ? P.accent-hover : P.verdigris;
+                                background: pp.has-hover ? Tint.hover : Tint.accent;
                                 drop-shadow-offset-y: P.kawaii ? 3px : 0px;
                                 drop-shadow-color: P.kawaii ? P.accent-edge : transparent;
                                 accessible-role: button;
@@ -4267,7 +4561,7 @@ export component AppWindow inherits Window {
                                     width: 5px;
                                     height: 16px;
                                     border-radius: 1px;
-                                    background: P.on-accent;
+                                    background: Tint.on-accent;
                                 }
                                 if root.playing: Rectangle {
                                     x: 24px;
@@ -4275,14 +4569,14 @@ export component AppWindow inherits Window {
                                     width: 5px;
                                     height: 16px;
                                     border-radius: 1px;
-                                    background: P.on-accent;
+                                    background: Tint.on-accent;
                                 }
                                 if !root.playing: FilledIcon {
                                     x: (parent.width - self.width) / 2 + 1px;
                                     y: (parent.height - self.height) / 2;
                                     d: Icons.play;
                                     size: 18px;
-                                    fill: P.on-accent;
+                                    fill: Tint.on-accent;
                                 }
                                 pp := TouchArea {
                                     mouse-cursor: pointer;
@@ -4295,6 +4589,7 @@ export component AppWindow inherits Window {
                                 height: 36px;
                                 IconButton {
                                     icon: Icons.repeat;
+                                    tint: Tint.accent;
                                     tip: root.repeat == 0 ? "Repeat off" : (root.repeat == 1 ? "Repeat all" : "Repeat one");
                                     active: root.repeat != 0;
                                     clicked => { root.cycle-repeat(); keys.focus(); }
@@ -4305,7 +4600,7 @@ export component AppWindow inherits Window {
                                     text: "1";
                                     font-size: 9px;
                                     font-weight: 700;
-                                    color: P.verdigris;
+                                    color: Tint.accent;
                                 }
                             }
                         }
@@ -4323,6 +4618,7 @@ export component AppWindow inherits Window {
                             if !root.live: Bar {
                                 horizontal-stretch: 1;
                                 label: "Seek";
+                                fill: Tint.accent;
                                 value: root.position;
                                 enabled: root.has-track;
                                 changed(v) => { root.seek(v); keys.focus(); }
@@ -4369,7 +4665,15 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
-                            TouchArea { mouse-cursor: pointer; clicked => { root.speed-clicked(); } }
+                            SpeedMenu {
+                                width: parent.width;
+                                height: parent.height;
+                                tempo: root.speed-tempo;
+                                trim: root.speed-trim;
+                                clicked => { root.speed-clicked(); }
+                                set-speed(v) => { root.speed-set(v); }
+                                toggle-trim => { root.trim-toggle(); }
+                            }
                         }
                         // Click it to hear why (or what device, and how).
                         if root.bp-badge != "" && !root.tiny && !bar.lean: Rectangle {
@@ -4457,6 +4761,13 @@ export component AppWindow inherits Window {
                             icon: Icons.output;
                             text: root.output-label;
                             clicked => { root.output-clicked(); }
+                        }
+                        if !root.tiny: IconButton {
+                            y: (parent.height - self.height) / 2;
+                            icon: Icons.cast;
+                            active: root.casting;
+                            tip: root.casting ? "Playing on " + root.cast-name : "Play on another device";
+                            clicked => { root.cast-clicked(); keys.focus(); }
                         }
                         // Lit while a timer runs; the time left is in its
                         // tooltip, at the top of its menu, and on Now
@@ -4877,6 +5188,13 @@ export component AppWindow inherits Window {
             sleep-label: root.sleep-label;
             lyrics-open: root.lyrics-open;
             queue-open: root.queue-panel;
+            speed-label: root.speed-label;
+            speed-tempo: root.speed-tempo;
+            speed-trim: root.speed-trim;
+            speed-set(v) => { root.speed-set(v); }
+            trim-toggle => { root.trim-toggle(); }
+            casting: root.casting;
+            cast => { root.cast-clicked(); keys.focus(); }
             close => { root.np-open = false; keys.focus(); }
             act(a) => { root.np-act(a); keys.focus(); }
             play-pause => { root.play-pause(); keys.focus(); }
@@ -4995,7 +5313,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 padding: 7px;
                                 spacing: 10px;
-                                Cover { width: 36px; height: 36px; radius: 4px; art: q.art; has-art: q.has-art; }
+                                Cover { width: 36px; height: 36px; radius: 4px; art: q.art; has-art: q.has-art; waiting: q.wait; }
                                 VerticalLayout {
                                     alignment: center;
                                     qp-title := Text { text: q.title; overflow: elide; font-weight: q.playing ? 700 : 400; color: q.playing ? P.accent-text : P.text; }
@@ -5108,6 +5426,42 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 color: root.toast-error ? P.copper : P.text;
             }
+        }
+
+        // ----- Steering another player -----
+        if root.rm-open: NowPlayingPhone {
+            x: 0;
+            y: 0;
+            width: keys.width;
+            height: keys.height;
+            remote: true;
+            heading: "On " + root.rm-name;
+            has-track: root.rm-has-track;
+            title: root.rm-title;
+            artist: root.rm-artist;
+            art: root.rm-art;
+            has-art: root.rm-has-art;
+            playing: root.rm-playing;
+            live: root.rm-live;
+            position: root.rm-position;
+            elapsed: root.rm-elapsed;
+            remaining: root.rm-remaining;
+            shuffle: root.rm-shuffle;
+            repeat: root.rm-repeat;
+            volume: root.rm-volume;
+            muted: root.rm-muted;
+            love-state: root.rm-love-state;
+            close => { root.rm-close(); keys.focus(); }
+            play-pause => { root.rm-cmd("toggle"); }
+            prev => { root.rm-cmd("prev"); }
+            next => { root.rm-cmd("next"); }
+            toggle-shuffle => { root.rm-cmd("shuffle"); }
+            cycle-repeat => { root.rm-cmd("repeat"); }
+            toggle-mute => { root.rm-cmd("mute"); }
+            love => { root.rm-cmd("love"); }
+            seek(v) => { root.rm-seek(v); }
+            set-volume(v) => { root.rm-set-volume(v); }
+            queue => { root.rm-queue(); }
         }
 
         // ----- Dialogs -----

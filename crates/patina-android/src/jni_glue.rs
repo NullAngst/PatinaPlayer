@@ -36,6 +36,8 @@ const SEEK: jint = 7;
 const LOVE: jint = 8;
 /// The car's shuffle button.
 const SHUFFLE: jint = 9;
+/// A song picked in the car's queue screen, by its queue id.
+const QUEUE_ITEM: jint = 10;
 
 pub const STOPPED: jint = 0;
 pub const PLAYING: jint = 1;
@@ -156,6 +158,7 @@ pub extern "system" fn Java_dev_patina_player_Native_command<'local>(
         BACK => Command::Back,
         STOP => Command::Stop,
         SEEK => Command::Seek(Duration::from_millis(arg.max(0) as u64)),
+        QUEUE_ITEM if arg >= 0 => Command::PlayEntry(arg as u64),
         _ => return,
     });
 }
@@ -330,7 +333,9 @@ pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
             }
             let art = match &it.art {
                 Some(CarArt::Icon(name)) => format!("icon:{name}"),
-                Some(CarArt::Cover(track)) => format!("art:{}", car_art_key(track)),
+                Some(a @ (CarArt::Cover(_) | CarArt::Artist(_))) => {
+                    format!("art:{}", car_art_key(a))
+                }
                 None => String::new(),
             };
             for (j, text) in [
@@ -365,14 +370,19 @@ pub extern "system" fn Java_dev_patina_player_Native_browse<'local>(
 /// Covers handed to the car, by the key in their content URI. Only these
 /// are served: the URI names a key, never a path, so nothing else on the
 /// phone can ask the app's provider for any file it likes.
-static CAR_ART: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
+static CAR_ART: Mutex<Option<HashMap<String, CarArt>>> = Mutex::new(None);
 
-/// The key a song's cover goes by in the car's URIs, remembered so the
-/// provider can find the song again.
-fn car_art_key(track: &Path) -> String {
+thread_local! {
+    static ART_LIB: std::cell::RefCell<Option<patina_core::library::Library>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The key a cover or an artist's picture goes by in the car's URIs,
+/// remembered so the provider can find it again.
+fn car_art_key(art: &CarArt) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    track.hash(&mut h);
+    art.hash(&mut h);
     let key = format!("{:016x}", h.finish());
     let mut map = CAR_ART.lock().unwrap();
     let map = map.get_or_insert_with(HashMap::new);
@@ -381,7 +391,7 @@ fn car_art_key(track: &Path) -> String {
     if map.len() > 20_000 {
         map.clear();
     }
-    map.insert(key.clone(), track.to_path_buf());
+    map.insert(key.clone(), art.clone());
     key
 }
 
@@ -396,12 +406,28 @@ pub extern "system" fn Java_dev_patina_player_Native_carArt<'local>(
     key: JString<'local>,
 ) -> jni::sys::jstring {
     let path = opt_string(&mut env, &key).and_then(|k| {
-        let track = CAR_ART.lock().unwrap().as_ref()?.get(&k)?.clone();
+        let art = CAR_ART.lock().unwrap().as_ref()?.get(&k)?.clone();
         // Only plain keys name files.
-        k.chars()
-            .all(|c| c.is_ascii_hexdigit())
-            .then(|| patina_core::browse::auto::car_art_file(&track, &k))
-            .flatten()
+        if !k.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        match art {
+            CarArt::Cover(track) => patina_core::browse::auto::car_art_file(&track, &k),
+            // Its own library connection per binder thread: an artist's
+            // picture can wait on a server, and browsing shouldn't wait
+            // behind it.
+            CarArt::Artist(name) => ART_LIB.with(|l| {
+                let mut l = l.borrow_mut();
+                if l.is_none() {
+                    *l = patina_core::library::Library::open(
+                        &patina_core::config::library_db_path(),
+                    )
+                    .ok();
+                }
+                patina_core::browse::auto::car_artist_file(l.as_ref()?, &name)
+            }),
+            CarArt::Icon(_) => None,
+        }
     });
     match path.and_then(|p| env.new_string(p.to_string_lossy()).ok()) {
         Some(s) => s.into_raw(),
@@ -531,6 +557,60 @@ pub fn on_state(
             ],
         )?;
         Ok(())
+    });
+}
+
+/// One song in the car's queue screen.
+pub struct QueueItem {
+    pub id: u64,
+    pub title: String,
+    pub sub: String,
+    /// The song's file, for its cover.
+    pub art: Option<PathBuf>,
+}
+
+/// What's queued, for the car's queue screen: Native.onQueue. Covers go by
+/// the same keys as the car's browse lists.
+pub fn on_queue(items: &[QueueItem], current: Option<u64>) {
+    let ids: Vec<jlong> = items.iter().map(|i| i.id as jlong).collect();
+    // Title, artist and cover key for each, one after another.
+    let texts: Vec<String> = items
+        .iter()
+        .flat_map(|i| {
+            let art = i
+                .art
+                .as_ref()
+                .map(|p| car_art_key(&CarArt::Cover(p.clone())))
+                .unwrap_or_default();
+            [i.title.clone(), i.sub.clone(), art]
+        })
+        .collect();
+    let current = current.map_or(-1, |c| c as jlong);
+    with_java(|env, class| {
+        // A frame of its own: this thread stays attached, so the arrays
+        // would otherwise pile up in its reference table.
+        env.with_local_frame(8, |env| -> jni::errors::Result<()> {
+            let id_arr = env.new_long_array(ids.len() as i32)?;
+            env.set_long_array_region(&id_arr, 0, &ids)?;
+            let text_arr =
+                env.new_object_array(texts.len() as i32, "java/lang/String", JObject::null())?;
+            for (k, t) in texts.iter().enumerate() {
+                let js = env.new_string(t)?;
+                env.set_object_array_element(&text_arr, k as i32, &js)?;
+                env.delete_local_ref(js)?;
+            }
+            env.call_static_method(
+                class,
+                "onQueue",
+                "([J[Ljava/lang/String;J)V",
+                &[
+                    JValue::Object(&id_arr),
+                    JValue::Object(&text_arr),
+                    JValue::Long(current),
+                ],
+            )?;
+            Ok(())
+        })
     });
 }
 

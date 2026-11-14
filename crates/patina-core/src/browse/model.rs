@@ -43,6 +43,25 @@ pub enum Section {
 }
 
 impl Section {
+    /// Its first build reads the whole library or asks a server, which
+    /// can take a noticeable moment on a big collection.
+    pub fn slow_first_build(self) -> bool {
+        matches!(
+            self,
+            Section::Folders
+                | Section::Artists
+                | Section::Albums
+                | Section::Songs
+                | Section::Genres
+                | Section::Playlists
+                | Section::Podcasts
+                | Section::History
+                | Section::MostListened
+                | Section::TopAlbums
+                | Section::TopArtists
+        )
+    }
+
     /// The ten with number keys (1 to 9, then 0), in sidebar order.
     pub const NUMBERED: [Section; 10] = [
         Section::Folders,
@@ -436,6 +455,8 @@ pub struct SettingsState<'a> {
     pub lastfm: Option<crate::scrobble::ScrobbleStatus>,
     pub listenbrainz: Option<crate::listenbrainz::LbStatus>,
     pub outputs: &'a [crate::audio::output::OutDevice],
+    /// The remote control's port while other players can control this one.
+    pub remote_port: Option<u16>,
 }
 
 /// Everything a view can draw from besides the library itself.
@@ -562,6 +583,7 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                     lastfm: st.lastfm.clone(),
                     listenbrainz: st.listenbrainz.clone(),
                     outputs: st.outputs.to_vec(),
+                    remote_port: st.remote_port,
                 },
             );
             let mut items = Vec::new();

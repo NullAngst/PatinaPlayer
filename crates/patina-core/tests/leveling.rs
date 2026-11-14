@@ -336,6 +336,7 @@ fn settings_rows_and_bit_perfect() {
                 lastfm: None,
                 listenbrainz: None,
                 outputs: Vec::new(),
+                remote_port: None,
             },
         )
     };

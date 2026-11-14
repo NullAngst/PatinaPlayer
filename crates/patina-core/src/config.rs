@@ -105,6 +105,45 @@ pub struct Config {
     pub channel: ChannelConfig,
     pub desktop: DesktopConfig,
     pub ipod: IpodConfig,
+    pub cast: CastConfig,
+    pub remote: RemoteConfig,
+}
+
+/// Playing on another device.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CastConfig {
+    /// A snapserver typed in, "host" or "host:port". Ones that announce
+    /// themselves on the network are found without it.
+    pub snapcast: Option<String>,
+}
+
+/// Remote control, both ways: other players controlling this one, and
+/// this one controlling another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteConfig {
+    /// Let other players on the network control this one.
+    pub enabled: bool,
+    pub port: u16,
+    /// What they have to give. Made up when it's first turned on.
+    pub code: String,
+    /// The player this one controlled last, "host:port", and its code.
+    pub control: Option<String>,
+    pub control_code: String,
+}
+
+/// Where the remote control listens unless told otherwise.
+pub const REMOTE_PORT: u16 = 7373;
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: REMOTE_PORT,
+            code: String::new(),
+            control: None,
+            control_code: String::new(),
+        }
+    }
 }
 
 /// Sending songs to an iPod.
@@ -328,6 +367,8 @@ pub struct AppearanceConfig {
     pub backdrop: Backdrop,
     /// How strong it is, 10 to 100 percent.
     pub backdrop_strength: u8,
+    /// Color the transport and Now Playing with the cover's own color.
+    pub cover_accent: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -338,6 +379,7 @@ impl Default for AppearanceConfig {
             sidebar_portrait: SidebarMode::default(),
             backdrop: Backdrop::default(),
             backdrop_strength: BACKDROP_STRENGTH,
+            cover_accent: false,
         }
     }
 }
@@ -611,6 +653,8 @@ impl Default for Config {
             channel: ChannelConfig::default(),
             desktop: DesktopConfig::default(),
             ipod: IpodConfig::default(),
+            cast: CastConfig::default(),
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -639,6 +683,24 @@ struct RawConfig {
     channel: Option<RawChannel>,
     desktop: Option<RawDesktop>,
     ipod: Option<RawIpod>,
+    cast: Option<RawCast>,
+    remote: Option<RawRemote>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawCast {
+    snapcast: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRemote {
+    enabled: Option<bool>,
+    port: Option<u16>,
+    code: Option<String>,
+    control: Option<String>,
+    control_code: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -748,6 +810,7 @@ struct RawAppearance {
     sidebar_portrait: Option<String>,
     backdrop: Option<String>,
     backdrop_strength: Option<i64>,
+    cover_accent: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1113,6 +1176,7 @@ impl Config {
                     .crossfade_ms
                     .unwrap_or(d.output.crossfade_ms)
                     .min(12_000),
+                cast: None,
             },
             playback: PlaybackConfig {
                 volume: pb.volume.unwrap_or(d.playback.volume).min(100),
@@ -1145,6 +1209,7 @@ impl Config {
                 sidebar_portrait,
                 backdrop,
                 backdrop_strength,
+                cover_accent: look.cover_accent.unwrap_or(false),
             },
             servers,
             cache,
@@ -1167,6 +1232,27 @@ impl Config {
                         .map_err(|e| parse_err(format!("ipod.target: {e}")))?,
                     None => crate::ipod::Target::default(),
                 },
+            },
+            cast: CastConfig {
+                snapcast: raw
+                    .cast
+                    .unwrap_or_default()
+                    .snapcast
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            },
+            remote: {
+                let r = raw.remote.unwrap_or_default();
+                RemoteConfig {
+                    enabled: r.enabled.unwrap_or(false),
+                    port: r.port.filter(|&p| p != 0).unwrap_or(REMOTE_PORT),
+                    code: r.code.unwrap_or_default().trim().to_string(),
+                    control: r
+                        .control
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                    control_code: r.control_code.unwrap_or_default().trim().to_string(),
+                }
             },
         })
     }
@@ -1261,6 +1347,25 @@ balance = 0
 # aac (AAC 256 kbps) or mp3 (MP3 320 kbps). Needs the ffmpeg command.
 target = "alac"
 
+[cast]
+# A Snapcast server to play on, "host" or "host:port". Its TCP source has
+# to be on, in server mode, at the port given (4953 unless you changed it):
+#   source = tcp://0.0.0.0:4953?name=Patina&mode=server
+# Chromecasts, DLNA renderers and snapservers that announce themselves are
+# found on their own; this is for one that doesn't.
+snapcast = ""
+
+[remote]
+# Let PatinaPlayer on a phone or another computer on this network control
+# this one: what's playing, volume, the queue. Off until you turn it on.
+enabled = false
+port = 7373
+# The code the other player asks for. Made up when you first turn this on.
+code = ""
+# The player this one last controlled, and its code. Set from the app.
+control = ""
+control_code = ""
+
 [desktop]
 # The desktop app's icon in the system tray.
 tray = true
@@ -1291,6 +1396,9 @@ sidebar_portrait = "auto"
 # Its strength is 10 to 100 percent. Window only, not the TUI.
 backdrop = "off"
 backdrop_strength = 60
+# Color the play button, seek bar and Now Playing's buttons with the
+# playing cover's own color. Window only.
+cover_accent = false
 
 [playback]
 # Starting volume, 0 to 100.

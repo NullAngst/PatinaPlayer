@@ -616,6 +616,44 @@ impl Client for Subsonic {
         Ok(s.song.into_iter().filter_map(|n| n.id).collect())
     }
 
+    fn artist_image(&self, name: &str, size: u32) -> Result<Option<Vec<u8>>> {
+        let Some(id) = self.artist_id(name)? else {
+            return Ok(None);
+        };
+        // The server's own picture first (Navidrome keeps one per artist),
+        // then a link it found elsewhere.
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Artist {
+            cover_art: Option<String>,
+            artist_image_url: Option<String>,
+        }
+        let a: Artist = self.call("getArtist", &[("id", id.clone())], "artist")?;
+        if let Some(c) = a.cover_art.filter(|c| !c.is_empty())
+            && let Ok(b) = self.cover(&c, size)
+        {
+            return Ok(Some(b));
+        }
+        let mut url = a.artist_image_url;
+        if url.is_none() {
+            #[derive(Default, Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Info {
+                large_image_url: Option<String>,
+                medium_image_url: Option<String>,
+            }
+            let i: Info = self.call("getArtistInfo2", &[("id", id)], "artistInfo2")?;
+            url = i.large_image_url.or(i.medium_image_url);
+        }
+        match url.filter(|u| super::real_image_url(u)) {
+            Some(u) => {
+                let (body, ctype) = http::get_bytes(&self.http, &u, &[])?;
+                Ok(ctype.starts_with("image/").then_some(body))
+            }
+            None => Ok(None),
+        }
+    }
+
     fn similar_artists(&self, artist: &str, count: usize) -> Result<Vec<String>> {
         // Similarity is asked for by artist id; search finds it.
         #[derive(Default, Deserialize)]

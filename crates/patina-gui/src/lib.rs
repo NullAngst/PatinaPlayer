@@ -11,4 +11,5 @@ mod art;
 pub mod bridge;
 pub mod desktop;
 pub mod platform;
+mod remote_view;
 pub mod system_theme;

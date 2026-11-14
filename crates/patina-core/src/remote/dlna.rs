@@ -80,12 +80,37 @@ pub fn discover(wait: Duration) -> Vec<Found> {
 /// [`discover`] asking one address instead of the multicast group. For
 /// tests, and for a server on another subnet.
 pub fn discover_at(target: SocketAddr, wait: Duration) -> Vec<Found> {
+    let locations = ssdp_search(target, MEDIA_SERVER, wait);
+    let mut out: Vec<Found> = Vec::new();
+    for loc in locations {
+        if let Ok(d) = describe(&loc)
+            && !out.iter().any(|f| f.udn == d.udn)
+        {
+            out.push(Found {
+                name: d.name,
+                location: loc,
+                udn: d.udn,
+                model: d.model,
+            });
+        }
+    }
+    out
+}
+
+/// The multicast address SSDP searches go to.
+pub(crate) fn ssdp_group() -> SocketAddr {
+    SSDP.parse().expect("address")
+}
+
+/// Ask for devices of type `st` and collect the description URLs that
+/// answer within `wait`.
+pub(crate) fn ssdp_search(target: SocketAddr, st: &str, wait: Duration) -> Vec<String> {
     let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
         return Vec::new();
     };
     let _ = sock.set_multicast_ttl_v4(2);
     let msg = format!(
-        "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP}\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: {MEDIA_SERVER}\r\n\r\n"
+        "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP}\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: {st}\r\n\r\n"
     );
     // UDP gets lost; ask twice.
     let _ = sock.send_to(msg.as_bytes(), target);
@@ -110,20 +135,7 @@ pub fn discover_at(target: SocketAddr, wait: Duration) -> Vec<Found> {
             locations.push(loc);
         }
     }
-    let mut out: Vec<Found> = Vec::new();
-    for loc in locations {
-        if let Ok(d) = describe(&loc)
-            && !out.iter().any(|f| f.udn == d.udn)
-        {
-            out.push(Found {
-                name: d.name,
-                location: loc,
-                udn: d.udn,
-                model: d.model,
-            });
-        }
-    }
-    out
+    locations
 }
 
 fn header(text: &str, name: &str) -> Option<String> {

@@ -27,6 +27,8 @@ pub enum Key {
     /// The blurred cover behind the window.
     Backdrop,
     BackdropStrength,
+    /// The cover's color on the transport and Now Playing.
+    CoverAccent,
     StartVolume,
     FadeMs,
     Backend,
@@ -142,6 +144,14 @@ pub enum Key {
     AmpMoveUp(crate::dsp::amp::Kind),
     AmpMoveDown(crate::dsp::amp::Kind),
     AmpRemove(crate::dsp::amp::Kind),
+    /// A snapserver to play on, typed in.
+    CastSnapcast,
+    /// Let other players control this one.
+    RemoteEnabled,
+    /// Make up a new remote control code.
+    RemoteCode,
+    /// Find another player to control. The window does it.
+    ControlAnother,
     /// Read-only facts: where files are.
     Info(&'static str),
 }
@@ -331,6 +341,8 @@ pub struct Live {
     pub listenbrainz: Option<crate::listenbrainz::LbStatus>,
     /// Devices the shared output can play to, as last looked up.
     pub outputs: Vec<OutDevice>,
+    /// The remote control's port while it's on.
+    pub remote_port: Option<u16>,
 }
 
 /// Device choices: the system default, then each device there is, then
@@ -382,6 +394,7 @@ pub fn rows(
         lastfm,
         listenbrainz,
         outputs,
+        remote_port,
     } = live;
     let lastfm = lastfm.as_ref();
     let mut v: Vec<(Option<&'static str>, Setting)> = Vec::new();
@@ -954,6 +967,69 @@ pub fn rows(
                 scale: 1,
                 unit: "%",
             },
+        },
+    );
+
+    push(
+        "Appearance",
+        Setting {
+            disabled: None,
+            key: Key::CoverAccent,
+            label: "Cover accent".into(),
+            help: "Color the play button, the seek bar and Now Playing's buttons with a strong color from the playing cover, in place of the theme's. A cover with no strong color keeps the theme's. Window only.",
+            control: Control::Toggle(cfg.appearance.cover_accent),
+        },
+    );
+
+    // Other devices
+    push(
+        "Other devices",
+        Setting {
+            disabled: None,
+            key: Key::CastSnapcast,
+            label: "Snapcast server".into(),
+            help: "A snapserver to play on, \"host\" or \"host:port\", for one that doesn't announce itself. It needs a TCP source in server mode: source = tcp://0.0.0.0:4953?name=Patina&mode=server. Chromecasts, DLNA renderers and snapservers on the network show up under Play on without this.",
+            control: Control::Text {
+                value: cfg.cast.snapcast.clone().unwrap_or_default(),
+                empty: "none",
+            },
+        },
+    );
+    push(
+        "Other devices",
+        Setting {
+            disabled: None,
+            key: Key::RemoteEnabled,
+            label: "Remote control".into(),
+            help: "Let PatinaPlayer on a phone or another computer on this network control this one: what's playing, volume, the queue. It has to give the code below.",
+            control: Control::Toggle(cfg.remote.enabled),
+        },
+    );
+    push(
+        "Other devices",
+        Setting {
+            disabled: (!cfg.remote.enabled).then_some("Needs remote control on"),
+            key: Key::RemoteCode,
+            label: match (cfg.remote.code.as_str(), remote_port) {
+                ("", _) => "Remote control code".into(),
+                (c, Some(p)) => format!("Code {c}, port {p}"),
+                (c, None) => format!(
+                    "Code {c} (not listening: is port {} taken?)",
+                    cfg.remote.port
+                ),
+            },
+            help: "What the other player asks for. A new code shuts out anyone who had the old one.",
+            control: Control::Action("New code"),
+        },
+    );
+    push(
+        "Other devices",
+        Setting {
+            disabled: None,
+            key: Key::ControlAnother,
+            label: "Control another player".into(),
+            help: "Steer PatinaPlayer on another computer or phone on this network from here. It needs remote control on, and you'll need its code.",
+            control: Control::Action("Find players"),
         },
     );
 

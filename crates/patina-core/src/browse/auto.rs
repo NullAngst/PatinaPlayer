@@ -44,12 +44,14 @@ pub struct AutoItem {
 }
 
 /// A row's picture in the car.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CarArt {
     /// One of the app's own icons, by its drawable name.
     Icon(&'static str),
     /// A song's cover, which stands for its album.
     Cover(PathBuf),
+    /// An artist's picture, by name.
+    Artist(String),
 }
 
 fn icon(mut it: AutoItem, name: &'static str) -> AutoItem {
@@ -469,7 +471,7 @@ fn smart_rows(lib: &Library) -> Vec<AutoItem> {
 fn artist_item(a: &ArtistRow) -> AutoItem {
     AutoItem {
         grid: true,
-        art: Some(CarArt::Icon("ic_car_artist")),
+        art: Some(CarArt::Artist(a.name.clone())),
         ..folder(
             &format!("artist:{}", a.name),
             &a.name,
@@ -556,6 +558,16 @@ pub fn car_art_file(track: &std::path::Path, key: &str) -> Option<PathBuf> {
         }
         None => blank_tile(&dir),
     }
+}
+
+/// An artist's picture for the car, like [`car_art_file`]. An artist with
+/// none gets the plain tile.
+pub fn car_artist_file(lib: &Library, name: &str) -> Option<PathBuf> {
+    crate::artist_art::cached_file(lib, name, CAR_ART).or_else(|| {
+        let dir = car_art_dir();
+        std::fs::create_dir_all(&dir).ok()?;
+        blank_tile(&dir)
+    })
 }
 
 /// Covers in the car are drawn this big.

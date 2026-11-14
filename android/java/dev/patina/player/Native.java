@@ -30,6 +30,8 @@ final class Native {
     /** The car's heart and shuffle buttons. */
     static final int LOVE = 8;
     static final int SHUFFLE = 9;
+    // A song picked in the car's queue screen; arg is its queue id.
+    static final int QUEUE_ITEM = 10;
 
     /** What's being picked. Rust has the same numbers. */
     static final int PICK_FOLDER = 1;
@@ -166,6 +168,14 @@ final class Native {
      * Put a USB DAC's mixer into bit-perfect mode at this format. Returns
      * null once it's set, or why not. rate 0 clears it again.
      */
+    /**
+     * What's queued, for the car's queue screen: ids, then title, artist
+     * and cover key for each song in turn, and the id playing (-1 none).
+     */
+    static void onQueue(long[] ids, String[] texts, long current) {
+        main.post(() -> PlaybackService.queue(ids, texts, current));
+    }
+
     static String setBitPerfect(int deviceId, int rate, int bits, int channels) {
         return BitPerfect.set(app, deviceId, rate, bits, channels);
     }

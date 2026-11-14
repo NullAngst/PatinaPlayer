@@ -16,7 +16,7 @@
 
 pub mod ampache;
 pub mod dlna;
-mod http;
+pub(crate) mod http;
 pub mod service;
 pub mod subsonic;
 pub mod sync;
@@ -380,6 +380,12 @@ pub trait Client: Send + Sync {
         Err(RemoteError::Unsupported("similar songs"))
     }
 
+    /// A picture of an artist, by name, as the server has it. None when it
+    /// has none, or doesn't keep artist pictures.
+    fn artist_image(&self, _name: &str, _size: u32) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Artists like this one, by name. Empty when it has none.
     fn similar_artists(&self, _artist: &str, _count: usize) -> Result<Vec<String>> {
         Err(RemoteError::Unsupported("similar artists"))
@@ -495,6 +501,13 @@ pub fn is_remote(path: &Path) -> bool {
 }
 
 /// Which server a server path belongs to.
+/// A picture link worth fetching: http(s), and not Last.fm's grey star,
+/// which servers pass on for artists Last.fm has no picture of.
+pub(crate) fn real_image_url(u: &str) -> bool {
+    (u.starts_with("http://") || u.starts_with("https://"))
+        && !u.contains("2a96cbd8b46e442fc41c2b86b821562f")
+}
+
 pub fn server_of(path: &Path) -> Option<&str> {
     let s = path.as_os_str().to_str()?.strip_prefix(SCHEME)?;
     Some(s.split('/').next().unwrap_or(s))

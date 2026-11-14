@@ -27,6 +27,9 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 - Drag songs by the grip at the right of each row to reorder the queue or a playlist. On a touch screen, tap the grip to lift the song and tap where it should go.
 - Now Playing: at the top of the sidebar, or tap the cover in the bottom bar (Ctrl+N in the terminal app), for the big cover, the song, its format, whether it's bit-perfect, the output it's going to, every stage of the sound chain that's touching it, and the lyrics beside it. Going anywhere else (the sidebar, a search, Back, Go to album) closes it, so you see where you went. On a phone it takes the whole screen and keeps it simple: the cover, the song with its heart, the seek bar with the format between the times, the transport, volume, and lyrics and the queue at the foot. Rating, Go to album or artist, the cover and the sound chain are in the menu at the top.
 - Cover backdrop: the playing song's cover, blurred, washed over whatever theme you use, behind Now Playing or behind every view. Off by default; Settings, Appearance turns it on and sets how strong it is.
+- Cover accent: the play button, the seek and volume bars and Now Playing's buttons take a strong color from the playing cover instead of the theme's. A cover with no strong color (black and white, washed out) keeps the theme's. Off by default, in Settings, Appearance.
+- Artist pictures, round, in Artists. A local artist's folder can hold one (`artist.jpg`, `band.jpg`, `photo.jpg`, or `folder.jpg` in the folder above the albums); Subsonic and Ampache servers send their own. An artist with no picture anywhere gets a plain mark, and isn't asked about again for a week.
+- A section opened for the first time shows placeholder rows while it's read, and covers still loading shimmer, so a big library never looks stuck or empty.
 - Covers you choose: right-click an album, a folder, a song, the album header's cover or Now Playing's cover (long press on a phone) for Find cover art or Cover from an image file. Find looks the album up on iTunes, Deezer and MusicBrainz (Cover Art Archive) and shows what it finds to pick from. Either way the picture is saved as `album_art.jpg` (or `.png`) in the album's folder, where other players find it too, and it wins over any art embedded in the files. A server album's folder, or one the app can't write to (most folders on Android), keeps it in the app's own folder instead.
 - Hover any icon button for what it does.
 - Every library view has Play, Shuffle, Add to queue and Add to playlist at the top, and they take the whole view. Shuffle on a folder of three hundred albums plays all of them in random order.
@@ -126,7 +129,13 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 ### Radio and podcasts
 
 - Internet radio: any stream FFmpeg can decode, Icecast and SHOUTcast included. `.pls`, `.m3u` and `.m3u8` links resolve on their own, HLS goes straight to FFmpeg, and a dropped stream reconnects with backoff. Test a station and it tells you what the URL turned out to be.
-- Podcasts: subscribe by feed URL, pick up where you left off, 0.5x to 3x speed with the pitch kept, silence trimming, and downloads for offline.
+- Podcasts: subscribe by feed URL, pick up where you left off, 0.5x to 3x speed with the pitch kept, silence trimming, and downloads for offline. While an episode plays, the speed chip on the bottom bar steps through 1x, 1.2x, 1.5x and 2x on a click, and right-click (or a long press) opens all the speeds and Skip silence. On a phone the chip sits on Now Playing beside the format; tap it for the same menu.
+
+### Other devices
+
+- **Play on** another device: the cast button on the bottom bar or on Now Playing, or the last entry in the output picker. It lists Chromecasts, DLNA renderers (network speakers, AV receivers, TVs, Kodi) and Snapcast servers found on the network. The sound still comes from this app's player, after the EQ, the amp stack and leveling, so the queue, gapless and crossfades all carry on. Chromecasts and DLNA renderers fetch it from the app as a live 48 kHz WAV stream; a snapserver gets it over TCP. Pick This device to come back.
+- For Snapcast, the snapserver needs a TCP source in server mode, on its default format: `source = tcp://0.0.0.0:4953?name=Patina&mode=server` in `snapserver.conf`. A snapserver that doesn't announce itself goes in by address, from the same list or Settings, Other devices.
+- **Remote control**: turn it on in Settings, Other devices, and PatinaPlayer on a phone (or another computer) on the same network can steer this one: the song, its cover, play, pause, skip, seek, volume, shuffle, repeat, the heart, and the queue, where tapping a song plays it. It asks for the six-digit code shown there; New code makes a fresh one and shuts out whoever had the old one. On the other side, Settings, Other devices, Control another player lists the players on the network (or takes an address) and opens their Now Playing. Back or Escape leaves it. The code from last time is kept, so the second time it's one tap.
 
 ### The desktop
 
@@ -152,6 +161,8 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 - A home screen widget with the cover, the song, and back, play or pause, and next, in the app's theme. It keeps the theme after a restart.
 - The System theme (Android 12 and later) follows your wallpaper's Material You colors and the phone's light or dark mode.
 - The volume button opens a tall slider, easier to hit with a thumb than the bar's.
+- Gestures: swipe up on the bottom bar to open Now Playing, swipe down anywhere on Now Playing to close it (the page follows your finger), and swipe the cover left or right for the next or previous song.
+- Android Auto has a queue screen: what's coming up, with covers, and tapping a song plays it.
 - Bit-perfect to a USB DAC on Android 14 and later, where the phone's maker offers it.
 
 ## Getting it
@@ -293,6 +304,7 @@ sidebar_landscape = "auto"   # auto, expanded or folded
 sidebar_portrait = "auto"
 backdrop = "off"         # off, now-playing or everywhere: the playing cover, blurred
 backdrop_strength = 60   # 10 to 100 percent
+cover_accent = false     # color the transport from the playing cover
 
 [playback]
 volume = 80              # starting volume, 0 to 100
@@ -323,6 +335,16 @@ online = false           # ask LRCLIB when nothing local or on the server has th
 [desktop]
 tray = true
 close_to_tray = true     # closing the window hides it there and keeps playing
+
+[cast]
+snapcast = ""            # a snapserver that doesn't announce itself: "host" or "host:port"
+
+[remote]
+enabled = false          # let other players on the network control this one
+port = 7373
+code = ""                # made up when you first turn it on
+control = ""             # the player this one last controlled, and its code
+control_code = ""
 
 [podcasts]
 feeds = ["https://example.com/feed.xml"]
@@ -388,6 +410,7 @@ Where everything else goes:
 | Songs kept offline, downloaded episodes | `~/.local/share/patinaplayer/offline/` |
 | Cached and prefetched songs | `~/.cache/patinaplayer/tracks/` |
 | Cover art at the sizes the app draws | `~/.cache/patinaplayer/art/` |
+| Artist pictures, and which artists have none | `~/.cache/patinaplayer/artists/` |
 | Server passwords, the Last.fm session, the ListenBrainz token | your keyring, or `~/.config/patinaplayer/secrets.toml` (only you can read it) when there's no keyring |
 
 The index and the offline songs live in `~/.local/share` on purpose, since cleaners like BleachBit wipe `~/.cache`, and nobody should lose their playlists or a pinned library to that. The two caches are safe to wipe. They refill as you play.
@@ -486,11 +509,13 @@ To time indexing on your own collection: `cargo run --release -p patina-core --e
 - Metered connections are only detected through NetworkManager.
 - inotify needs one watch per folder, so a very large library can run past `fs.inotify.max_user_watches`. The app says so if it does, and raising the limit with `sysctl` fixes it.
 - On Android, folders are added by path, so a folder from a cloud app's storage provider can't go in. Add that music through a server instead. Bit-perfect depends on the phone's maker offering it.
-- Covers are found by the album's tags, so an album tagged wrong turns up wrong covers or none. Fix the tags, or use an image file. Android Auto has been tried in one car so far. The heart and shuffle icons come from Android Auto itself on newer versions; an older version draws the app's own.
+- Covers are found by the album's tags, so an album tagged wrong turns up wrong covers or none. Fix the tags, or use an image file. Android Auto has been tried in one car so far, and its queue screen not yet in a car. The heart and shuffle icons come from Android Auto itself on newer versions; an older version draws the app's own.
 - The home screen widget's buttons control the player while the app is running. After the phone restarts, or Android stops the app, they open it instead, since there's no player to tell until it starts. With the System theme, the widget picks up a new wallpaper or a switch between light and dark mode the next time the app runs, since only the app can work out the colors.
 - The iPod sync covers what libgpod covers: iPod classic, the older nanos (up to the 5th generation), minis, and shuffles up to the 2nd generation. The 6th and 7th generation nanos and the iPod touch don't work. It's desktop only. Play counts and ratings made on the iPod don't come back.
 - Smart playlists are typed rules, not a form of drop-downs. The dialog checks them as you type and the examples are one click away, but it's still a small language to learn.
 - FFmpeg doesn't check certificates on HTTPS radio and podcast streams. Server, Last.fm and lyrics calls go through the app's own HTTP client, which does.
+- Playing on a Chromecast or a DLNA renderer runs a few seconds behind: they buffer before they play, so pause, skip and the volume take that long to be heard, and the position shown runs ahead of what you hear. Snapcast is as late as its own buffer, a second by default. The app's player keeps time, so a song that ends here moves on there too. A Chromecast shows "PatinaPlayer" rather than the song. Some DLNA renderers don't play a live WAV stream at all.
+- The remote control is plain HTTP on your network. The code keeps out the curious, not someone watching the network, and it sits in `config.toml` as written. Finding players and devices needs multicast (mDNS, SSDP), like finding DLNA servers.
 - Crossfeed is a simple bs2b-style crossfeed, not a measured head model. Width, balance and crossfeed only touch stereo; anything with more channels passes through untouched.
 
 ## License

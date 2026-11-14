@@ -225,7 +225,17 @@ pub(crate) struct Media {
     art: Option<PathBuf>,
     art_tx: mpsc::Sender<(u64, PathBuf)>,
     art_rx: mpsc::Receiver<(u64, PathBuf)>,
+    /// The queue the car was last shown: its version and the song
+    /// playing, and when, so a queue still being read (each song's tags
+    /// bump the version) isn't sent over and over.
+    queue: (u64, Option<u64>),
+    queue_at: Option<std::time::Instant>,
 }
+
+/// How much of the queue the car gets: a few songs back and the rest
+/// ahead. Its queue screen is a short list; thousands would only be slow.
+const CAR_QUEUE_BACK: usize = 5;
+const CAR_QUEUE_AHEAD: usize = 95;
 
 impl Media {
     pub(crate) fn new() -> Self {
@@ -239,7 +249,45 @@ impl Media {
             art: None,
             art_tx,
             art_rx,
+            queue: (u64::MAX, None),
+            queue_at: None,
         }
+    }
+
+    /// Tell the car's queue screen what's queued, when it changes.
+    fn report_queue(&mut self, p: &Player, current: Option<u64>) {
+        let q = p.queue();
+        let now = (q.version, current);
+        if now == self.queue {
+            return;
+        }
+        // Only the tags filled in: at most every two seconds.
+        if now.1 == self.queue.1
+            && self
+                .queue_at
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        self.queue = now;
+        self.queue_at = Some(std::time::Instant::now());
+        let order = q.play_order();
+        let at = current.and_then(|c| q.position(c)).unwrap_or(0);
+        let from = at.saturating_sub(CAR_QUEUE_BACK);
+        let to = (at + CAR_QUEUE_AHEAD + 1).min(order.len());
+        let items: Vec<jni_glue::QueueItem> = order[from.min(to)..to]
+            .iter()
+            .filter_map(|&id| q.get(id))
+            .map(|e| jni_glue::QueueItem {
+                id: e.id,
+                title: e.info.display_title(),
+                sub: e.info.artist.clone().unwrap_or_default(),
+                art: (e.info.kind == MediaKind::File && !e.info.path.as_os_str().is_empty())
+                    .then(|| e.info.path.clone()),
+            })
+            .collect();
+        drop(q);
+        jni_glue::on_queue(&items, current);
     }
 
     pub(crate) fn report(&mut self, p: &Player) {
@@ -287,6 +335,8 @@ impl Media {
                 art_new = true;
             }
         }
+
+        self.report_queue(p, snap.current);
 
         let pos_s = snap.position.as_secs();
         let marks = (

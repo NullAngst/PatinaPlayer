@@ -29,7 +29,7 @@ use crate::desktop::Action;
 use crate::platform::{self, Picked, Prompt, PromptEvent, PromptField};
 use crate::{
     AmpKnob, AmpUnit, AppWindow, ChainRow, CoverPick, EqBand, Hero, Icons, P, QueueRow, Row,
-    SideItem, Ui,
+    SideItem, Tint, Ui,
 };
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
@@ -78,6 +78,35 @@ enum Dlg {
     Help,
     /// Picking a cover found online.
     Covers,
+    /// Where to play: this device, or one found on the network.
+    Cast(Vec<CastRow>),
+    /// Typing a snapserver's address.
+    CastSnapcast,
+    /// Picking a player to control.
+    Players(Vec<PlayerRow>),
+    /// The code for the player at this address, with its name.
+    PlayerCode(String, String),
+    /// Typing a player's address and code.
+    PlayerAddr,
+    /// The controlled player's queue, by entry id.
+    RemoteQueue(Vec<u64>),
+}
+
+/// A row of the Play on picker.
+#[derive(Clone)]
+enum CastRow {
+    Here,
+    To(patina_core::cast::Target),
+    Looking,
+    Snapcast,
+}
+
+/// A row of the player picker.
+#[derive(Clone)]
+enum PlayerRow {
+    Found(patina_core::control::Found),
+    Looking,
+    Type,
 }
 
 enum Confirm {
@@ -212,6 +241,17 @@ pub struct State {
     /// The blurred cover behind Now Playing, by the song and whether its
     /// cover had arrived.
     blur_key: Option<(PathBuf, bool)>,
+    /// What the backdrop and the cover accent were made for: whether each
+    /// is on, and the theme's ground color.
+    look_flags: (bool, bool, u32),
+    /// Placeholder rows went up for a section still to be read.
+    loading_shown: bool,
+    /// The cast and player pickers, as last filled: redrawn when a search
+    /// finishes while they're open.
+    cast_shown: u64,
+    players_shown: u64,
+    /// Another player being steered from here.
+    remote: Option<crate::remote_view::RemoteView>,
 }
 
 /// Lists at least this long keep their built rows for when they're opened
@@ -430,6 +470,11 @@ impl State {
             covers_model: Rc::new(VecModel::default()),
             cover_file_pick: None,
             blur_key: None,
+            look_flags: (false, false, 0),
+            loading_shown: false,
+            cast_shown: u64::MAX,
+            players_shown: u64::MAX,
+            remote: None,
         }
     }
 
@@ -438,6 +483,7 @@ impl State {
             Item::Track(t) => Some(Req::Track(t.path.clone())),
             Item::Album(a) => a.cover_track.clone().map(Req::Track),
             Item::Dir { path, .. } => Some(Req::Dir(path.clone())),
+            Item::Artist(a) => Some(Req::Artist(a.name.clone())),
             _ => None,
         }
     }
@@ -639,6 +685,14 @@ impl State {
                     Control::Action(_) if st.key == SettingKey::MeasureLibrary => (11, false),
                     Control::Action(_) if st.key.is_eq() || st.key.is_amp() => (11, false),
                     Control::Action(_) if st.key == SettingKey::LastFmLink => (11, false),
+                    Control::Action(_)
+                        if matches!(
+                            st.key,
+                            SettingKey::RemoteCode | SettingKey::ControlAnother
+                        ) =>
+                    {
+                        (11, false)
+                    }
                     Control::Action(_) => (6, false),
                     Control::Info(_) => (7, false),
                     Control::Server(_) => (8, false),
@@ -924,6 +978,11 @@ impl State {
     }
 
     fn sync_view(&mut self, ui: &AppWindow) {
+        ui.set_loading(self.b.loading());
+        ui.set_loading_thumbs(matches!(
+            self.b.section,
+            Section::Folders | Section::Artists | Section::Albums
+        ));
         let (layout, cols, acts) = self.chrome();
         ui.set_layout(layout);
         set_strings(&self.columns, cols.iter().map(ss));
@@ -1135,20 +1194,24 @@ impl State {
             _ if items.is_empty() => String::new(),
             _ => count_label(items),
         }));
-        ui.set_covers(
-            items
-                .iter()
-                .any(|i| matches!(i, Item::Album(_) | Item::Dir { .. } | Item::Root { .. })),
-        );
+        ui.set_covers(items.iter().any(|i| {
+            matches!(
+                i,
+                Item::Album(_) | Item::Dir { .. } | Item::Root { .. } | Item::Artist(_)
+            )
+        }));
         let mut rows = rows;
         let shown = self.row_ranges(ui, rows.len());
         for r in &shown {
             for i in r.clone() {
-                if let Some(req) = row_art[i].clone()
-                    && let Some(img) = self.art.get(req, THUMB)
-                {
-                    rows[i].art = img;
-                    rows[i].has_art = true;
+                if let Some(req) = row_art[i].clone() {
+                    match self.art.get(req.clone(), THUMB) {
+                        Some(img) => {
+                            rows[i].art = img;
+                            rows[i].has_art = true;
+                        }
+                        None => rows[i].wait = self.art.loading(&req, THUMB),
+                    }
                 }
             }
         }
@@ -1497,11 +1560,14 @@ impl State {
         let shown = self.queue_ranges(ui, models.len());
         for r in &shown {
             for i in r.clone() {
-                if let Some(req) = self.queue_art[i].clone()
-                    && let Some(img) = self.art.get(req, THUMB)
-                {
-                    models[i].art = img;
-                    models[i].has_art = true;
+                if let Some(req) = self.queue_art[i].clone() {
+                    match self.art.get(req.clone(), THUMB) {
+                        Some(img) => {
+                            models[i].art = img;
+                            models[i].has_art = true;
+                        }
+                        None => models[i].wait = self.art.loading(&req, THUMB),
+                    }
                 }
             }
         }
@@ -1641,6 +1707,12 @@ impl State {
         ui.set_volume_locked(s.volume_locked);
         ui.set_muted(s.muted);
         ui.set_output_label(ss(s.output.clone().unwrap_or_default()));
+        ui.set_casting(s.cast.is_some());
+        ui.set_cast_name(ss(s
+            .cast
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_default()));
         ui.set_resample_label(ss(s
             .resample
             .map(patina_core::browse::settings::resample_badge)
@@ -1649,6 +1721,8 @@ impl State {
             .track
             .as_ref()
             .is_some_and(|t| t.kind == MediaKind::Podcast);
+        ui.set_speed_tempo(s.podcast_tempo as f32);
+        ui.set_speed_trim(s.podcast_trim);
         ui.set_speed_label(ss(if podcast {
             let mut l = format!("{:.1}x", s.podcast_tempo);
             if s.podcast_trim {
@@ -1700,6 +1774,12 @@ impl State {
     }
 
     fn tick(&mut self, ui: &AppWindow) {
+        // A section opened last tick: its placeholder rows have been drawn,
+        // so read it now.
+        if self.loading_shown {
+            self.loading_shown = false;
+            self.b.finish_pending();
+        }
         for ev in self.b.poll() {
             if let Event::TrackChanged(_) = ev {
                 self.follow = true;
@@ -1752,6 +1832,7 @@ impl State {
             self.last_gen = u64::MAX;
         }
         self.sync_widget_colors(ui);
+        self.other_devices_tick(ui);
         let art_arrived = self.art.collect();
         let qv = self.b.player.queue().version;
         let gen_changed = self.b.generation() != self.last_gen;
@@ -1760,6 +1841,7 @@ impl State {
             self.last_gen = self.b.generation();
             self.sync_view(ui);
         }
+        self.loading_shown = self.b.loading();
         if gen_changed || side_changed || qv != self.last_queue_ver {
             self.last_side_gen = self.b.side_generation();
             self.sync_side(ui);
@@ -1859,15 +1941,23 @@ impl State {
         let old = std::mem::replace(&mut self.row_shown, shown.clone());
         for i in touched(&old, &shown) {
             let want = shown.iter().any(|r| r.contains(&i));
-            let img = match (want, self.row_art.get(i).cloned().flatten()) {
-                (true, Some(req)) => self.art.get(req, THUMB),
-                _ => None,
+            let (img, wait) = match (want, self.row_art.get(i).cloned().flatten()) {
+                (true, Some(req)) => {
+                    let img = self.art.get(req.clone(), THUMB);
+                    let wait = img.is_none() && self.art.loading(&req, THUMB);
+                    (img, wait)
+                }
+                _ => (None, false),
             };
             let Some(mut row) = self.rows.row_data(i) else {
                 continue;
             };
-            if row.has_art != img.is_some() || (img.is_some() && img.as_ref() != Some(&row.art)) {
+            if row.has_art != img.is_some()
+                || row.wait != wait
+                || (img.is_some() && img.as_ref() != Some(&row.art))
+            {
                 row.has_art = img.is_some();
+                row.wait = wait;
                 row.art = img.unwrap_or_default();
                 self.rows.set_row_data(i, row);
             }
@@ -1882,15 +1972,23 @@ impl State {
         let old = std::mem::replace(&mut self.queue_shown, shown.clone());
         for i in touched(&old, &shown) {
             let want = shown.iter().any(|r| r.contains(&i));
-            let img = match (want, self.queue_art.get(i).cloned().flatten()) {
-                (true, Some(req)) => self.art.get(req, THUMB),
-                _ => None,
+            let (img, wait) = match (want, self.queue_art.get(i).cloned().flatten()) {
+                (true, Some(req)) => {
+                    let img = self.art.get(req.clone(), THUMB);
+                    let wait = img.is_none() && self.art.loading(&req, THUMB);
+                    (img, wait)
+                }
+                _ => (None, false),
             };
             let Some(mut row) = self.queue.row_data(i) else {
                 continue;
             };
-            if row.has_art != img.is_some() || (img.is_some() && img.as_ref() != Some(&row.art)) {
+            if row.has_art != img.is_some()
+                || row.wait != wait
+                || (img.is_some() && img.as_ref() != Some(&row.art))
+            {
                 row.has_art = img.is_some();
+                row.wait = wait;
                 row.art = img.unwrap_or_default();
                 self.queue.set_row_data(i, row);
             }
@@ -2355,6 +2453,240 @@ impl State {
         self.dlg = Dlg::Confirm(c);
     }
 
+    // ----- Other devices -----
+
+    /// Play on: this device or one on the network. Looks again each time,
+    /// listing what was found before until the new answer's in.
+    fn open_cast(&mut self, ui: &AppWindow) {
+        self.b.look_for_cast_targets();
+        ui.set_dlg_title(ss("Play on"));
+        ui.set_dlg_new_first(false);
+        self.dlg = Dlg::Cast(Vec::new());
+        self.cast_shown = u64::MAX;
+        self.fill_cast();
+        ui.set_dialog(2);
+    }
+
+    fn fill_cast(&mut self) {
+        if !matches!(self.dlg, Dlg::Cast(_)) || self.cast_shown == self.b.cast_generation {
+            return;
+        }
+        self.cast_shown = self.b.cast_generation;
+        let on = self.b.casting();
+        let mut rows = vec![CastRow::Here];
+        rows.extend(self.b.cast_targets().into_iter().map(CastRow::To));
+        if self.b.cast_looking() {
+            rows.push(CastRow::Looking);
+        }
+        rows.push(CastRow::Snapcast);
+        let items = rows.iter().map(|r| {
+            ss(match r {
+                CastRow::Here if on.is_none() => "This device   (playing)".to_string(),
+                CastRow::Here => "This device".to_string(),
+                CastRow::To(t) if on.as_ref() == Some(t) => format!("{}   (playing)", t.label()),
+                CastRow::To(t) => t.label(),
+                CastRow::Looking => "Looking for devices…".to_string(),
+                CastRow::Snapcast => "A Snapcast server, by address…".to_string(),
+            })
+        });
+        set_strings(&self.dlg_items, items);
+        self.dlg = Dlg::Cast(rows);
+    }
+
+    fn cast_pick(&mut self, ui: &AppWindow, row: CastRow) {
+        match row {
+            CastRow::Here => self.b.cast_to(None),
+            CastRow::To(t) => self.b.cast_to(Some(t)),
+            // Still looking: leave the list up.
+            CastRow::Looking => {
+                self.dlg = Dlg::Cast(Vec::new());
+                self.cast_shown = u64::MAX;
+                self.fill_cast();
+                return;
+            }
+            CastRow::Snapcast => {
+                self.dlg = Dlg::CastSnapcast;
+                let now = self.b.config.cast.snapcast.clone().unwrap_or_default();
+                open_text(
+                    ui,
+                    "A Snapcast server",
+                    "Address: host or host:port (its TCP source, 4953 unless you changed it)",
+                    &now,
+                    None,
+                    "Play there",
+                );
+                return;
+            }
+        }
+        ui.set_dialog(0);
+        ui.invoke_focus_root();
+    }
+
+    /// Control another player: the ones that answer on the network.
+    fn open_players(&mut self, ui: &AppWindow) {
+        self.b.look_for_players();
+        ui.set_dlg_title(ss("Control another player"));
+        ui.set_dlg_new_first(false);
+        self.dlg = Dlg::Players(Vec::new());
+        self.players_shown = u64::MAX;
+        self.fill_players();
+        ui.set_dialog(2);
+    }
+
+    fn fill_players(&mut self) {
+        if !matches!(self.dlg, Dlg::Players(_)) || self.players_shown == self.b.control_generation {
+            return;
+        }
+        self.players_shown = self.b.control_generation;
+        let mut rows: Vec<PlayerRow> = self
+            .b
+            .players_found()
+            .into_iter()
+            .map(PlayerRow::Found)
+            .collect();
+        if self.b.players_looking() {
+            rows.push(PlayerRow::Looking);
+        }
+        rows.push(PlayerRow::Type);
+        let items = rows.iter().map(|r| {
+            ss(match r {
+                PlayerRow::Found(f) => format!("{}  ·  {}", f.name, f.addr),
+                PlayerRow::Looking => "Looking for players…".to_string(),
+                PlayerRow::Type => "By address…".to_string(),
+            })
+        });
+        set_strings(&self.dlg_items, items);
+        self.dlg = Dlg::Players(rows);
+    }
+
+    fn player_pick(&mut self, ui: &AppWindow, row: PlayerRow) {
+        match row {
+            PlayerRow::Found(f) => match self.b.player_code(&f.addr) {
+                Some(code) => {
+                    ui.set_dialog(0);
+                    self.connect_player(&f.addr, &code, &f.name);
+                }
+                None => {
+                    self.dlg = Dlg::PlayerCode(f.addr.clone(), f.name.clone());
+                    open_text(
+                        ui,
+                        &format!("Control {}", f.name),
+                        "Its code (Settings, Other devices, on that one)",
+                        "",
+                        None,
+                        "Connect",
+                    );
+                }
+            },
+            PlayerRow::Looking => {
+                self.dlg = Dlg::Players(Vec::new());
+                self.players_shown = u64::MAX;
+                self.fill_players();
+            }
+            PlayerRow::Type => {
+                self.dlg = Dlg::PlayerAddr;
+                let last = self.b.config.remote.control.clone().unwrap_or_default();
+                open_text(
+                    ui,
+                    "Control another player",
+                    "Address: host or host:port",
+                    &last,
+                    Some(("Its code", "")),
+                    "Connect",
+                );
+            }
+        }
+    }
+
+    fn connect_player(&mut self, addr: &str, code: &str, name: &str) {
+        match patina_core::control::Client::new(addr, code) {
+            Ok(c) => {
+                self.remote = Some(crate::remote_view::RemoteView::start(
+                    c,
+                    name.trim_end_matches(" (last time)").to_string(),
+                    code.to_string(),
+                ));
+            }
+            Err(e) => self.b.error(format!("Can't control {addr}: {e}")),
+        }
+    }
+
+    /// Every tick: pickers whose search finished, and the player being
+    /// steered.
+    fn other_devices_tick(&mut self, ui: &AppWindow) {
+        self.fill_cast();
+        self.fill_players();
+        let Some(r) = &mut self.remote else {
+            ui.set_rm_open(false);
+            return;
+        };
+        for h in r.poll() {
+            match h {
+                crate::remote_view::Heard::Connected => {
+                    let (addr, code, name) = (r.addr.clone(), r.code.clone(), r.name.clone());
+                    self.b.remember_player(&addr, &code);
+                    self.b.note(format!("Controlling {name}"));
+                }
+                crate::remote_view::Heard::Error(e) if e == "wrong code" => {
+                    let (addr, name) = (r.addr.clone(), r.name.clone());
+                    self.remote = None;
+                    ui.set_rm_open(false);
+                    self.b.error(format!("{name} says that's the wrong code"));
+                    self.dlg = Dlg::PlayerCode(addr, name.clone());
+                    open_text(
+                        ui,
+                        &format!("Control {name}"),
+                        "Its code (Settings, Other devices, on that one)",
+                        "",
+                        None,
+                        "Connect",
+                    );
+                    return;
+                }
+                crate::remote_view::Heard::Error(e) => self.b.error(e),
+            }
+        }
+        if let Some(r) = &self.remote {
+            r.show(ui);
+            ui.set_rm_open(true);
+        }
+    }
+
+    fn remote_cmd(&mut self, name: &str) {
+        use patina_core::control::Cmd;
+        let c = match name {
+            "toggle" => Cmd::Toggle,
+            "next" => Cmd::Next,
+            "prev" => Cmd::Prev,
+            "shuffle" => Cmd::Shuffle,
+            "repeat" => Cmd::Repeat,
+            "mute" => Cmd::Mute,
+            "love" => Cmd::Love,
+            _ => return,
+        };
+        if let Some(r) = &mut self.remote {
+            r.send(c);
+        }
+    }
+
+    fn open_remote_queue(&mut self, ui: &AppWindow) {
+        let Some(r) = &self.remote else { return };
+        let q = &r.queue;
+        let items = q.items.iter().map(|i| {
+            let mark = if Some(i.id) == q.current { "▶  " } else { "" };
+            ss(if i.artist.is_empty() {
+                format!("{mark}{}", i.title)
+            } else {
+                format!("{mark}{}  ·  {}", i.title, i.artist)
+            })
+        });
+        set_strings(&self.dlg_items, items);
+        ui.set_dlg_title(ss(format!("Queue on {}", r.name)));
+        ui.set_dlg_new_first(false);
+        self.dlg = Dlg::RemoteQueue(q.items.iter().map(|i| i.id).collect());
+        ui.set_dialog(2);
+    }
+
     /// Where the sound goes, from the output chip: the devices there are
     /// now, the current one marked.
     fn pick_device(&mut self, ui: &AppWindow) {
@@ -2365,13 +2697,19 @@ impl State {
             return self.b.note(why);
         }
         if let Control::Choice { options, index } = &st.control {
-            let items = options.iter().enumerate().map(|(i, (_, l))| {
-                ss(if i == *index {
-                    format!("{l}   (current)")
-                } else {
-                    l.clone()
+            let items = options
+                .iter()
+                .enumerate()
+                .map(|(i, (_, l))| {
+                    ss(if i == *index && self.snap.cast.is_none() {
+                        format!("{l}   (current)")
+                    } else {
+                        l.clone()
+                    })
                 })
-            });
+                .chain(std::iter::once(ss(
+                    "Another device: Chromecast, DLNA, Snapcast…",
+                )));
             set_strings(&self.dlg_items, items);
             ui.set_dlg_title(ss("Output device"));
             ui.set_dlg_new_first(false);
@@ -2394,6 +2732,11 @@ impl State {
             Control::Action(_) if st.key == SettingKey::MeasureLibrary => "measure",
             Control::Action(_) if st.key.is_eq() || st.key.is_amp() => "measure",
             Control::Action(_) if st.key == SettingKey::LastFmLink => "measure",
+            Control::Action(_)
+                if matches!(st.key, SettingKey::RemoteCode | SettingKey::ControlAnother) =>
+            {
+                "measure"
+            }
             Control::Action(_) => "browse",
             Control::Server(_) => "sync",
             Control::Folder | Control::Info(_) => return,
@@ -2414,6 +2757,12 @@ impl State {
         }
         if key == SettingKey::LastFmLink {
             return self.b.lastfm_link();
+        }
+        if key == SettingKey::RemoteCode {
+            return self.b.new_remote_code();
+        }
+        if key == SettingKey::ControlAnother {
+            return self.open_players(ui);
         }
         match key {
             SettingKey::EqSavePreset => return self.open_eq_save(ui),
@@ -3003,22 +3352,34 @@ impl State {
         let look = &self.b.config.appearance;
         ui.set_backdrop(look.backdrop.index());
         ui.set_backdrop_strength(f32::from(look.backdrop_strength) / 100.0);
-        if look.backdrop == patina_core::config::Backdrop::Off {
-            if self.blur_key.take().is_some() {
-                ui.set_np_has_blur(false);
-                ui.set_np_blur(slint::Image::default());
-            }
-            return;
-        }
+        let want_blur = look.backdrop != patina_core::config::Backdrop::Off;
+        let want_accent = look.cover_accent;
+        let bg = ui.global::<P>().get_bg();
+        let flags = (want_blur, want_accent, bg.as_argb_encoded());
         let has = ui.get_np_has_art();
         let key = self.playing_path().map(|p| (p, has));
-        if key == self.blur_key {
+        if key == self.blur_key && flags == self.look_flags {
             return;
         }
         self.blur_key = key;
-        let img = if has { blurred(&ui.get_np_art()) } else { None };
+        self.look_flags = flags;
+        let art = has.then(|| ui.get_np_art());
+        let img = art.as_ref().filter(|_| want_blur).and_then(blurred);
         ui.set_np_has_blur(img.is_some());
         ui.set_np_blur(img.unwrap_or_default());
+        let tint = ui.global::<Tint>();
+        match art
+            .as_ref()
+            .filter(|_| want_accent)
+            .and_then(|a| accent_of(a, luminance(bg) < 0.5))
+        {
+            Some((c, on)) => {
+                tint.set_c(c);
+                tint.set_on_c(on);
+                tint.set_on(true);
+            }
+            None => tint.set_on(false),
+        }
     }
 
     // ----- Choosing a cover -----
@@ -3831,6 +4192,29 @@ impl State {
                 }
             }
             Dlg::SetValue(key) => self.change_setting(ui, key, Change::Set(t1)),
+            Dlg::CastSnapcast => match patina_core::cast::Target::snapcast(&t1) {
+                Some(t) => {
+                    self.b
+                        .change_setting(&SettingKey::CastSnapcast, Change::Set(t1));
+                    self.b.cast_to(Some(t));
+                }
+                None => {
+                    self.dlg = Dlg::CastSnapcast;
+                    ui.set_dlg_note(ss("Type the snapserver's address"));
+                    ui.set_dlg_note_warn(true);
+                    return;
+                }
+            },
+            Dlg::PlayerCode(addr, name) => self.connect_player(&addr, &t1, &name),
+            Dlg::PlayerAddr => {
+                if t1.is_empty() {
+                    self.dlg = Dlg::PlayerAddr;
+                    ui.set_dlg_note(ss("Type the other player's address"));
+                    ui.set_dlg_note_warn(true);
+                    return;
+                }
+                self.connect_player(&t1, &t2, &t1);
+            }
             Dlg::EqSave => self.b.eq_save_preset(&t1),
             Dlg::AmpSave => self.b.amp_save_preset(&t1),
             Dlg::EqImportPath => self
@@ -3916,8 +4300,15 @@ impl State {
                 Confirm::DeleteSmart(id) => self.b.delete_smart(id),
                 Confirm::IpodRemove(row) => self.b.remove_from_ipod(&row),
             },
-            Dlg::Pick(..) | Dlg::Choose(_) | Dlg::Dlna(_) | Dlg::Help | Dlg::Covers | Dlg::None => {
-            }
+            Dlg::Pick(..)
+            | Dlg::Choose(_)
+            | Dlg::Dlna(_)
+            | Dlg::Help
+            | Dlg::Covers
+            | Dlg::Cast(_)
+            | Dlg::Players(_)
+            | Dlg::RemoteQueue(_)
+            | Dlg::None => {}
         }
         ui.set_dlg_note(SharedString::new());
         ui.set_dialog(0);
@@ -3925,6 +4316,45 @@ impl State {
     }
 
     fn dlg_pick(&mut self, ui: &AppWindow, i: usize) {
+        // The output picker's last row: another device.
+        if let Dlg::Choose(SettingKey::Device) = &self.dlg
+            && self.b.device_setting().is_some_and(
+                |st| matches!(&st.control, Control::Choice { options, .. } if i >= options.len()),
+            )
+        {
+            return self.open_cast(ui);
+        }
+        // A device picked here plays here again, rather than on the
+        // other device.
+        if let Dlg::Choose(SettingKey::Device) = &self.dlg {
+            self.b.cast_to(None);
+        }
+        match std::mem::replace(&mut self.dlg, Dlg::None) {
+            Dlg::Cast(rows) => {
+                if let Some(r) = rows.get(i).cloned() {
+                    self.dlg = Dlg::Cast(rows);
+                    return self.cast_pick(ui, r);
+                }
+                ui.set_dialog(0);
+                return;
+            }
+            Dlg::Players(rows) => {
+                if let Some(r) = rows.get(i).cloned() {
+                    self.dlg = Dlg::Players(rows);
+                    return self.player_pick(ui, r);
+                }
+                ui.set_dialog(0);
+                return;
+            }
+            Dlg::RemoteQueue(ids) => {
+                if let (Some(&id), Some(r)) = (ids.get(i), self.remote.as_mut()) {
+                    r.send(patina_core::control::Cmd::PlayEntry { id });
+                }
+                ui.set_dialog(0);
+                return;
+            }
+            other => self.dlg = other,
+        }
         if let Dlg::Choose(key) = &self.dlg {
             let key = key.clone();
             self.dlg = Dlg::None;
@@ -3993,6 +4423,12 @@ impl State {
             } else {
                 return false;
             }
+            return true;
+        }
+        // Steering another player: Escape and Back come back here.
+        if self.remote.is_some() && (is(Key::Escape) || is(Key::Back)) {
+            self.remote = None;
+            ui.set_rm_open(false);
             return true;
         }
         let queue = self.b.section == Section::Queue;
@@ -4140,7 +4576,7 @@ impl State {
                 c if c.len() == 1 && c.as_bytes()[0].is_ascii_digit() => {
                     let d = c.as_bytes()[0] - b'0';
                     let i = if d == 0 { 9 } else { (d - 1) as usize };
-                    self.b.switch(Section::NUMBERED[i]);
+                    self.b.switch_soon(Section::NUMBERED[i]);
                 }
                 _ => return false,
             }
@@ -4185,6 +4621,112 @@ fn blurred(img: &slint::Image) -> Option<slint::Image> {
         soft.width(),
         soft.height(),
     )))
+}
+
+/// How light a color is, 0 to 1 (relative luminance, roughly).
+fn luminance(c: slint::Color) -> f32 {
+    (0.2126 * f32::from(c.red()) + 0.7152 * f32::from(c.green()) + 0.0722 * f32::from(c.blue()))
+        / 255.0
+}
+
+/// A strong color from a cover, for the transport and Now Playing, and
+/// what reads on top of it. The most common vivid hue wins, then it's
+/// lightened or darkened to stand out from the theme's ground. None for a
+/// cover with no strong color (black and white, washed out), which keeps
+/// the theme's own.
+fn accent_of(img: &slint::Image, dark: bool) -> Option<(slint::Color, slint::Color)> {
+    let buf = img.to_rgba8()?;
+    let rgba = image::RgbaImage::from_raw(buf.width(), buf.height(), buf.as_bytes().to_vec())?;
+    let small = image::imageops::resize(&rgba, 32, 32, image::imageops::FilterType::Triangle);
+    let (h, s, l) = vivid_hsl(small.pixels().map(|p| [p[0], p[1], p[2]]))?;
+    let s = s.max(0.45);
+    let l = if dark {
+        l.clamp(0.55, 0.7)
+    } else {
+        l.clamp(0.32, 0.45)
+    };
+    let [r, g, b] = hsl_to_rgb(h, s, l);
+    let c = slint::Color::from_rgb_u8(r, g, b);
+    let on = if luminance(c) > 0.55 {
+        slint::Color::from_rgb_u8(0x10, 0x12, 0x12)
+    } else {
+        slint::Color::from_rgb_u8(0xff, 0xff, 0xff)
+    };
+    Some((c, on))
+}
+
+/// The hue most of a picture's vivid pixels share, and their average
+/// saturation and lightness. Twelve hue buckets; each pixel counts by how
+/// vivid it is.
+fn vivid_hsl(pixels: impl Iterator<Item = [u8; 3]>) -> Option<(f32, f32, f32)> {
+    let mut weight = [0f32; 12];
+    let mut sums = [[0f32; 3]; 12];
+    let mut total = 0usize;
+    for [r, g, b] in pixels {
+        total += 1;
+        let (h, s, l) = rgb_to_hsl(r, g, b);
+        if s < 0.3 || !(0.15..=0.88).contains(&l) {
+            continue;
+        }
+        let w = s * (1.0 - (l - 0.5).abs() * 1.4);
+        let k = ((h / 30.0) as usize).min(11);
+        weight[k] += w;
+        // Hue as a point on a circle, so red near 0 and 360 averages right.
+        let rad = h.to_radians();
+        sums[k][0] += rad.cos() * w;
+        sums[k][1] += rad.sin() * w;
+        sums[k][2] += l * w;
+    }
+    let (k, &w) = weight
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))?;
+    // Under a twentieth of the picture vivid: no strong color to take.
+    if total == 0 || w < total as f32 * 0.05 {
+        return None;
+    }
+    let h = sums[k][1].atan2(sums[k][0]).to_degrees().rem_euclid(360.0);
+    Some((h, 0.65, sums[k][2] / w))
+}
+
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let (r, g, b) = (
+        f32::from(r) / 255.0,
+        f32::from(g) / 255.0,
+        f32::from(b) / 255.0,
+    );
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d < 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == r {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [u8; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let f = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    [f(r), f(g), f(b)]
 }
 
 fn window(first: i32, count: i32, margin: i32, n: usize) -> Range<usize> {
@@ -4284,7 +4826,10 @@ pub fn install(
     playing_files: bool,
     hide_on_close: Rc<std::cell::Cell<bool>>,
 ) -> Bridge {
-    b.switch(if playing_files {
+    // Sections read on the frame after they're opened, so placeholder
+    // rows show first. The window comes up sooner this way too.
+    b.defer_builds = true;
+    b.switch_soon(if playing_files {
         Section::Queue
     } else {
         Section::Folders
@@ -4525,7 +5070,31 @@ pub fn install(
         };
         s.b.set_podcast_playback(next, s.b.podcast_trim);
     });
+    on!(on_speed_set, |s, _u, v| s
+        .b
+        .set_podcast_playback(v as f64, s.b.podcast_trim));
+    on!(on_trim_toggle, |s, _u| s.b.toggle_trim());
     on!(on_dlg_accept, |s, u| s.dlg_accept(&u));
+    on!(on_cast_clicked, |s, u| s.open_cast(&u));
+    on!(on_rm_cmd, |s, _u, c| s.remote_cmd(c.as_str()));
+    on!(on_rm_seek, |s, _u, v| {
+        if let Some(r) = &mut s.remote {
+            let ms = (v.clamp(0.0, 1.0) as f64 * r.duration_ms() as f64) as u64;
+            r.send(patina_core::control::Cmd::Seek { ms });
+        }
+    });
+    on!(on_rm_set_volume, |s, _u, v| {
+        if let Some(r) = &mut s.remote {
+            r.send(patina_core::control::Cmd::Volume {
+                value: v.clamp(0.0, 1.0) as f64,
+            });
+        }
+    });
+    on!(on_rm_close, |s, u| {
+        s.remote = None;
+        u.set_rm_open(false);
+    });
+    on!(on_rm_queue, |s, u| s.open_remote_queue(&u));
     on!(on_sleep_act, |s, u, a| s.sleep_act(&u, a.as_str()));
     on!(on_dlg_pick, |s, u, i| s.dlg_pick(&u, i as usize));
     on!(on_dlg_cancel, |s, u| {
@@ -4696,4 +5265,39 @@ fn show_window(ui: &AppWindow) {
 /// Too narrow for both side panels at once (the sidebar is folded, or a drawer).
 fn narrow_window(ui: &AppWindow) -> bool {
     ui.get_narrow()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsl_round_trips() {
+        for c in [
+            [200u8, 40, 30],
+            [20, 160, 90],
+            [60, 90, 220],
+            [128, 128, 128],
+        ] {
+            let (h, s, l) = rgb_to_hsl(c[0], c[1], c[2]);
+            let back = hsl_to_rgb(h, s, l);
+            for k in 0..3 {
+                assert!(
+                    (i16::from(back[k]) - i16::from(c[k])).abs() <= 1,
+                    "{c:?} {back:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_vivid_hue_wins_over_grey() {
+        // Mostly grey, with a red patch: red is the accent.
+        let mut px = vec![[120u8, 120, 120]; 900];
+        px.extend(vec![[210u8, 30, 40]; 124]);
+        let (h, _, _) = vivid_hsl(px.into_iter()).unwrap();
+        assert!(!(15.0..=345.0).contains(&h), "{h}");
+        // All grey: none.
+        assert_eq!(vivid_hsl(vec![[90u8, 90, 90]; 100].into_iter()), None);
+    }
 }

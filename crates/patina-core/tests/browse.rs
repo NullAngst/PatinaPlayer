@@ -612,3 +612,30 @@ fn a_song_goes_to_its_album_and_its_artist() {
     b.go_to_selected(true);
     assert_eq!(b.section, Section::Albums);
 }
+
+#[test]
+fn a_section_opened_soon_is_read_on_the_next_frame() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    // A terminal never asks for deferral: built at once.
+    b.switch_soon(Section::Artists);
+    assert!(!b.loading());
+    assert!(b.level().is_some());
+
+    b.defer_builds = true;
+    b.switch_soon(Section::Albums);
+    assert!(b.loading());
+    assert!(b.level().is_none());
+    b.finish_pending();
+    assert!(!b.loading());
+    assert!(!items(&b).is_empty());
+
+    // Moving on before the frame drops the wait; coming back builds it.
+    b.switch_soon(Section::Genres);
+    assert!(b.loading());
+    b.switch(Section::Settings);
+    assert!(!b.loading());
+    b.finish_pending();
+    b.switch(Section::Genres);
+    assert!(b.level().is_some());
+}

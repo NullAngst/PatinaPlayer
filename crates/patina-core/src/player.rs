@@ -106,6 +106,9 @@ pub enum Command {
     },
     /// Crossfade length, 0 to 12000 ms. From the next song on.
     SetCrossfade(u32),
+    /// Play on another device, or back on this one (None). The output
+    /// reopens at once, from where it was.
+    SetCast(Option<crate::cast::Target>),
     /// Podcast speed (0.5 to 3, pitch kept) and silence trimming. Takes
     /// effect at once on a playing episode.
     SetPodcastPlayback {
@@ -198,6 +201,8 @@ pub struct Snapshot {
     /// Where the sound is going, for per-device EQ. Kept from the last
     /// output while nothing is open.
     pub output_device: Option<crate::eq::OutputDevice>,
+    /// The device it's playing on, when that's another one.
+    pub cast: Option<crate::cast::Target>,
     /// How hard the limiter worked lately, in dB of gain reduction. Held
     /// for a moment after it lets go, so it can be seen.
     pub limiting_db: f64,
@@ -586,6 +591,42 @@ impl Core {
 
     /// Start the current entry over from where it is, so a changed output
     /// setting takes effect. Paused stays paused.
+    /// Bit-perfect as set, except while playing on another device, which
+    /// takes 48 kHz whatever the source.
+    fn store_bit_perfect(&self) {
+        let mode = if self.cfg.output.cast.is_some() {
+            BitPerfect::Off
+        } else {
+            self.cfg.output.bit_perfect
+        };
+        self.shared
+            .bit_perfect
+            .store(mode.to_u8(), Ordering::Relaxed);
+    }
+
+    /// What a newly chosen output plays at: anything, found out when it
+    /// opens, except another device, which always takes the cast rate.
+    /// Knowing that up front saves opening the first song twice.
+    fn store_device_rate(&self) {
+        let rate = if self.cfg.output.cast.is_some() {
+            crate::cast::RATE
+        } else {
+            0
+        };
+        self.shared.device_rate.store(rate, Ordering::Relaxed);
+    }
+
+    /// Playing on another device failed: back to this one, so the next
+    /// play isn't sent there again.
+    fn drop_cast(&mut self) {
+        if self.cfg.output.cast.take().is_some() {
+            crate::cast::end();
+            self.store_bit_perfect();
+            self.store_device_rate();
+            self.send_feed(FeedCmd::NewRing);
+        }
+    }
+
     fn restart_here(&mut self) {
         let Some(cur) = self.current else { return };
         if self.state == PlayState::Stopped || self.current_is_live() {
@@ -933,12 +974,23 @@ impl Core {
             Command::SetBitPerfect { mode, device } => {
                 self.cfg.output.bit_perfect = mode;
                 self.cfg.output.bit_perfect_device = device;
-                self.shared
-                    .bit_perfect
-                    .store(mode.to_u8(), Ordering::Relaxed);
+                self.store_bit_perfect();
                 self.exclusive_refused = None;
                 // Close whatever's open, so the next open goes the new way.
                 self.restart_here();
+            }
+            Command::SetCast(target) => {
+                if self.cfg.output.cast != target {
+                    self.cfg.output.cast = target;
+                    if self.cfg.output.cast.is_none() {
+                        crate::cast::end();
+                    }
+                    self.store_bit_perfect();
+                    self.exclusive_refused = None;
+                    self.store_device_rate();
+                    self.send_feed(FeedCmd::NewRing);
+                    self.restart_here();
+                }
             }
             Command::SetLeveling(c) => {
                 let was_off = self.shared.level.mode() == crate::level::LevelMode::Off;
@@ -1004,7 +1056,7 @@ impl Core {
                 self.cfg.output.device = device;
                 self.cfg.output.buffer_ms = buffer_ms.clamp(50, 1000);
                 // A new device may take any rate.
-                self.shared.device_rate.store(0, Ordering::Relaxed);
+                self.store_device_rate();
                 self.send_feed(FeedCmd::NewRing);
                 self.restart_here();
             }
@@ -1142,6 +1194,7 @@ impl Core {
                     }
                     Err(e) => {
                         self.report(format!("can't open output: {e}"));
+                        self.drop_cast();
                         self.stop();
                     }
                 }
@@ -1303,6 +1356,7 @@ impl Core {
         if let Some(e) = self.output.as_ref().and_then(|o| o.error()) {
             self.output = None;
             self.report(format!("output failed: {e}"));
+            self.drop_cast();
             self.stop();
         }
 
@@ -1377,6 +1431,7 @@ impl Core {
         snap.podcast_tempo = self.shared.podcast_tempo.load();
         snap.podcast_trim = self.shared.podcast_trim.load(Ordering::Relaxed);
         snap.bit_perfect = self.cfg.output.bit_perfect;
+        snap.cast = self.cfg.output.cast.clone();
         snap.exclusive = self.output.as_ref().and_then(|o| o.exclusive());
         snap.volume_locked = snap.exclusive.as_ref().is_some_and(|e| !e.hw_volume);
         if let Some(d) = self.output.as_ref().and_then(|o| o.device()) {
