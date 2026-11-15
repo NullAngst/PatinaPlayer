@@ -1209,7 +1209,9 @@ impl State {
                 out
             }
             None => {
-                let rows: Vec<Row> = items
+                // Settings rows under an open group are drawn nested in it.
+                let mut in_group = false;
+                let mut rows: Vec<Row> = items
                     .iter()
                     .map(|it| {
                         if matches!(it, Item::Header(_)) {
@@ -1219,9 +1221,15 @@ impl State {
                         }
                         let mut r = self.row(it, n.max(1) - 1, ctx, playing.as_deref());
                         r.marked = !marked.is_empty() && marked.contains(&it.key());
+                        match it {
+                            Item::Group { open, .. } => in_group = *open,
+                            Item::Setting(_) | Item::Info { .. } if in_group => r.nest = 1,
+                            _ => in_group = false,
+                        }
                         r
                     })
                     .collect();
+                mark_group_ends(&mut rows);
                 // Songs in a list don't show covers; everything else that
                 // has one does.
                 let row_art: Vec<Option<Req>> = items
@@ -1239,6 +1247,7 @@ impl State {
                     .map(|r| match r.kind {
                         9 => 34.0,
                         12 => 54.0,
+                        19 => 50.0,
                         _ => 40.0,
                     })
                     .sum();
@@ -6197,6 +6206,16 @@ fn narrow_window(ui: &AppWindow) -> bool {
     ui.get_narrow()
 }
 
+/// The last nested row of each open Settings group gets 2, so the
+/// group's panel rounds off under it.
+fn mark_group_ends(rows: &mut [Row]) {
+    for i in 0..rows.len() {
+        if rows[i].nest == 1 && rows.get(i + 1).is_none_or(|n| n.nest == 0) {
+            rows[i].nest = 2;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6269,5 +6288,17 @@ mod tests {
             wash_veil(&flat([240, 235, 230]), 0.6, rgb(bg), rgb(text)),
             0.0
         );
+    }
+
+    #[test]
+    fn an_open_groups_last_row_rounds_it_off() {
+        let row = |nest| Row {
+            nest,
+            ..Default::default()
+        };
+        let mut rows = vec![row(0), row(1), row(1), row(0), row(1), row(0), row(1)];
+        mark_group_ends(&mut rows);
+        let n: Vec<i32> = rows.iter().map(|r| r.nest).collect();
+        assert_eq!(n, [0, 1, 2, 0, 2, 0, 2]);
     }
 }

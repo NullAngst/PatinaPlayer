@@ -1,5 +1,14 @@
 # Changes
 
+2026.11.14 - UX overhaul (Settings on Android, open Settings groups)
+
+* Android Settings leaves out what does nothing on a phone: the Desktop group (Tray icon, Close to tray), the iPod group (iPod sync is off on Android), the Files group (paths inside the app's private storage, which nothing on the phone can open), Sample format and Dither (AAudio always takes float), and Hold on metered connections (it asks NetworkManager, which Android doesn't have). Help text there drops "Window only, not the TUI", and Bit-perfect device says USB DAC instead of sound card. The filter is one function at the end of the Settings rows, `for_android`, so the desktop and terminal apps are unchanged.
+* An open Settings group's rows are indented under its name and sit on one panel in the theme's idle-selection color (`sel-idle`), with rounded corners under the last row. Hover and selection show on the panel a step up, in the raised color, since the panel already uses the idle-selection one.
+* The page height counted for an open group's header was 40 px instead of its 50; fixed where the page scrolls as one.
+* Tests: Android's Settings rows without the desktop-only groups and keys and without the desktop help text, with what works on a phone still there; the last row of each open group marked for the rounded corners.
+
+Reasons for changes: asked to remove the desktop-only settings from the Android app, hide the Files section there, indent the options in each Settings group and give the open group the idle-selection background.
+
 2026.11.14 - Bug fixes (remote control new code, Snapcast rooms turning off)
 
 * Remote control, New code: works on the first click. It used to stop the server and start it again on the same port, but the old server's listening thread held the port for up to 50 ms after it was told to stop, so the restart failed with "port is taken" and a second click was needed. A running server now takes the new code in place, and stopping a server waits for that thread, so turning it off and on or changing its port also works at once.

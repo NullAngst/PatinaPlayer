@@ -1791,7 +1791,11 @@ pub fn rows(
             disabled: None,
             key: Key::BitPerfectDevice,
             label: "Bit-perfect device".into(),
-            help: "The sound card bit-perfect playback takes over.",
+            help: if cfg!(target_os = "android") {
+                "The USB DAC bit-perfect playback takes over."
+            } else {
+                "The sound card bit-perfect playback takes over."
+            },
             control: Control::Choice {
                 options: opts,
                 index,
@@ -1861,7 +1865,46 @@ pub fn rows(
             s.label = format!("{}  ({flag} this run)", s.label);
         }
     }
+    if cfg!(target_os = "android") {
+        v = for_android(v);
+    }
     v
+}
+
+/// Groups that only mean something on the desktop: the tray, iPod sync
+/// (libgpod, off on Android), and file paths inside the app's private
+/// storage, which nothing on the phone can open.
+const DESKTOP_GROUPS: &[&str] = &["Desktop", "iPod", "Files"];
+
+/// Settings that do nothing on Android. AAudio always takes float, so
+/// there's no sample format to pick and nothing to dither. Metered
+/// connections are spotted through NetworkManager, which Android doesn't
+/// have.
+const DESKTOP_KEYS: &[Key] = &[Key::OutFormat, Key::Dither, Key::PauseMetered];
+
+/// Help text endings that only tell the desktop app from the terminal one.
+const WINDOW_ONLY: &[&str] = &[" Window only, not the TUI.", " Window only."];
+
+/// The rows as the Android app shows them: without the desktop-only ones,
+/// and without help text about the desktop. Not behind `cfg` so the tests
+/// run it on any machine.
+pub fn for_android(
+    rows: Vec<(Option<&'static str>, Setting)>,
+) -> Vec<(Option<&'static str>, Setting)> {
+    rows.into_iter()
+        .filter(|(g, s)| {
+            !g.is_some_and(|g| DESKTOP_GROUPS.contains(&g)) && !DESKTOP_KEYS.contains(&s.key)
+        })
+        .map(|(g, mut s)| {
+            for end in WINDOW_ONLY {
+                if let Some(h) = s.help.strip_suffix(end) {
+                    s.help = h;
+                    break;
+                }
+            }
+            (g, s)
+        })
+        .collect()
 }
 
 /// The new value for a numeric or choice control after `change`, or None
@@ -1961,6 +2004,52 @@ mod tests {
         };
         assert!(label(Key::Backend).ends_with("(--backend null this run)"));
         assert!(!label(Key::BufferMs).contains("this run"));
+    }
+
+    #[test]
+    fn android_leaves_out_the_desktop_only_settings() {
+        let all = rows(
+            &Config::default(),
+            &SettingsInfo::default(),
+            1.0,
+            false,
+            &[],
+            &[],
+            Live::default(),
+        );
+        let phone = for_android(all.clone());
+        let has =
+            |v: &[(Option<&'static str>, Setting)], k: &Key| v.iter().any(|(_, s)| &s.key == k);
+        for k in [
+            Key::Tray,
+            Key::CloseToTray,
+            Key::IpodFormat,
+            Key::OutFormat,
+            Key::Dither,
+            Key::PauseMetered,
+            Key::Info("Config file"),
+        ] {
+            assert!(has(&all, &k), "{k:?} should be there on the desktop");
+            assert!(!has(&phone, &k), "{k:?} shouldn't be on Android");
+        }
+        for g in DESKTOP_GROUPS {
+            assert!(
+                !phone.iter().any(|(pg, _)| pg == &Some(*g)),
+                "{g} on Android"
+            );
+        }
+        // What works on a phone stays.
+        for k in [
+            Key::Theme,
+            Key::Backend,
+            Key::BufferMs,
+            Key::BitPerfect,
+            Key::Backdrop,
+        ] {
+            assert!(has(&phone, &k), "{k:?} should stay on Android");
+        }
+        assert!(!phone.iter().any(|(_, s)| s.help.contains("Window only")));
+        assert!(all.iter().any(|(_, s)| s.help.contains("Window only")));
     }
 
     #[test]

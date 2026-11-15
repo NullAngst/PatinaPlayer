@@ -270,6 +270,9 @@ export struct Row {
     fixed: bool,
     // Picked for a multiple selection.
     marked: bool,
+    // Inside an open Settings group: 0 no, 1 yes, 2 yes and the group's
+    // last row.
+    nest: int,
 }
 
 // A rule row in the smart playlist editor. `kind` is what the value part
@@ -1413,10 +1416,38 @@ component ListRow inherits Rectangle {
     property <bool> has-grip: root.draggable && (item.kind == 0 || item.kind == 11);
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : (item.kind == 19 ? 50px : 40px));
     z: root.dragging ? 10 : 0;
-    background: root.dragging ? transparent : (item.playing ? P.playing-bg : (item.marked || root.lifted ? P.raised : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent))));
+    // Inside an open Settings group the ground is already the idle
+    // selection color, so hover and selection go a step up from it.
+    property <bool> nested: item.nest > 0;
+    property <color> state-bg: root.nested
+        ? (selected || (ta.has-hover && item.selectable) ? P.raised : transparent)
+        : (root.dragging ? transparent : (item.playing ? P.playing-bg : (item.marked || root.lifted ? P.raised : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent)))));
+    background: root.nested ? transparent : root.state-bg;
     border-radius: 6px * P.round;
     border-width: item.playing && P.kawaii ? 2px : 0px;
     border-color: P.verdigris;
+
+    // An open Settings group's rows sit on one panel in the idle selection
+    // color, its bottom corners rounded under the last row. Hover and
+    // selection are drawn on it, inset, since the row's own background is
+    // under the panel.
+    if root.nested: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: P.sel-idle;
+        border-bottom-left-radius: item.nest == 2 ? 6px * P.round : 0px;
+        border-bottom-right-radius: item.nest == 2 ? 6px * P.round : 0px;
+    }
+    if root.nested: Rectangle {
+        x: 4px;
+        y: 2px;
+        width: parent.width - 8px;
+        height: parent.height - 4px;
+        background: root.state-bg;
+        border-radius: 6px * P.round;
+        border-width: selected && focused ? 1px : 0px;
+        border-color: P.border;
+    }
 
     // Header rows (search groups).
     if item.kind == 9: Text {
@@ -1838,7 +1869,8 @@ component ListRow inherits Rectangle {
         height: parent.height;
         opacity: item.off ? 0.45 : 1.0;
         HorizontalLayout {
-            padding-left: 12px;
+            // Indented under its group's name.
+            padding-left: root.nested ? 34px : 12px;
             padding-right: 12px;
             spacing: 16px;
             VerticalLayout {

@@ -82,7 +82,8 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 ## 5.10. The Drive screen, folded Settings and the library backup
 
 1. With Android Auto connected (or car mode on through a driving mode), check the Drive screen shows, swiping skips, the buttons work, Full app leaves it and the Drive button brings it back, and that it goes away when car mode ends. Rotate the phone to check the landscape layout. The screen is `DriveView` in `crates/patina-gui/ui/app.slint`.
-2. Open Settings: every group should start folded. If a new group was added, it folds like the rest without anything to change; `cargo test -p patina-core --test browse settings_groups` checks it.
+2. Open Settings: every group should start folded. If a new group was added, it folds like the rest without anything to change; `cargo test -p patina-core --test browse settings_groups` checks it. Open one: its rows should be indented and sit on one panel in the theme's `sel-idle` color, rounded under the last row, with hover and selection showing on it. Check it in Runout and Light, where the colors are closest. The panel is drawn in `ListRow` in `app.slint`; which rows get it is `Row.nest`, set in `bridge.rs`.
+4. On Android, Settings should have no Desktop, iPod or Files group, and no Sample format, Dither or Hold on metered connections. The list is `DESKTOP_GROUPS` and `DESKTOP_KEYS` in `crates/patina-core/src/browse/settings.rs`; a new setting that does nothing on a phone goes there. `cargo test -p patina-core --lib android_leaves_out` checks it. If Android metered detection is ever added (ConnectivityManager), take `PauseMetered` off the list.
 3. Back up the library on the phone to Downloads, and on the desktop. Open the copy with `sqlite3 copy.db "PRAGMA integrity_check"`; it should say ok. Android's save dialog is `Picker.save` in `android/java/dev/patina/player/Picker.java`.
 
 ## 5.11. Source scope, Opus from Plex and staying connected
