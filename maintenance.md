@@ -55,7 +55,7 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 1. Play on a Chromecast: cast button, pick it, and check the song comes out of it within a few seconds and that pause and skip follow. If it stops connecting after a Chromecast update, check `rust_cast` for a new version (it speaks Google's protocol) and the steps in `crates/patina-core/src/cast/chromecast.rs`.
 2. Play on a DLNA renderer (gmrender-resurrect or Kodi will do, on any Linux box). `crates/patina-core/src/cast/dlna.rs` sends SetAVTransportURI, then Play. A renderer that refuses the stream usually says why in its SOAP fault; the app shows it.
 3. Play on Snapcast: a snapserver with `source = tcp://0.0.0.0:4953?name=Patina&mode=server`. `cargo test -p patina-core --test cast` already checks the PCM that goes out, with a stand-in snapserver.
-4. Remote control: turn it on in Settings on the desktop, then from a phone, Settings, Other devices, Control another player. The desktop should be listed by its machine name. `cargo test -p patina-core --test control` drives a real player through the client.
+4. Remote control: turn it on in Settings on the desktop, then from a phone, Settings, Other devices, Control another player. The desktop should be listed by its machine name. `cargo test -p patina-core --test control` drives a real player through the client, and checks that New code and a restart on the same port work on the first try.
 5. `mdns-sd` and `rust_cast` move fast. When updating either, run the two tests above and steps 1 and 4 by hand, since mDNS needs a real network.
 
 ## 5.7. Looks
@@ -76,7 +76,7 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 3. Watch the Plex forum thread "Question on https://clients.plex.tv/api/v2/resources and JWT authentication". If Plex answers it, the fallback to the account token in `Plex::connect` may be droppable, or may need replacing.
 4. Sign in with a real Plex account, add a server, play a song through and check it shows on Plex's dashboard while it plays and its play count went up after. Rate a song and check Plex shows it.
 5. Icecast: add any public Icecast 2.4+ server and check its mounts show. If Icecast changes `status-json.xsl`, `crates/patina-core/src/remote/icecast.rs` is where it's read.
-6. Snapcast rooms use `Server.GetStatus`, `Group.SetClients`, `Group.SetStream` and `Client.SetVolume` from the control API doc in the Snapcast repo. Turn a room on that shares a group with another, check only it moves to the Patina stream, then turn it off and check it goes back.
+6. Snapcast rooms use `Server.GetStatus`, `Group.SetClients`, `Group.SetStream` and `Client.SetVolume` from the control API doc in the Snapcast repo. Turn a room on that shares a group with another, check only it moves to the Patina stream, then turn it off and check it goes back. Then try it on a snapserver whose only stream is Patina's: turning a room off should add "Patina-idle" and move the room there, not fail.
 7. Android: on a phone with Android 14 or later, open an album and swipe in from the left edge (it should go back to the artist), then at the top swipe from the left (the sidebar should open) and from the right (the app should go to the background, music playing).
 
 ## 5.10. The Drive screen, folded Settings and the library backup

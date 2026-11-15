@@ -1239,7 +1239,7 @@ pub fn rows(
                 Some(s) => format!("Rooms on {s}"),
                 None => "Rooms".into(),
             },
-            help: "The snapclients the snapserver knows. Turn one on to play PatinaPlayer there and nowhere else you haven't picked; turning it off puts it back on what it played before.",
+            help: "The snapclients the snapserver knows. Turn one on to play PatinaPlayer there and nowhere else you haven't picked; turning it off puts it back on what it played before, or on a silent \"Patina-idle\" stream PatinaPlayer adds when the snapserver has nothing else.",
             control: Control::Action(if snap.loading {
                 "Looking…"
             } else {

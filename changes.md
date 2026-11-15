@@ -1,5 +1,13 @@
 # Changes
 
+2026.11.14 - Bug fixes (remote control new code, Snapcast rooms turning off)
+
+* Remote control, New code: works on the first click. It used to stop the server and start it again on the same port, but the old server's listening thread held the port for up to 50 ms after it was told to stop, so the restart failed with "port is taken" and a second click was needed. A running server now takes the new code in place, and stopping a server waits for that thread, so turning it off and on or changing its port also works at once.
+* Snapcast rooms: a room can be turned off when the snapserver's only stream is Patina's. Before, off had nowhere to move the room, said "the snapserver has no other stream to go back to", and the toggle flipped back on. Now PatinaPlayer adds a silent "Patina-idle" stream (a TCP source one port above Patina's that nothing sends to) and parks the room there. A real stream is still picked first: the one the room had, else any other the snapserver has. The room's volume and mute are left alone.
+* Tests: a new code and a restart on the same port taking effect at once; the idle stream added when there's no other, reused when it's there, and passed over for a real stream.
+
+Reasons for changes: New code claimed the port was taken and needed a second click; no Snapcast room could be turned off.
+
 2026.11.14 - Feature addition (source scope) / Bug fixes (Plex playback, playlists, connection, Android add-by-token and Now Playing)
 
 * A source picker at the top of the sidebar (in the drawer on Android): All sources, Local, or one server. Artists, Albums, Songs, Genres, Folders, search, smart playlists and mixes show only what's in it; the queue and playlists show everything. The pick is kept in the config (`[library] scope`). Android Auto follows it. In the terminal app `B` steps through them and the status bar shows which. Settings, Library has the same choice as Browse.

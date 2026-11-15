@@ -134,7 +134,8 @@ struct Guard {
 
 struct ServerCtx {
     player: Player,
-    code: String,
+    /// Behind a lock so a new code takes effect without a restart.
+    code: Mutex<String>,
     name: String,
     asks: Sender<Ask>,
     loved: Arc<Mutex<Option<bool>>>,
@@ -146,6 +147,10 @@ pub struct Server {
     stop: Arc<AtomicBool>,
     port: u16,
     mdns: Option<(mdns_sd::ServiceDaemon, String)>,
+    ctx: Arc<ServerCtx>,
+    /// The accept loop. Dropping the server waits for it, so the port is
+    /// free again by the time `drop` returns.
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Server {
@@ -166,7 +171,7 @@ impl Server {
         let name = machine_name();
         let ctx = Arc::new(ServerCtx {
             player,
-            code: code.to_string(),
+            code: Mutex::new(code.to_string()),
             name: name.clone(),
             asks,
             loved,
@@ -176,13 +181,14 @@ impl Server {
             }),
         });
         let s2 = stop.clone();
-        std::thread::Builder::new()
+        let ctx2 = ctx.clone();
+        let thread = std::thread::Builder::new()
             .name("patina-remote".into())
             .spawn(move || {
                 while !s2.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((sock, _)) => {
-                            let ctx = ctx.clone();
+                            let ctx = ctx2.clone();
                             let _ = std::thread::Builder::new()
                                 .name("patina-remote-req".into())
                                 .spawn(move || {
@@ -199,11 +205,26 @@ impl Server {
             })?;
         let mdns = advertise(&name, port);
         log::info!("remote control: listening on port {port}");
-        Ok(Server { stop, port, mdns })
+        Ok(Server {
+            stop,
+            port,
+            mdns,
+            ctx,
+            thread: Some(thread),
+        })
     }
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Swap the code. Whoever had the old one gets turned away from the
+    /// next request on.
+    pub fn set_code(&self, code: &str) {
+        *self.ctx.code.lock().unwrap() = code.to_string();
+        let mut g = self.ctx.guard.lock().unwrap();
+        g.misses = 0;
+        g.since = Instant::now();
     }
 }
 
@@ -232,6 +253,12 @@ fn advertise(name: &str, port: u16) -> Option<(mdns_sd::ServiceDaemon, String)> 
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // The loop checks the flag every 50 ms and drops the listener when
+        // it leaves. Without waiting, starting a new server on the same
+        // port right after this fails with "address in use".
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
         if let Some((d, full)) = self.mdns.take() {
             let _ = d.unregister(&full);
             let _ = d.shutdown();
@@ -330,7 +357,10 @@ fn handle(mut sock: TcpStream, ctx: &ServerCtx) {
                 b"wait a minute",
             );
         }
-        let ok = req.code.as_deref().is_some_and(|c| same(c, &ctx.code));
+        let ok = req
+            .code
+            .as_deref()
+            .is_some_and(|c| same(c, &ctx.code.lock().unwrap()));
         if !ok {
             g.misses += 1;
             drop(g);

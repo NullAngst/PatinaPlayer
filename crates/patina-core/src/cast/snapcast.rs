@@ -14,7 +14,11 @@
 //! out of its group first if it shares one (`Group.SetClients` with the
 //! others: the one left out gets a group of its own), then sets that
 //! group's stream (`Group.SetStream`). Taking it off sets it back to the
-//! stream it was on before. Volume is per client (`Client.SetVolume`).
+//! stream it was on before. When the snapserver has no stream but
+//! Patina's, there's nothing to go back to, so Patina adds a second TCP
+//! source that nothing ever sends to ([`IDLE_NAME`], one port up) and
+//! parks the room there: silence, without touching its mute or volume.
+//! Volume is per client (`Client.SetVolume`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -29,6 +33,9 @@ const RPC_TCP: u16 = 1705;
 const RPC_HTTP: u16 = 1780;
 /// What the stream is called in Snapweb and the Snapcast apps.
 pub const STREAM_NAME: &str = "Patina";
+/// The silent stream rooms go to when they're taken off Patina's and the
+/// snapserver has nothing else. No spaces: it goes into a URI as is.
+pub const IDLE_NAME: &str = "Patina-idle";
 
 /// How it went.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,11 +315,22 @@ fn route_at(
             .flatten()
             .filter_map(|s| s.get("id")?.as_str().map(str::to_string))
             .collect();
-        back_to
+        // Where it was, else a real stream, else the idle one, else make
+        // the idle one.
+        match back_to
             .filter(|b| *b != patina && streams.iter().any(|s| s == b))
             .map(str::to_string)
-            .or_else(|| streams.into_iter().find(|s| *s != patina))
-            .ok_or_else(|| "the snapserver has no other stream to go back to".to_string())?
+            .or_else(|| {
+                streams
+                    .iter()
+                    .find(|s| **s != patina && *s != IDLE_NAME)
+                    .cloned()
+            })
+            .or_else(|| streams.iter().find(|s| *s == IDLE_NAME).cloned())
+        {
+            Some(s) => s,
+            None => add_idle(&host, ports, port_of(t))?,
+        }
     };
     if current == want {
         return Ok(current);
@@ -344,6 +362,18 @@ fn route_at(
         json!({ "id": group, "stream_id": want }),
     )?;
     Ok(current)
+}
+
+/// Add the silent stream: a TCP source in server mode that Patina never
+/// connects to. One port above Patina's, so the two can't collide.
+fn add_idle(host: &str, ports: (u16, u16), patina_port: u16) -> Result<String, String> {
+    let port = patina_port.checked_add(1).unwrap_or(patina_port - 1);
+    let uri = format!("tcp://0.0.0.0:{port}?name={IDLE_NAME}&mode=server&sampleformat=48000:16:2");
+    rpc(host, ports, "Stream.AddStream", json!({ "streamUri": uri })).map_err(|e| {
+        format!("the snapserver has no other stream to go back to, and it wouldn't add a silent one: {e}")
+    })?;
+    log::info!("cast: added {uri} to the snapserver at {host} for rooms taken off Patina");
+    Ok(IDLE_NAME.to_string())
 }
 
 /// A client's volume, 0 to 100, and whether it's muted.
@@ -596,6 +626,72 @@ mod tests {
         });
         let t = Target::snapcast("127.0.0.1:4953").unwrap();
         route_at(&t, (port, 1), "den", false, Some("radio")).unwrap();
+        let seen = h.join().unwrap();
+        assert_eq!(seen[1].1, json!({"id": "g2", "stream_id": "radio"}));
+    }
+
+    /// Patina's stream and nothing else, with the den on it.
+    fn only_patina(idle: bool) -> Value {
+        let mut s = two_rooms(true);
+        s["server"]["groups"][1]["stream_id"] = json!("Patina");
+        let streams = s["server"]["streams"].as_array_mut().unwrap();
+        streams.remove(0);
+        if idle {
+            streams.push(json!({"id": IDLE_NAME, "uri": {"scheme": "tcp", "host": "0.0.0.0:4954", "query": {"name": IDLE_NAME, "mode": "server"}}}));
+        }
+        s
+    }
+
+    #[test]
+    fn with_no_other_stream_a_silent_one_is_added_and_used() {
+        // GetStatus, AddStream, SetStream.
+        let (port, h) = fake_rpc(3, |m, _| match m {
+            "Server.GetStatus" => only_patina(false),
+            "Stream.AddStream" => json!({"stream_id": IDLE_NAME}),
+            _ => json!({"stream_id": IDLE_NAME}),
+        });
+        let t = Target::snapcast("127.0.0.1:4953").unwrap();
+        // Remembered "radio" is gone from the snapserver: it doesn't count.
+        let was = route_at(&t, (port, 1), "den", false, Some("radio")).unwrap();
+        assert_eq!(was, "Patina");
+        let seen = h.join().unwrap();
+        assert_eq!(seen[1].0, "Stream.AddStream");
+        let uri = seen[1].1["streamUri"].as_str().unwrap();
+        assert!(uri.starts_with("tcp://0.0.0.0:4954?"), "{uri}");
+        assert!(uri.contains(&format!("name={IDLE_NAME}")), "{uri}");
+        assert_eq!(seen[2].0, "Group.SetStream");
+        assert_eq!(seen[2].1, json!({"id": "g2", "stream_id": IDLE_NAME}));
+    }
+
+    #[test]
+    fn an_idle_stream_already_there_is_reused() {
+        let (port, h) = fake_rpc(2, |m, _| match m {
+            "Server.GetStatus" => only_patina(true),
+            _ => json!({"stream_id": IDLE_NAME}),
+        });
+        let t = Target::snapcast("127.0.0.1:4953").unwrap();
+        route_at(&t, (port, 1), "den", false, None).unwrap();
+        let seen = h.join().unwrap();
+        assert_eq!(seen[1].0, "Group.SetStream");
+        assert_eq!(seen[1].1, json!({"id": "g2", "stream_id": IDLE_NAME}));
+    }
+
+    #[test]
+    fn a_real_stream_beats_the_idle_one() {
+        let (port, h) = fake_rpc(2, |m, _| {
+            if m == "Server.GetStatus" {
+                let mut s = only_patina(true);
+                s["server"]["streams"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id": "radio", "uri": {"scheme": "pipe", "host": "", "query": {"name": "radio"}}}));
+                s
+            } else {
+                json!({"stream_id": "radio"})
+            }
+        });
+        let t = Target::snapcast("127.0.0.1:4953").unwrap();
+        route_at(&t, (port, 1), "den", false, None).unwrap();
         let seen = h.join().unwrap();
         assert_eq!(seen[1].1, json!({"id": "g2", "stream_id": "radio"}));
     }

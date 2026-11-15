@@ -129,9 +129,12 @@ impl Browser {
             return self.error(format!("couldn't save to the config: {e}"));
         }
         self.config.remote.code = code.clone();
-        // The server keeps the code it started with: start it again.
-        self.remote_server = None;
-        self.apply_remote_control();
+        // A running server takes the new code in place: no restart, so no
+        // fight over the port and no gap in the network announcement.
+        match &self.remote_server {
+            Some(s) => s.set_code(&code),
+            None => self.apply_remote_control(),
+        }
         self.note(format!("The remote control code is now {code}"));
         self.refresh_or_stale(super::Section::Settings);
     }

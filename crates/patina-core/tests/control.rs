@@ -99,3 +99,36 @@ fn another_player_sees_and_steers_this_one() {
     player.send(Command::Quit);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A new code, or a restart on the same port, works on the first try.
+/// Dropping a server used to leave its port held for a moment, so starting
+/// it again right away failed with "address in use".
+#[test]
+fn a_new_code_and_a_restart_take_effect_at_once() {
+    let player = Player::spawn(PlayerConfig {
+        output: OutputConfig {
+            backend: Backend::Null,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let loved = Arc::new(Mutex::new(None));
+    let server = Server::start(player.clone(), 0, "111111", tx.clone(), loved.clone()).unwrap();
+    let port = server.port();
+    let addr = format!("127.0.0.1:{port}");
+    assert!(Client::new(&addr, "111111").unwrap().state().is_ok());
+
+    server.set_code("222222");
+    assert_eq!(
+        Client::new(&addr, "111111").unwrap().state().unwrap_err(),
+        "wrong code"
+    );
+    assert!(Client::new(&addr, "222222").unwrap().state().is_ok());
+
+    drop(server);
+    let again = Server::start(player, port, "333333", tx, loved)
+        .expect("the port should be free as soon as the old server is dropped");
+    assert!(Client::new(&addr, "333333").unwrap().state().is_ok());
+    drop(again);
+}
