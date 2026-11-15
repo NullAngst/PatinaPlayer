@@ -432,7 +432,7 @@ fn a_conversion_the_server_fails_on_is_asked_again_then_comes_as_the_original() 
         bitrate: 128,
         ..Default::default()
     };
-    let r = rig("CacheF", cfg, None);
+    let r = rig("CacheConv", cfg, None);
     r.srv.state.lock().unwrap().fail_converted = 1;
     r.cache.upcoming(vec![r.key("11")]);
     assert!(wait_for(15, || r.cache.status().cache_files == 1));
@@ -458,7 +458,7 @@ fn a_conversion_the_server_fails_on_is_asked_again_then_comes_as_the_original() 
     );
     match cache::open(
         &RemoteRef {
-            server: "CacheF".into(),
+            server: "CacheConv".into(),
             id: "12".into(),
             episode: false,
         },
@@ -468,6 +468,34 @@ fn a_conversion_the_server_fails_on_is_asked_again_then_comes_as_the_original() 
             assert!(original, "it's the original file now");
             assert!(path.to_string_lossy().ends_with(".flac"), "{path:?}");
         }
+        _ => panic!("kept songs open as files"),
+    }
+}
+
+/// The other way round: an original the server keeps failing on comes
+/// down converted, so it plays.
+#[test]
+fn an_original_the_server_fails_on_comes_converted() {
+    let _t = turn();
+    let r = rig("CacheOrig", CacheConfig::default(), None);
+    r.srv.state.lock().unwrap().fail_raw = 2;
+    r.cache.upcoming(vec![r.key("11")]);
+    assert!(wait_for(15, || r.cache.status().cache_files == 1));
+    assert_eq!(r.streams(), ["raw", "raw", "opus:256"]);
+    let files = files_under(&r.roots.cache);
+    assert!(
+        files[0].to_string_lossy().ends_with("01 - Blew.opus"),
+        "{files:?}"
+    );
+    match cache::open(
+        &RemoteRef {
+            server: "CacheOrig".into(),
+            id: "11".into(),
+            episode: false,
+        },
+        None,
+    ) {
+        Some(Ok(Opening::File { original, .. })) => assert!(!original),
         _ => panic!("kept songs open as files"),
     }
 }

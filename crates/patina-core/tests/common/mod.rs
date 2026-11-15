@@ -231,6 +231,8 @@ pub struct State {
     pub streams: Vec<String>,
     /// Converted streams answer 500 while this is above 0, counting down.
     pub fail_converted: u32,
+    /// The same, for the original file.
+    pub fail_raw: u32,
     /// Who the server says is similar to an artist, by name.
     pub similar_artists: HashMap<String, Vec<String>>,
     /// Songs the server says are similar to a song, by id.
@@ -366,6 +368,7 @@ pub fn library(gonic: bool) -> State {
         stream_body: None,
         streams: Vec::new(),
         fail_converted: 0,
+        fail_raw: 0,
         similar_artists: HashMap::new(),
         similar_songs: HashMap::new(),
         ratings: HashMap::new(),
@@ -564,7 +567,16 @@ fn subsonic(
                 s.streams.push(rec);
                 let id = r.get("id").unwrap_or("").to_string();
                 s.calls.push(format!("stream {id}"));
-                if !f.is_empty() && f != "raw" && s.fail_converted > 0 {
+                let raw = f.is_empty() || f == "raw";
+                if raw && s.fail_raw > 0 {
+                    s.fail_raw -= 1;
+                    return Response {
+                        status: 500,
+                        ctype: "text/plain".into(),
+                        body: b"can't read the file".to_vec(),
+                    };
+                }
+                if !raw && s.fail_converted > 0 {
                     s.fail_converted -= 1;
                     return Response {
                         status: 500,

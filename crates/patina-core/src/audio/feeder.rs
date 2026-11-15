@@ -270,6 +270,11 @@ const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 /// How many skips in a row before giving up on a queue full of broken files.
 const MAX_CONSECUTIVE_ERRORS: usize = 25;
 
+/// How many songs in a row on a server that isn't connected before
+/// playback stops. They fail in a millisecond each, so skipping on would
+/// run through a whole queue of them (and it's not the songs' fault).
+const MAX_AWAY_IN_A_ROW: usize = 3;
+
 /// Reconnect backoff: 1, 2, 4, 8, 16, then every 30 s.
 fn backoff(attempt: u32) -> Duration {
     Duration::from_secs((1u64 << attempt.saturating_sub(1).min(5)).min(30))
@@ -439,11 +444,27 @@ impl Feeder {
     /// `join` is a song following on from the one that just ended.
     fn open_from(&mut self, mut entry: EntryId, pos: Duration, join: bool) {
         let mut pos = pos;
+        let mut away = 0;
         for _ in 0..MAX_CONSECUTIVE_ERRORS {
             match self.open(entry, pos, 1, join) {
                 Opened::Yes | Opened::Interrupted => return,
                 Opened::Retrying => return,
-                Opened::No => {}
+                Opened::No => away = 0,
+                Opened::Away(server) => {
+                    away += 1;
+                    if away >= MAX_AWAY_IN_A_ROW {
+                        log::info!(
+                            "{away} songs in a row on {server}, which isn't connected; stopping"
+                        );
+                        let _ = self.msgs.send(FeedMsg::TrackError {
+                            entry,
+                            error: format!(
+                                "Stopped: {server} isn't connected, and the next songs are on it. They'll play once it's back."
+                            ),
+                        });
+                        break;
+                    }
+                }
             }
             pos = Duration::ZERO;
             match self.queue.lock().unwrap().step(entry, 1) {
@@ -576,6 +597,14 @@ impl Feeder {
                 return Opened::Retrying;
             }
             Err(e) => {
+                // A server that isn't connected: nothing's wrong with the
+                // song, so it isn't marked as one that won't play.
+                if let Some(r) = &info.remote
+                    && crate::remote::registry().client(&r.server).is_err()
+                {
+                    log::warn!("{label}: {e}");
+                    return Opened::Away(r.server.clone());
+                }
                 self.queue.lock().unwrap().mark_failed(entry);
                 let _ = self.msgs.send(FeedMsg::TrackError {
                     entry,
@@ -1230,6 +1259,8 @@ fn crossfades(info: &TrackInfo) -> bool {
 enum Opened {
     Yes,
     No,
+    /// A server song whose server isn't connected right now.
+    Away(String),
     /// A live stream that didn't answer; a retry is scheduled.
     Retrying,
     /// A command arrived while opening, or while waiting for the old ring

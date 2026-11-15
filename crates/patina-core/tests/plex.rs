@@ -160,6 +160,14 @@ fn plex(seen: Arc<Mutex<Seen>>) -> String {
             };
         }
         // ----- The server -----
+        // An album Plex fails at, as it does under load.
+        if r.path.starts_with("/library/metadata/99999") {
+            return Response {
+                status: 500,
+                ctype: "text/html".into(),
+                body: b"<html><body>Internal Server Error</body></html>".to_vec(),
+            };
+        }
         if r.path == "/identity" {
             return Response::json(
                 json!({"MediaContainer": {"machineIdentifier": MACHINE, "version": "1.43.2.1"}}),
@@ -477,6 +485,25 @@ fn a_jwt_near_its_end_is_refreshed_and_kept() {
     let fresh = Login::parse(&c.fresh_secret().expect("the new token to save"));
     assert!(fresh.expires().unwrap() > now() + 6 * 86400);
     assert_eq!(fresh.seed, login.seed, "the same device key");
+}
+
+/// A 500 means Plex answered and failed at the job: asked again once, then
+/// a server error, not "can't reach the server", which took the server
+/// offline and sent every song on it skipping.
+#[test]
+fn plex_failing_at_a_request_is_asked_again_and_isnt_the_server_gone() {
+    let (url, seen) = setup();
+    let c = Plex::connect(&url, "", SERVER_TOKEN, StreamFormat::Raw, 192, false).unwrap();
+    let e = c.album_songs("99999").unwrap_err();
+    assert!(matches!(e, RemoteError::Server { code: 500, .. }), "{e:?}");
+    let tries = seen
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .filter(|c| c.1.starts_with("/library/metadata/99999"))
+        .count();
+    assert_eq!(tries, 2);
 }
 
 #[test]

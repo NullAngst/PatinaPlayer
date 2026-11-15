@@ -288,3 +288,49 @@ fn sleep_timer_running_out_while_paused_does_nothing() {
     );
     p.send(Command::Quit);
 }
+
+/// Songs on a server that isn't connected fail in a millisecond each.
+/// Skipping on ran through a whole queue of them; now three in a row stop
+/// playback, with one message, and they aren't marked as broken.
+#[test]
+fn a_run_of_songs_on_a_server_thats_away_stops_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = tone(dir.path(), "after.flac", 1.0);
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let p = player(played.clone());
+    let away = |i: usize| TrackInfo {
+        path: PathBuf::from(format!("server://Nowhere/song{i}.flac")),
+        remote: Some(patina_core::remote::RemoteRef {
+            server: "Nowhere".into(),
+            id: i.to_string(),
+            episode: false,
+        }),
+        ..Default::default()
+    };
+    let mut tracks: Vec<TrackInfo> = (0..5).map(away).collect();
+    tracks.push(TrackInfo {
+        path: local.clone(),
+        ..Default::default()
+    });
+    p.send(Command::SetQueueTracks {
+        tracks,
+        start: 0,
+        pos: Duration::ZERO,
+    });
+    let mut errors = Vec::new();
+    wait(&p, 5, |e| {
+        if let Event::Error(m) = e {
+            errors.push(m.clone());
+        }
+        errors
+            .iter()
+            .any(|m| m.starts_with("Stopped: Nowhere isn't connected"))
+    });
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        played.lock().unwrap().is_empty(),
+        "it stopped, not skipped on"
+    );
+    assert_eq!(errors.len(), 1, "one message, not one a song: {errors:?}");
+    p.send(Command::Quit);
+}

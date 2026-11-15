@@ -695,6 +695,7 @@ impl Worker {
                 return;
             }
             Err(SyncError::Remote(e @ RemoteError::Http(_))) => {
+                log::info!("{name} went away during the sync: {e}");
                 self.offline(e.to_string());
                 return;
             }

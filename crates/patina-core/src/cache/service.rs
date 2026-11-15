@@ -189,8 +189,8 @@ enum Cmd {
         run: u64,
         key: JobKey,
         result: Result<Outcome, String>,
-        /// A conversion the server failed on, downloaded as the original.
-        raw: bool,
+        /// Came down as something other than what was asked for.
+        swap: Option<Swap>,
     },
     Quit,
 }
@@ -697,8 +697,8 @@ impl Worker {
                 run,
                 key,
                 result,
-                raw,
-            } => self.finished(run, key, result, raw),
+                swap,
+            } => self.finished(run, key, result, swap),
         }
     }
 
@@ -983,12 +983,21 @@ impl Worker {
         let song = match &key {
             JobKey::Song(s) => {
                 let (format, kbps) = self.format_for(&s.server);
+                // What an original the server fails on comes as instead:
+                // the cache's own conversion, or Opus at a rate that's hard
+                // to tell from the original.
+                let instead = if self.cfg.format == StreamFormat::Raw {
+                    (StreamFormat::Opus, 256)
+                } else {
+                    (self.cfg.format, self.cfg.bitrate)
+                };
                 Some(SongJob {
                     server: s.server.clone(),
                     id: s.id.clone(),
                     format,
                     kbps,
                     original: a.original,
+                    instead,
                 })
             }
             JobKey::Episode(_) => None,
@@ -996,12 +1005,12 @@ impl Worker {
         std::thread::Builder::new()
             .name("patina-download".into())
             .spawn(move || {
-                let (r, raw) = match &song {
+                let (r, swap) = match &song {
                     Some(g) => download_song(&http, &url, &dest, resume, &progress, &stop, g),
                     None => (
                         fetch::try_fetch(&http, &url, &dest, resume, &progress, &stop)
                             .map_err(|e| e.to_string()),
-                        false,
+                        None,
                     ),
                 };
                 if let Err(e) = &r {
@@ -1011,7 +1020,7 @@ impl Worker {
                     run,
                     key: k2,
                     result: r,
-                    raw,
+                    swap,
                 });
             })
             .map_err(|e| StartError::Local(e.to_string()))?;
@@ -1186,7 +1195,13 @@ impl Worker {
         Ok(start)
     }
 
-    fn finished(&mut self, run: u64, key: JobKey, result: Result<Outcome, String>, raw: bool) {
+    fn finished(
+        &mut self,
+        run: u64,
+        key: JobKey,
+        result: Result<Outcome, String>,
+        swap: Option<Swap>,
+    ) {
         let a = if self.active.as_ref().is_some_and(|a| a.run == run) {
             self.active.take()
         } else if self.stopping.get(&key).is_some_and(|a| a.run == run) {
@@ -1200,8 +1215,8 @@ impl Worker {
         };
         match result {
             Ok(Outcome::Done) => {
-                if raw && let JobKey::Song(s) = &key {
-                    self.as_original(s, &mut a);
+                if let (Some(swap), JobKey::Song(s)) = (swap, &key) {
+                    self.swapped(s, &mut a, swap);
                 }
                 self.parts.remove(&key);
                 self.failed.remove(&key);
@@ -1255,15 +1270,19 @@ impl Worker {
         self.emit(CacheEvent::Changed);
     }
 
-    /// A conversion that came down as the original file after all: give
-    /// it the original's name, so it's kept and played as what it is.
-    fn as_original(&mut self, s: &SongKey, a: &mut Active) {
+    /// A download that came down as something other than what was asked
+    /// for: give the file the name of what it is, so it's kept and played
+    /// as that.
+    fn swapped(&mut self, s: &SongKey, a: &mut Active, swap: Swap) {
         let path = self.meta.get(s).and_then(|m| m.path.clone());
-        let ext = path
-            .as_ref()
-            .and_then(|p| p.extension())
-            .map(|e| e.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_else(|| "audio".into());
+        let ext = match swap {
+            Swap::Original => path
+                .as_ref()
+                .and_then(|p| p.extension())
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_else(|| "audio".into()),
+            Swap::Converted(f, _) => f.as_str().to_string(),
+        };
         let root = match a.tier {
             Tier::Cache => &self.roots.cache,
             Tier::Offline => &self.roots.offline,
@@ -1276,8 +1295,16 @@ impl Worker {
                 Err(e) => log::warn!("can't rename {}: {e}", a.dest.display()),
             }
         }
-        a.original = true;
-        a.format = "raw".into();
+        match swap {
+            Swap::Original => {
+                a.original = true;
+                a.format = "raw".into();
+            }
+            Swap::Converted(f, kbps) => {
+                a.original = false;
+                a.format = format!("{}:{kbps}", f.as_str());
+            }
+        }
     }
 
     /// A song finished downloading: note it, and make room.
@@ -1683,15 +1710,27 @@ struct SongJob {
     kbps: u32,
     /// The original file was asked for, not a conversion.
     original: bool,
+    /// The conversion to ask for when the server fails on the original.
+    instead: (StreamFormat, u32),
+}
+
+/// A download that came as something other than what was asked for.
+#[derive(Debug, Clone, Copy)]
+enum Swap {
+    /// The original file, for a conversion the server failed on.
+    Original,
+    /// A conversion, for an original the server failed on.
+    Converted(StreamFormat, u32),
 }
 
 /// Download a server song. When the server fails on its side (a 5xx)
-/// before sending anything, ask once more, a moment later, with a new
-/// conversion session. A conversion that fails twice comes down as the
-/// original file instead: Plex's transcoder gives up on some files it
-/// plays as they are, and the song playing beats it being skipped. The
-/// bool says that happened. Whoever reads the `.part` meanwhile only
-/// waits; the caller marks the download failed if it all comes to nothing.
+/// before sending anything, ask once more, a moment later (a conversion
+/// with a new session). If it fails again, ask for the song the other
+/// way: a conversion comes down as the original, and an original as a
+/// conversion. Plex fails on some files one way that it serves fine the
+/// other, and the song playing beats it being skipped. Whoever reads the
+/// `.part` meanwhile only waits; the caller marks the download failed if
+/// it all comes to nothing.
 fn download_song(
     http: &reqwest::blocking::Client,
     url: &str,
@@ -1700,17 +1739,17 @@ fn download_song(
     progress: &Progress,
     stop: &AtomicBool,
     g: &SongJob,
-) -> (Result<Outcome, String>, bool) {
+) -> (Result<Outcome, String>, Option<Swap>) {
     let worth_more = |e: &fetch::FetchError| {
         e.server_side() && progress.done() == 0 && !stop.load(Ordering::Relaxed)
     };
     let e = match fetch::try_fetch(http, url, dest, resume, progress, stop) {
-        Ok(o) => return (Ok(o), false),
-        Err(e) if !worth_more(&e) => return (Err(e.to_string()), false),
+        Ok(o) => return (Ok(o), None),
+        Err(e) if !worth_more(&e) => return (Err(e.to_string()), None),
         Err(e) => e,
     };
     let Ok(client) = registry().client(&g.server) else {
-        return (Err(e.to_string()), false);
+        return (Err(e.to_string()), None);
     };
     log::info!("{} failed on song {} ({e}); asking again", g.server, g.id);
     std::thread::sleep(Duration::from_secs(1));
@@ -1723,13 +1762,32 @@ fn download_song(
     };
     let e = match again {
         Ok(u) => match fetch::try_fetch(http, &u, dest, resume, progress, stop) {
-            Ok(o) => return (Ok(o), false),
+            Ok(o) => return (Ok(o), None),
             Err(e) => e,
         },
         Err(_) => e,
     };
-    if g.original || !worth_more(&e) {
-        return (Err(e.to_string()), false);
+    if !worth_more(&e) {
+        return (Err(e.to_string()), None);
+    }
+    if g.original {
+        let (f, kbps) = g.instead;
+        log::warn!(
+            "{} failed twice on song {}'s file: {e}; downloading it converted to {} {kbps} instead",
+            g.server,
+            g.id,
+            f.as_str()
+        );
+        return match client.stream_url_as(&g.id, f, kbps) {
+            Ok((u, false)) => match fetch::try_fetch(http, &u, dest, false, progress, stop) {
+                Ok(o) => (Ok(o), Some(Swap::Converted(f, kbps))),
+                Err(e2) => (
+                    Err(format!("{e}, and a conversion wouldn't come either: {e2}")),
+                    None,
+                ),
+            },
+            _ => (Err(e.to_string()), None),
+        };
     }
     let why = client.stream_trouble(&g.id, g.format, g.kbps);
     let because = why
@@ -1743,15 +1801,15 @@ fn download_song(
     );
     match client.stream_url_as(&g.id, StreamFormat::Raw, 0) {
         Ok((u, true)) => match fetch::try_fetch(http, &u, dest, false, progress, stop) {
-            Ok(o) => (Ok(o), true),
+            Ok(o) => (Ok(o), Some(Swap::Original)),
             Err(e2) => (
                 Err(format!(
                     "{e}{because}, and the original wouldn't come either: {e2}"
                 )),
-                false,
+                None,
             ),
         },
-        _ => (Err(format!("{e}{because}")), false),
+        _ => (Err(format!("{e}{because}")), None),
     }
 }
 

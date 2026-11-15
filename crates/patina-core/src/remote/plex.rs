@@ -496,12 +496,18 @@ impl Plex {
             )
         };
         // A dropped connection (a phone between networks, a socket the
-        // server closed) gets one more try for anything safe to repeat.
-        // Creating a playlist isn't, so a POST goes once.
+        // server closed), or Plex failing at a request (it does under
+        // load), gets one more try for anything safe to repeat. Creating a
+        // playlist isn't, so a POST goes once.
         let again = |r: Result<Value>| match r {
             Err(RemoteError::Http(e)) if method != Method::POST => {
                 log::info!("Plex {path}: {e}; trying again");
                 std::thread::sleep(Duration::from_millis(800));
+                once()
+            }
+            Err(e @ RemoteError::Server { code: 500.., .. }) if method != Method::POST => {
+                log::info!("{e}; trying again");
+                std::thread::sleep(Duration::from_millis(1500));
                 once()
             }
             other => other,
@@ -926,6 +932,16 @@ fn send(
             return Err(RemoteError::Server {
                 code: status.as_u16() as i64,
                 message: format!("{path}: not here"),
+            });
+        }
+        // Plex answered, and failed at the job: the server's there. Taking
+        // it offline for this sent every song on it skipping. 502 to 504
+        // come from a proxy in front of a Plex that isn't answering, and
+        // count as not reachable.
+        500 | 501 | 505.. => {
+            return Err(RemoteError::Server {
+                code: status.as_u16() as i64,
+                message: format!("{path}: Plex failed at it (HTTP {status})"),
             });
         }
         s if !(200..300).contains(&s) => {

@@ -1,5 +1,15 @@
 # Changes
 
+2026.11.15 - Bug fixes (Plex 500s on original files, a server dropping out over one)
+
+* Original files Plex fails on with HTTP 500 now play. After the one retry, the song is asked for converted (Opus 256 kbps, or the cache's own conversion if one is set) and kept under a .opus name. The fallback from earlier today only went the other way, conversions to originals, and Direct Stream downloads the original.
+* A 500 from Plex no longer takes the whole server offline. Plex's client treated any error status as "can't reach the server", so a 500 during the background library sync marked PoeticPanther offline, without a line in the log. Every song on it then failed at once with "not connected", which is the flood in the log. 500 and 501 now mean Plex answered and failed at the job; 502 to 504 still mean it's not answering. Plex GET calls that fail with a 500 get one retry 1.5 s later, as a dropped connection does.
+* Going offline during a sync is now logged.
+* Songs on a server that isn't connected stop playback after three in a row, with one message, instead of skipping through the queue (up to 25 at a time, and the log showed about 70 in a few seconds). They aren't marked as broken, since nothing's wrong with them.
+* Tests: an original the server fails on comes down converted; a Plex 500 is retried once and isn't a server gone; a run of songs on a server that's away stops playback with one message. Two cache tests that shared a stand-in server name now have their own.
+
+Reasons for changes: with Direct Stream, Plex songs failed with HTTP 500 and were skipped, and after a few of them every song on the server failed with "not connected" and the queue emptied.
+
 2026.11.15 - Bug fixes and UX overhaul (Plex conversions, smart playlist groups, scrolling lists)
 
 * Plex conversions that fail with HTTP 500 no longer skip the song. A download that fails on the server's side before any data arrives is asked for once more a second later, with a new transcode session. If a conversion fails again, the original file is downloaded instead and kept under its real name and extension, so it plays (and plays bit-perfect if that's on). The log names the song and gives Plex's reason, read from its transcode decision endpoint. Any server's conversions get the same treatment; Plex is the one that needed it.
