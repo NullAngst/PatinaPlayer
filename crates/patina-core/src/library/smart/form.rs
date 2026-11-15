@@ -3,9 +3,17 @@
 //! writes the same query text the playlists are stored as, so a form and
 //! the text box are two views of one thing.
 //!
-//! Not every query fits the rows: nested groups, a mix of "and" and "or",
-//! or the leave-out box. [`Form::from_text`] gives None for those, and the
-//! editor shows the text instead.
+//! A row can also be a group, as in iTunes: rules of its own, matched all
+//! or any apart from the rows around it. That's a bracket in the text, so
+//! "rating 5 and (genre is blues or genre is jazz)" is two rows, the
+//! second a group of two. Groups go one level deep.
+//!
+//! What doesn't fit: groups inside groups, "not" around a group, or the
+//! leave-out box. [`Form::from_text`] gives None for those, and the editor
+//! shows the text instead.
+//!
+//! The rows are kept flat, as [`Line`]s in the order they show, so a row's
+//! place on screen is its index here.
 
 use super::{Expr, Field, Kind, Limit, Op, SortKey, age, date, parse_with, range};
 
@@ -273,12 +281,42 @@ fn quote(v: &str) -> String {
     }
 }
 
+/// A row of the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// A rule. `inner` puts it in the group above it.
+    Rule { rule: Rule, inner: bool },
+    /// The head of a group: its rules are the inner ones right under it.
+    Group { any: bool },
+}
+
+impl Line {
+    pub fn top(rule: Rule) -> Line {
+        Line::Rule { rule, inner: false }
+    }
+
+    pub fn inner(rule: Rule) -> Line {
+        Line::Rule { rule, inner: true }
+    }
+
+    pub fn rule(&self) -> Option<&Rule> {
+        match self {
+            Line::Rule { rule, .. } => Some(rule),
+            Line::Group { .. } => None,
+        }
+    }
+
+    pub fn is_inner(&self) -> bool {
+        matches!(self, Line::Rule { inner: true, .. })
+    }
+}
+
 /// The whole form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Form {
-    /// Match any rule rather than all of them.
+    /// Match any row rather than all of them.
     pub any: bool,
-    pub rules: Vec<Rule>,
+    pub lines: Vec<Line>,
     pub limit: Option<Limit>,
     /// An index into [`ORDERS`].
     pub order: usize,
@@ -288,24 +326,134 @@ impl Default for Form {
     fn default() -> Self {
         Form {
             any: false,
-            rules: vec![Rule::new(Field::Artist)],
+            lines: vec![Line::top(Rule::new(Field::Artist))],
             limit: None,
             order: 0,
         }
     }
 }
 
+/// "and" or "or".
+fn joiner(any: bool) -> &'static str {
+    if any { " or " } else { " and " }
+}
+
 impl Form {
+    pub fn rule(&self, i: usize) -> Option<&Rule> {
+        self.lines.get(i).and_then(Line::rule)
+    }
+
+    pub fn rule_mut(&mut self, i: usize) -> Option<&mut Rule> {
+        match self.lines.get_mut(i) {
+            Some(Line::Rule { rule, .. }) => Some(rule),
+            _ => None,
+        }
+    }
+
+    /// Where the row at `i` ends: past a group's rules for a group's head,
+    /// else the next row.
+    fn end_of(&self, i: usize) -> usize {
+        let mut end = i + 1;
+        if matches!(self.lines.get(i), Some(Line::Group { .. })) {
+            while self.lines.get(end).is_some_and(Line::is_inner) {
+                end += 1;
+            }
+        }
+        end.min(self.lines.len())
+    }
+
+    /// A new rule after row `i`, with the same field. Under a group's
+    /// head it goes after the group; next to a rule in a group, in the
+    /// group.
+    pub fn add_rule(&mut self, i: usize) {
+        let field = (0..=i.min(self.lines.len().saturating_sub(1)))
+            .rev()
+            .find_map(|j| self.rule(j))
+            .map_or(Field::Artist, |r| r.field);
+        let inner = self.lines.get(i).is_some_and(Line::is_inner);
+        let at = self.end_of(i);
+        self.lines.insert(
+            at,
+            Line::Rule {
+                rule: Rule::new(field),
+                inner,
+            },
+        );
+    }
+
+    /// A new group after row `i` (after a whole group, for its head),
+    /// with one rule in it. It matches the other way round from the rows
+    /// around it, since that's what a group is for.
+    pub fn add_group(&mut self, i: usize) {
+        if self.lines.get(i).is_some_and(Line::is_inner) {
+            return;
+        }
+        let field = self.rule(i).map_or(Field::Artist, |r| r.field);
+        let at = self.end_of(i);
+        self.lines.insert(at, Line::Group { any: !self.any });
+        self.lines.insert(at + 1, Line::inner(Rule::new(field)));
+    }
+
+    /// Take out row `i`: a group's head takes its rules with it, and a
+    /// group left with no rules goes too. The last row left is cleared
+    /// rather than taken out.
+    pub fn remove(&mut self, i: usize) {
+        if i >= self.lines.len() {
+            return;
+        }
+        let end = self.end_of(i);
+        let was_inner = self.lines[i].is_inner();
+        self.lines.drain(i..end);
+        if was_inner {
+            // The head is the nearest one above; drop it if it's now bare.
+            if let Some(h) = (0..i).rev().find(|j| !self.lines[*j].is_inner())
+                && matches!(self.lines[h], Line::Group { .. })
+                && !self.lines.get(h + 1).is_some_and(Line::is_inner)
+            {
+                self.lines.remove(h);
+            }
+        }
+        if self.lines.is_empty() {
+            self.lines = Form::default().lines;
+        }
+    }
+
+    /// Set a group's all or any, by its head's row.
+    pub fn set_group_any(&mut self, i: usize, any: bool) {
+        if let Some(Line::Group { any: a }) = self.lines.get_mut(i) {
+            *a = any;
+        }
+    }
+
     /// The query text. Rows still missing a value are left out, so a half
     /// filled form still says what it matches so far.
     pub fn to_text(&self) -> String {
-        let join = if self.any { " or " } else { " and " };
-        let mut t = self
-            .rules
-            .iter()
-            .filter_map(Rule::text)
-            .collect::<Vec<_>>()
-            .join(join);
+        let mut parts = Vec::new();
+        let mut i = 0;
+        while i < self.lines.len() {
+            match &self.lines[i] {
+                Line::Rule { rule, .. } => {
+                    if let Some(t) = rule.text() {
+                        parts.push(t);
+                    }
+                    i += 1;
+                }
+                Line::Group { any } => {
+                    let end = self.end_of(i);
+                    let inner: Vec<String> = self.lines[i + 1..end]
+                        .iter()
+                        .filter_map(|l| l.rule().and_then(Rule::text))
+                        .collect();
+                    match inner.len() {
+                        0 => {}
+                        1 => parts.push(inner.into_iter().next().unwrap()),
+                        _ => parts.push(format!("({})", inner.join(joiner(*any)))),
+                    }
+                    i = end;
+                }
+            }
+        }
+        let mut t = parts.join(joiner(self.any));
         if let Some((key, desc)) = ORDERS.get(self.order).and_then(|o| o.1) {
             let dir = if desc { "desc" } else { "asc" };
             let k = match key {
@@ -350,10 +498,22 @@ impl Form {
             Some(Expr::Or(v)) => (true, v.iter().collect()),
             Some(e) => (false, vec![e]),
         };
-        let rules = items
-            .into_iter()
-            .map(rule_from)
-            .collect::<Option<Vec<_>>>()?;
+        let mut lines = Vec::new();
+        for e in items {
+            let (group_any, inner) = match e {
+                Expr::And(v) => (false, v),
+                Expr::Or(v) => (true, v),
+                e => {
+                    lines.push(Line::top(rule_from(e)?));
+                    continue;
+                }
+            };
+            lines.push(Line::Group { any: group_any });
+            for x in inner {
+                // A group in a group doesn't fit.
+                lines.push(Line::inner(rule_from(x)?));
+            }
+        }
         let order = match q.sort {
             None => 0,
             Some((SortKey::Random, _)) => 1,
@@ -361,10 +521,10 @@ impl Form {
         };
         Some(Form {
             any,
-            rules: if rules.is_empty() {
-                Form::default().rules
+            lines: if lines.is_empty() {
+                Form::default().lines
             } else {
-                rules
+                lines
             },
             limit: q.limit,
             order,
@@ -506,7 +666,7 @@ mod tests {
         age.unit = 2;
         let f = Form {
             any: false,
-            rules: vec![
+            lines: [
                 rule(Field::Rating, RuleOp::Greater, "3"),
                 rule(Field::Genre, RuleOp::Is, "blues rock"),
                 rule(Field::Artist, RuleOp::NotContains, "live"),
@@ -516,7 +676,10 @@ mod tests {
                 rule(Field::Composer, RuleOp::Starts, "J.S."),
                 rule(Field::Lossless, RuleOp::Yes, ""),
                 rule(Field::Added, RuleOp::After, "2024-01-31"),
-            ],
+            ]
+            .into_iter()
+            .map(Line::top)
+            .collect(),
             limit: Some(Limit::Minutes(90)),
             order: 1,
         };
@@ -529,9 +692,9 @@ mod tests {
     fn any_joins_with_or() {
         let f = Form {
             any: true,
-            rules: vec![
-                rule(Field::Artist, RuleOp::Is, "Nirvana"),
-                rule(Field::Artist, RuleOp::Is, "Mudhoney"),
+            lines: vec![
+                Line::top(rule(Field::Artist, RuleOp::Is, "Nirvana")),
+                Line::top(rule(Field::Artist, RuleOp::Is, "Mudhoney")),
             ],
             limit: None,
             order: 0,
@@ -543,22 +706,25 @@ mod tests {
     #[test]
     fn stored_queries_that_fit_rows_open_as_rows() {
         let f = Form::from_text("rating >= 4 sort by rating", "").unwrap();
-        assert_eq!(f.rules, vec![rule(Field::Rating, RuleOp::Greater, "3")]);
+        assert_eq!(
+            f.lines,
+            vec![Line::top(rule(Field::Rating, RuleOp::Greater, "3"))]
+        );
         assert_eq!(ORDERS[f.order].0, "highest rating");
         let f = Form::from_text("rating >= 2 and rating <= 3", "").unwrap();
-        assert_eq!(f.rules[1], rule(Field::Rating, RuleOp::Less, "4"));
+        assert_eq!(f.rule(1), Some(&rule(Field::Rating, RuleOp::Less, "4")));
         let f = Form::from_text("added < 30d sort by added", "").unwrap();
-        assert_eq!(f.rules[0].op, RuleOp::InLast);
-        assert_eq!(f.rules[0].value, "30");
+        assert_eq!(f.rule(0).unwrap().op, RuleOp::InLast);
+        assert_eq!(f.rule(0).unwrap().value, "30");
         let f = Form::from_text("", "").unwrap();
-        assert_eq!(f.rules.len(), 1);
+        assert_eq!(f.lines.len(), 1);
     }
 
     #[test]
     fn queries_that_dont_fit_stay_text() {
         for (q, x) in [
-            ("rating 5 or rating 4 and plays 0", ""),
-            ("(artist ~ a or artist ~ b) and rating 5", ""),
+            ("rating 5 or (rating 4 and (plays 0 or plays 1))", ""),
+            ("rating 5 and not (artist ~ a or artist ~ b)", ""),
             ("rating 5", "artist is x"),
             ("played < 12h", ""),
             ("sort by album desc", ""),
@@ -571,14 +737,82 @@ mod tests {
     fn half_filled_rows_are_left_out() {
         let f = Form {
             any: false,
-            rules: vec![
-                rule(Field::Artist, RuleOp::Contains, ""),
-                rule(Field::Year, RuleOp::Is, "1991"),
+            lines: vec![
+                Line::top(rule(Field::Artist, RuleOp::Contains, "")),
+                Line::top(rule(Field::Year, RuleOp::Is, "1991")),
             ],
             limit: Some(Limit::Songs(25)),
             order: 1,
         };
         assert_eq!(f.to_text(), "year = 1991 sort by random limit 25");
+    }
+
+    #[test]
+    fn groups_mix_and_with_or_both_ways() {
+        // "and" between rows, "or" in the group.
+        let f = Form {
+            any: false,
+            lines: vec![
+                Line::top(rule(Field::Rating, RuleOp::Greater, "3")),
+                Line::Group { any: true },
+                Line::inner(rule(Field::Genre, RuleOp::Is, "blues")),
+                Line::inner(rule(Field::Genre, RuleOp::Is, "jazz")),
+            ],
+            limit: None,
+            order: 0,
+        };
+        let text = f.to_text();
+        assert_eq!(text, "rating > 3 and (genre is blues or genre is jazz)");
+        parse(&text).unwrap();
+        assert_eq!(Form::from_text(&text, ""), Some(f));
+        // And the other way: groups of "and", either one will do.
+        let text = "(artist is Nirvana and year < 1992) or (artist is Mudhoney and lossless)";
+        let f = Form::from_text(text, "").unwrap();
+        assert!(f.any);
+        assert_eq!(f.lines.len(), 6);
+        assert_eq!(f.lines[0], Line::Group { any: false });
+        assert_eq!(f.lines[3], Line::Group { any: false });
+        assert_eq!(Form::from_text(&f.to_text(), ""), Some(f));
+        // What text mode said before groups: "a or b and c" reads as
+        // "a or (b and c)", and now fits.
+        let f = Form::from_text("rating 5 or rating 4 and plays 0", "").unwrap();
+        assert!(f.any);
+        assert_eq!(f.lines[1], Line::Group { any: false });
+    }
+
+    #[test]
+    fn rows_and_groups_come_and_go() {
+        let mut f = Form::default();
+        f.add_group(0);
+        assert_eq!(f.lines.len(), 3);
+        assert_eq!(f.lines[1], Line::Group { any: true });
+        assert!(f.lines[2].is_inner());
+        // + next to a rule in the group adds to the group.
+        f.add_rule(2);
+        assert!(f.lines[3].is_inner());
+        // + on the group's head adds after the group, at the top level.
+        f.add_rule(1);
+        assert_eq!(f.lines.len(), 5);
+        assert!(!f.lines[4].is_inner());
+        // No groups inside groups.
+        f.add_group(2);
+        assert_eq!(f.lines.len(), 5);
+        // Taking out the group's rules one by one takes the group too.
+        f.remove(2);
+        f.remove(2);
+        assert_eq!(f.lines.len(), 2);
+        assert!(
+            f.lines
+                .iter()
+                .all(|l| matches!(l, Line::Rule { inner: false, .. }))
+        );
+        // Taking out a head takes its rules.
+        f.add_group(1);
+        f.remove(2);
+        assert_eq!(f.lines.len(), 2);
+        f.remove(0);
+        f.remove(0);
+        assert_eq!(f, Form::default());
     }
 
     #[test]

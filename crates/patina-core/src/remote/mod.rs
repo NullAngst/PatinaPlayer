@@ -445,6 +445,11 @@ pub trait Client: Send + Sync {
     ) -> Result<(String, bool)>;
     /// What this server is set to stream: the original, or a conversion.
     fn stream_setting(&self) -> (StreamFormat, u32);
+    /// After a conversion failed on the server's side, the server's own
+    /// account of why, if it has a way to say. None by default.
+    fn stream_trouble(&self, _song_id: &str, _format: StreamFormat, _kbps: u32) -> Option<String> {
+        None
+    }
     /// A podcast episode's stream.
     fn episode_url(&self, stream_id: &str) -> Result<String>;
     fn cover(&self, cover_id: &str, size: u32) -> Result<Vec<u8>>;

@@ -4270,15 +4270,27 @@ impl State {
     /// Redraw the rows from the form: after a change to their shape (a
     /// field, a condition, a row added), not on each key typed.
     fn smart_rows_fill(&mut self, ui: &AppWindow) {
-        use patina_core::library::smart::form::{FIELDS, ValueKind, op_label, ops};
+        use patina_core::library::smart::form::{FIELDS, Line, ValueKind, op_label, ops};
         let Some(e) = &self.smart_edit else { return };
         let rows: Vec<SmartRule> = e
             .form
-            .rules
+            .lines
             .iter()
-            .map(|r| {
+            .map(|l| {
+                let (r, inner) = match l {
+                    Line::Rule { rule, inner } => (rule, *inner),
+                    Line::Group { any } => {
+                        return SmartRule {
+                            line: 2,
+                            any: *any,
+                            ..Default::default()
+                        };
+                    }
+                };
                 let field_ops = ops(r.field);
                 SmartRule {
+                    line: if inner { 1 } else { 0 },
+                    any: false,
                     field: FIELDS.iter().position(|f| f.0 == r.field).unwrap_or(0) as i32,
                     ops: ModelRc::from(Rc::new(VecModel::from(
                         field_ops
@@ -4377,7 +4389,7 @@ impl State {
                 } else if patina_core::library::smart::parse(&q).is_err() {
                     "Fix the rules first: they don't read yet."
                 } else {
-                    "These rules mix \"and\" with \"or\", group them in brackets, or use something rows can't show, so they stay as text."
+                    "These rules have a group inside a group, \"not\" in front of brackets, or something else rows can't show, so they stay as text."
                 }));
                 ui.set_dlg_note_warn(true);
             }
@@ -5829,7 +5841,7 @@ pub fn install(
         true,
         |e| {
             use patina_core::library::smart::form::FIELDS;
-            if let (Some(r), Some(f)) = (e.form.rules.get_mut(i as usize), FIELDS.get(f as usize)) {
+            if let (Some(r), Some(f)) = (e.form.rule_mut(i as usize), FIELDS.get(f as usize)) {
                 r.set_field(f.0);
             }
         }
@@ -5838,7 +5850,7 @@ pub fn install(
         &u,
         true,
         |e| {
-            if let Some(r) = e.form.rules.get_mut(i as usize)
+            if let Some(r) = e.form.rule_mut(i as usize)
                 && let Some(op) = patina_core::library::smart::form::ops(r.field).get(o as usize)
             {
                 let was = r.value_kind();
@@ -5853,12 +5865,12 @@ pub fn install(
     on!(on_smart_value, |s, u, i, t| {
         // Stars redraw; typing doesn't, so the box keeps its cursor.
         let stars = s.smart_edit.as_ref().is_some_and(|e| {
-            e.form.rules.get(i as usize).is_some_and(|r| {
+            e.form.rule(i as usize).is_some_and(|r| {
                 r.value_kind() == patina_core::library::smart::form::ValueKind::Stars
             })
         });
         s.smart_rows_change(&u, stars, |e| {
-            if let Some(r) = e.form.rules.get_mut(i as usize) {
+            if let Some(r) = e.form.rule_mut(i as usize) {
                 r.value = t.to_string();
             }
         })
@@ -5867,7 +5879,7 @@ pub fn install(
         &u,
         false,
         |e| {
-            if let Some(r) = e.form.rules.get_mut(i as usize) {
+            if let Some(r) = e.form.rule_mut(i as usize) {
                 r.value2 = t.to_string();
             }
         }
@@ -5876,33 +5888,28 @@ pub fn install(
         &u,
         true,
         |e| {
-            if let Some(r) = e.form.rules.get_mut(i as usize) {
+            if let Some(r) = e.form.rule_mut(i as usize) {
                 r.unit = x.max(0) as usize;
             }
         }
     ));
-    on!(on_smart_add, |s, u, i| s.smart_rows_change(&u, true, |e| {
-        use patina_core::library::smart::form::Rule;
-        let at = (i.max(0) as usize + 1).min(e.form.rules.len());
-        let field = e
-            .form
-            .rules
-            .get(at.saturating_sub(1))
-            .map_or(patina_core::library::smart::Field::Artist, |r| r.field);
-        e.form.rules.insert(at, Rule::new(field));
-    }));
+    on!(on_smart_add, |s, u, i| s.smart_rows_change(&u, true, |e| e
+        .form
+        .add_rule(i.max(0) as usize)));
+    on!(on_smart_add_group, |s, u, i| s.smart_rows_change(
+        &u,
+        true,
+        |e| e.form.add_group(i.max(0) as usize)
+    ));
     on!(on_smart_remove, |s, u, i| s.smart_rows_change(
         &u,
         true,
-        |e| {
-            if e.form.rules.len() > 1 {
-                e.form
-                    .rules
-                    .remove((i.max(0) as usize).min(e.form.rules.len() - 1));
-            } else {
-                e.form.rules = patina_core::library::smart::form::Form::default().rules;
-            }
-        }
+        |e| e.form.remove(i.max(0) as usize)
+    ));
+    on!(on_smart_group_any, |s, u, i, any| s.smart_rows_change(
+        &u,
+        true,
+        |e| e.form.set_group_any(i.max(0) as usize, any)
     ));
     on!(on_smart_any_set, |s, u, any| s.smart_rows_change(
         &u,

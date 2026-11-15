@@ -66,7 +66,7 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 
 ## 5.8. Smart playlist editor and Snapcast setup
 
-1. Open each of the three rating playlists in the editor: they should open as rows, not text. Add a row of each kind (stars, a range, "in the last", a date, lossless) and save; reopening it should show the same rows. `cargo test -p patina-core form` covers the round trip.
+1. Open each of the three rating playlists in the editor: they should open as rows, not text. Add a row of each kind (stars, a range, "in the last", a date, lossless) and save; reopening it should show the same rows. `cargo test -p patina-core form` covers the round trip. Then add a group with "…", put two rules in it, switch to text and back: the text should have the group in brackets and come back as the same rows. Open the field list on a phone: it should scroll to Source and stay clear of the navigation bar. That list is `Pick` in `app.slint`, a `PopupWindow` of our own; Slint's `Menu` doesn't scroll, so don't go back to it for long lists.
 2. After a Snapcast update, check `crates/patina-core/src/cast/snapcast.rs` still matches its JSON-RPC: `Server.GetStatus` (streams under `server.streams`, each with `uri.scheme`, `uri.host`, `uri.query`) and `Stream.AddStream` with `streamUri`. The control API's doc is `doc/json_rpc_api/control.md` in the Snapcast repo. If Snapcast ever requires authentication for AddStream, the note will say it wouldn't add a source; the fix is then the line in `snapserver.conf`.
 
 ## 5.9. Plex, Icecast and Snapcast rooms
@@ -92,6 +92,7 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 2. Android Auto: with a server picked on the phone, the car's lists should show only that server.
 3. Set a Plex server to Opus 128 and play a song. If it won't play, the note now gives the download's error. Plex picks a client profile by X-Plex-Platform; if Plex adds or renames profiles and conversions stop, that's where to look. Plex has said it never picks MP3 by itself, so the MP3 choice relies on `X-Plex-Client-Profile-Extra`.
 4. Plex songs as the original file are looked up with `/library/metadata/{id}?checkFiles=1` before each download (`Plex::part_key`). If Plex drops the `exists` and `accessible` attributes, nothing breaks, the app just stops naming files Plex can't open. A song that fails with HTTP 500 and no such note: check the Plex Media Server log on the server for "Error opening file".
+5. A conversion Plex fails on (5xx before any data) is asked for again once, then downloaded as the original (`download_song` in `crates/patina-core/src/cache/service.rs`). The log line "couldn't convert song" carries Plex's reason from `/music/:/transcode/universal/decision` (`Plex::stream_trouble`). If those show up for many songs, the reasons say whether it's Plex's profiles (look at `transcode_query` in `plex.rs`) or the files. `cargo test -p patina-core --test cache conversion` checks the retry and the fallback against the stand-in server.
 5. Leave the app open on a phone for ten minutes, moving between Wi-Fi and mobile data. The Plex page shouldn't show it offline. If it does, the reason it shows is the place to start; the ping is in `RemoteService::ping`, the retry in `Plex::call`, and the idle timeout in `remote/http.rs`.
 
 ## 6. ListenBrainz and Last.fm

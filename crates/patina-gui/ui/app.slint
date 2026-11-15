@@ -133,6 +133,11 @@ export global Ui {
     // controls that drag up and down give way to ones that drag sideways,
     // which don't fight the view's scrolling.
     in-out property <bool> touch: false;
+    // The window's height, and what the system bars cover of it, for
+    // popups that have to fit inside it.
+    in-out property <length> win-h: 860px;
+    in-out property <length> inset-top: 0px;
+    in-out property <length> inset-bottom: 0px;
 }
 
 // How long a press is held before it counts as a long press.
@@ -277,8 +282,11 @@ export struct Row {
 
 // A rule row in the smart playlist editor. `kind` is what the value part
 // looks like: 0 text, 1 number, 2 stars, 3 a range, 4 an age with its
-// unit, 5 a date, 6 nothing.
+// unit, 5 a date, 6 nothing. `line` is 0 for a rule, 1 for a rule in a
+// group, 2 for a group's head, whose all or any is `any`.
 export struct SmartRule {
+    line: int,
+    any: bool,
     field: int,
     ops: [string],
     op: int,
@@ -1171,6 +1179,13 @@ component Pick inherits Rectangle {
     background: ta.has-hover ? P.chip-hover : P.raised;
     accessible-role: combobox;
     accessible-value: root.options[root.index];
+    // Rows in the list, taller for a finger.
+    property <length> row-h: Ui.touch ? 40px : 30px;
+    // The list's height: all of it, or what fits between the system bars.
+    property <length> pop-h: min(root.options.length * root.row-h + 8px, Ui.win-h - Ui.inset-top - Ui.inset-bottom - 16px);
+    // Under the button, or as far up as it takes to stay clear of the
+    // bottom bar (on a phone the app draws under it).
+    property <length> pop-y: min(root.height + 2px, Ui.win-h - Ui.inset-bottom - 8px - root.pop-h - root.absolute-position.y);
     HorizontalLayout {
         padding-left: 10px;
         padding-right: 8px;
@@ -1185,16 +1200,55 @@ component Pick inherits Rectangle {
         }
         Text { text: "▾"; font-size: 11px; color: P.muted; vertical-alignment: center; }
     }
-    cma := ContextMenuArea {
-        Menu {
-            for o[i] in root.options: MenuItem {
-                title: o;
-                activated => { root.picked(i); }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { pop.show(); }
+    }
+    // A list of our own rather than a Menu: a Menu doesn't scroll, so a
+    // long one (the smart playlist fields) ran off a phone's screen with
+    // its ends out of reach. This one stays between the system bars,
+    // scrolls, and opens with the current choice in view.
+    pop := PopupWindow {
+        x: 0px;
+        y: root.pop-y;
+        width: max(root.width, 160px);
+        height: root.pop-h;
+        Rectangle {
+            background: P.surface;
+            border-radius: 8px * P.round;
+            border-width: 1px;
+            border-color: P.border;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: P.shadow;
+            clip: true;
+            fl := Flickable {
+                y: 4px;
+                height: parent.height - 8px;
+                content-height: root.options.length * root.row-h;
+                content-y: -clamp(root.index * root.row-h - (self.height - root.row-h) / 2, 0px, max(0px, self.content-height - self.height));
+                for o[i] in root.options: Rectangle {
+                    y: i * root.row-h;
+                    height: root.row-h;
+                    background: ita.has-hover ? P.chip-hover : (i == root.index ? P.raised : transparent);
+                    Text {
+                        x: 12px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: o;
+                        overflow: elide;
+                        font-size: 13px;
+                        color: i == root.index ? P.verdigris : P.text;
+                        vertical-alignment: center;
+                    }
+                    ita := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.picked(i);
+                            pop.close();
+                        }
+                    }
+                }
             }
-        }
-        ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => { cma.show({ x: 0px, y: root.height }); }
         }
     }
 }
@@ -1279,8 +1333,10 @@ component RuleValue inherits HorizontalLayout {
 }
 
 // The smart playlist editor's rows, like iTunes': field, condition, value,
-// and - and + to take a row out or add one under it.
-component RuleRow inherits VerticalLayout {
+// and - and + to take a row out or add one under it. "…" adds a group
+// under it: a head that says whether all or any of its rules count, with
+// the rules sitting in under it.
+component RuleRow inherits HorizontalLayout {
     in property <SmartRule> rule;
     in property <[string]> fields;
     in property <[string]> age-units;
@@ -1293,36 +1349,69 @@ component RuleRow inherits VerticalLayout {
     callback unit(int);
     callback add;
     callback remove;
-    spacing: 6px;
-    HorizontalLayout {
-        spacing: 6px;
-        // Side by side on a narrow screen, sharing the width; otherwise a
-        // set width, with the value taking the rest.
-        Pick { preferred-width: 150px; horizontal-stretch: root.narrow ? 1 : 0; options: root.fields; index: root.rule.field; picked(i) => { root.field(i); } }
-        Pick { preferred-width: 160px; horizontal-stretch: root.narrow ? 1 : 0; options: root.rule.ops; index: root.rule.op; picked(i) => { root.op(i); } }
-        if !root.narrow: RuleValue {
-            horizontal-stretch: 1;
-            rule: root.rule;
-            age-units: root.age-units;
-            value(t) => { root.value(t); }
-            value2(t) => { root.value2(t); }
-            unit(i) => { root.unit(i); }
+    callback group;
+    callback group-any(bool);
+    spacing: root.narrow ? 8px : 12px;
+    // A rule in a group: in from the left, past a bar that joins it to
+    // the group's head.
+    if root.rule.line == 1: Rectangle {
+        width: root.narrow ? 10px : 18px;
+        Rectangle {
+            x: parent.width - 3px;
+            width: 3px;
+            border-radius: 1.5px;
+            background: P.verdigris-dim;
         }
-        if !root.narrow: Chip { text: "−"; h: 32px; peek: "Take this rule out"; clicked => { root.remove(); } }
-        if !root.narrow: Chip { text: "+"; h: 32px; peek: "Add a rule under this one"; clicked => { root.add(); } }
     }
-    if root.narrow: HorizontalLayout {
+    VerticalLayout {
+        horizontal-stretch: 1;
         spacing: 6px;
-        RuleValue {
-            horizontal-stretch: 1;
-            rule: root.rule;
-            age-units: root.age-units;
-            value(t) => { root.value(t); }
-            value2(t) => { root.value2(t); }
-            unit(i) => { root.unit(i); }
+        if root.rule.line == 2: HorizontalLayout {
+            spacing: 6px;
+            Text { text: "Match"; color: P.text; font-size: 13px; vertical-alignment: center; }
+            Pick {
+                width: 80px;
+                options: ["all", "any"];
+                index: root.rule.any ? 1 : 0;
+                picked(i) => { root.group-any(i == 1); }
+            }
+            Text { horizontal-stretch: 1; text: "of:"; color: P.text; font-size: 13px; vertical-alignment: center; }
+            Chip { text: "−"; h: 32px; peek: "Take this group out, with its rules"; clicked => { root.remove(); } }
+            Chip { text: "+"; h: 32px; peek: "Add a rule under this group"; clicked => { root.add(); } }
+            Chip { text: "…"; h: 32px; peek: "Add another group under this one"; clicked => { root.group(); } }
         }
-        Chip { text: "−"; h: 32px; clicked => { root.remove(); } }
-        Chip { text: "+"; h: 32px; clicked => { root.add(); } }
+        if root.rule.line != 2: HorizontalLayout {
+            spacing: 6px;
+            // Side by side on a narrow screen, sharing the width; otherwise a
+            // set width, with the value taking the rest.
+            Pick { preferred-width: 150px; horizontal-stretch: root.narrow ? 1 : 0; options: root.fields; index: root.rule.field; picked(i) => { root.field(i); } }
+            Pick { preferred-width: 160px; horizontal-stretch: root.narrow ? 1 : 0; options: root.rule.ops; index: root.rule.op; picked(i) => { root.op(i); } }
+            if !root.narrow: RuleValue {
+                horizontal-stretch: 1;
+                rule: root.rule;
+                age-units: root.age-units;
+                value(t) => { root.value(t); }
+                value2(t) => { root.value2(t); }
+                unit(i) => { root.unit(i); }
+            }
+            if !root.narrow: Chip { text: "−"; h: 32px; peek: "Take this rule out"; clicked => { root.remove(); } }
+            if !root.narrow: Chip { text: "+"; h: 32px; peek: "Add a rule under this one"; clicked => { root.add(); } }
+            if !root.narrow && root.rule.line == 0: Chip { text: "…"; h: 32px; peek: "Add a group of rules under this one"; clicked => { root.group(); } }
+        }
+        if root.rule.line != 2 && root.narrow: HorizontalLayout {
+            spacing: 6px;
+            RuleValue {
+                horizontal-stretch: 1;
+                rule: root.rule;
+                age-units: root.age-units;
+                value(t) => { root.value(t); }
+                value2(t) => { root.value2(t); }
+                unit(i) => { root.unit(i); }
+            }
+            Chip { text: "−"; h: 32px; clicked => { root.remove(); } }
+            Chip { text: "+"; h: 32px; clicked => { root.add(); } }
+            if root.rule.line == 0: Chip { text: "…"; h: 32px; clicked => { root.group(); } }
+        }
     }
 }
 
@@ -3980,6 +4069,7 @@ export component AppWindow inherits Window {
     in-out property <length> win-h: 860px;
     changed width => { self.win-w = self.width; }
     changed height => { self.win-h = self.height; }
+    changed win-h => { Ui.win-h = self.win-h; }
     // Size tiers, widest first.
     // compact: the bottom bar drops the format badge and output chip.
     out property <bool> compact: win-w < 1180px;
@@ -4248,6 +4338,9 @@ export component AppWindow inherits Window {
     callback smart-unit(int, int);
     callback smart-add(int);
     callback smart-remove(int);
+    // A group of rules under row i, and a group's all (false) or any.
+    callback smart-add-group(int);
+    callback smart-group-any(int, bool);
     callback smart-any-set(bool);
     callback smart-limit-toggle;
     callback smart-limit-n-edited(string);
@@ -4417,6 +4510,8 @@ export component AppWindow inherits Window {
     property <length> inset-top: max(root.safe-area-insets.top, root.sys-top);
     property <length> inset-right: max(root.safe-area-insets.right, root.sys-right);
     property <length> inset-bottom: max(root.safe-area-insets.bottom, root.sys-bottom);
+    changed inset-top => { Ui.inset-top = self.inset-top; }
+    changed inset-bottom => { Ui.inset-bottom = self.inset-bottom; }
     keys := FocusScope {
         x: root.inset-left;
         y: root.inset-top;
@@ -6436,6 +6531,8 @@ export component AppWindow inherits Window {
                                     unit(u) => { root.smart-unit(i, u); }
                                     add => { root.smart-add(i); }
                                     remove => { root.smart-remove(i); }
+                                    group => { root.smart-add-group(i); }
+                                    group-any(a) => { root.smart-group-any(i, a); }
                                 }
                             }
                         }

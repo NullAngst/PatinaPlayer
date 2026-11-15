@@ -422,6 +422,56 @@ fn songs_can_be_kept_converted_to_save_space() {
     }
 }
 
+/// A server that fails on a conversion once is asked again; one that
+/// keeps failing sends the original instead, kept under its own name.
+#[test]
+fn a_conversion_the_server_fails_on_is_asked_again_then_comes_as_the_original() {
+    let _t = turn();
+    let cfg = CacheConfig {
+        format: StreamFormat::Opus,
+        bitrate: 128,
+        ..Default::default()
+    };
+    let r = rig("CacheF", cfg, None);
+    r.srv.state.lock().unwrap().fail_converted = 1;
+    r.cache.upcoming(vec![r.key("11")]);
+    assert!(wait_for(15, || r.cache.status().cache_files == 1));
+    assert_eq!(r.streams(), vec!["opus:128".to_string(); 2]);
+    let files = files_under(&r.roots.cache);
+    assert!(files[0].to_string_lossy().ends_with(".opus"), "{files:?}");
+
+    r.srv.state.lock().unwrap().fail_converted = 2;
+    r.cache.upcoming(vec![r.key("12")]);
+    assert!(wait_for(15, || r.cache.status().cache_files == 2));
+    let streams = r.streams();
+    assert_eq!(
+        &streams[2..],
+        ["opus:128", "opus:128", "raw"],
+        "{streams:?}"
+    );
+    let files = files_under(&r.roots.cache);
+    assert!(
+        files
+            .iter()
+            .any(|f| f.to_string_lossy().ends_with("02 - Floyd the Barber.flac")),
+        "{files:?}"
+    );
+    match cache::open(
+        &RemoteRef {
+            server: "CacheF".into(),
+            id: "12".into(),
+            episode: false,
+        },
+        None,
+    ) {
+        Some(Ok(Opening::File { original, path })) => {
+            assert!(original, "it's the original file now");
+            assert!(path.to_string_lossy().ends_with(".flac"), "{path:?}");
+        }
+        _ => panic!("kept songs open as files"),
+    }
+}
+
 #[test]
 fn podcast_episodes_download_through_the_same_queue() {
     let _t = turn();

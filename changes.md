@@ -1,5 +1,16 @@
 # Changes
 
+2026.11.15 - Bug fixes and UX overhaul (Plex conversions, smart playlist groups, scrolling lists)
+
+* Plex conversions that fail with HTTP 500 no longer skip the song. A download that fails on the server's side before any data arrives is asked for once more a second later, with a new transcode session. If a conversion fails again, the original file is downloaded instead and kept under its real name and extension, so it plays (and plays bit-perfect if that's on). The log names the song and gives Plex's reason, read from its transcode decision endpoint. Any server's conversions get the same treatment; Plex is the one that needed it.
+* Download errors keep the HTTP status, so the cache can tell a server failing on its side from a bad request or a dropped connection.
+* Smart playlist rows can be groups, as in iTunes: "…" on a row adds a "Match any of" (or all) line with its own rules, set in under it with a bar. That covers "and" mixed with "or" both ways, like `rating > 3 and (genre is blues or genre is jazz)` and `(a and b) or (c and d)`, and such queries saved as text now open as rows. One level deep; a group inside a group stays text.
+* Drop-down lists (the smart playlist field list, and every other choice list in the window) are a scrolling list of our own instead of Slint's menu, which didn't scroll: a list taller than the screen ran off it, and its first and last choices couldn't be reached. The list stays between the system bars on a phone, opens with the current choice in view, and has taller rows on a touch screen.
+* README: the limitation about smart playlists being typed rules now only applies to the terminal app.
+* Tests: a conversion the server fails on once is asked again, and one it keeps failing on comes down as the original; Plex's decision codes read as its reasons; groups in the form write and read back both ways, and rows and groups come and go as they should.
+
+Reasons for changes: some Plex songs failed with HTTP 500 and were skipped; the rules editor couldn't mix "and" with "or" like the text could; the field list didn't scroll, so its ends were out of reach on a phone.
+
 2026.11.14 - UX overhaul (Settings on Android, open Settings groups)
 
 * Android Settings leaves out what does nothing on a phone: the Desktop group (Tray icon, Close to tray), the iPod group (iPod sync is off on Android), the Files group (paths inside the app's private storage, which nothing on the phone can open), Sample format and Dither (AAudio always takes float), and Hold on metered connections (it asks NetworkManager, which Android doesn't have). Help text there drops "Window only, not the TUI", and Bit-perfect device says USB DAC instead of sound card. The filter is one function at the end of the Settings rows, `for_android`, so the desktop and terminal apps are unchanged.

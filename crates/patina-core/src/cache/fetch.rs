@@ -123,8 +123,23 @@ impl Progress {
 pub enum FetchError {
     #[error("{0}")]
     Http(String),
+    /// The server answered with an error status. The text is what's shown.
+    #[error("{1}")]
+    Status(u16, String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+}
+
+impl FetchError {
+    fn status(what: &str, s: reqwest::StatusCode) -> Self {
+        FetchError::Status(s.as_u16(), format!("{what}HTTP {s}"))
+    }
+
+    /// The server failed on its side (5xx), rather than the network or
+    /// the request. Worth asking again, or asking for something else.
+    pub fn server_side(&self) -> bool {
+        matches!(self, FetchError::Status(c, _) if *c >= 500)
+    }
 }
 
 /// How a fetch ended, short of an error.
@@ -160,6 +175,21 @@ pub fn fetch(
     progress: &Progress,
     stop: &AtomicBool,
 ) -> Result<Outcome, FetchError> {
+    try_fetch(http, url, dest, resume, progress, stop)
+        .inspect_err(|e| progress.fail(&e.to_string()))
+}
+
+/// [`fetch`], without marking the download failed when it ends in an
+/// error, so the caller can try something else first. Whoever reads the
+/// file keeps waiting meanwhile.
+pub fn try_fetch(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    resume: bool,
+    progress: &Progress,
+    stop: &AtomicBool,
+) -> Result<Outcome, FetchError> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -184,7 +214,6 @@ pub fn fetch(
                 tries += 1;
                 let moved = progress.done() > 0;
                 if !resume || !moved || tries >= 4 || stop.load(Ordering::Relaxed) {
-                    progress.fail(&e.to_string());
                     return Err(e);
                 }
                 log::info!("download broke ({e}), picking it up again");
@@ -221,7 +250,7 @@ fn fetch_once(
         return Ok(Outcome::Done);
     }
     if !status.is_success() {
-        return Err(FetchError::Http(format!("HTTP {status}")));
+        return Err(FetchError::status("", status));
     }
     // A Subsonic error comes back as 200 with a JSON or XML body.
     if let Some(ct) = resp
@@ -395,7 +424,7 @@ fn fetch_hls(
     let get_text = |u: &url::Url| -> Result<String, FetchError> {
         let resp = http.get(u.as_str()).send().map_err(net_err)?;
         if !resp.status().is_success() {
-            return Err(FetchError::Http(format!("HTTP {}", resp.status())));
+            return Err(FetchError::status("", resp.status()));
         }
         resp.text().map_err(net_err)
     };
@@ -436,8 +465,12 @@ fn fetch_hls(
             }
             let mut resp = http.get(seg.as_str()).send().map_err(net_err)?;
             if !resp.status().is_success() {
-                let what = if is_init { "init segment" } else { "segment" };
-                return Err(FetchError::Http(format!("{what}: HTTP {}", resp.status())));
+                let what = if is_init {
+                    "init segment: "
+                } else {
+                    "segment: "
+                };
+                return Err(FetchError::status(what, resp.status()));
             }
             let mut buf = vec![0u8; 64 * 1024];
             loop {

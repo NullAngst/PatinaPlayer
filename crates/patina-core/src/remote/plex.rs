@@ -180,6 +180,30 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
+/// The sentences of a transcode decision that say something's wrong, or
+/// a note that Plex thinks all is well.
+fn decision_trouble(c: &Value) -> Option<String> {
+    let bad: Vec<String> = ["general", "transcode", "directPlay"]
+        .iter()
+        .filter_map(|k| {
+            let code = match c.get(format!("{k}DecisionCode"))? {
+                Value::Number(n) => n.as_f64()?,
+                Value::String(s) => s.parse().ok()?,
+                _ => return None,
+            };
+            let text = c.get(format!("{k}DecisionText"))?.as_str()?.trim();
+            (code >= 2000.0 && !text.is_empty()).then(|| text.to_string())
+        })
+        .collect();
+    if bad.is_empty() {
+        Some("Plex says it can convert it, so its transcoder failed on the file; the server's log says why".into())
+    } else {
+        let mut bad = bad;
+        bad.dedup();
+        Some(format!("Plex says: {}", bad.join("; ")))
+    }
+}
+
 /// The MediaContainer of an answer.
 fn container(v: &Value) -> &Value {
     v.get("MediaContainer").unwrap_or(v)
@@ -761,6 +785,65 @@ impl Plex {
             .cloned()
     }
 
+    /// The universal transcoder's path and arguments for a song. Opus is
+    /// what Plex's own players get: in Matroska, over plain HTTP, the
+    /// target Plex's Chromecast profile uses, so it comes as one file. MP3
+    /// stays on HLS in MPEG-TS, as the forum examples for music clients ask
+    /// for it. Plex picks a client profile by platform, and with none it
+    /// won't transcode at all ("unable to find a matching profile"), so the
+    /// client's headers go along as arguments.
+    fn transcode_query(
+        &self,
+        song_id: &str,
+        format: StreamFormat,
+        kbps: u32,
+    ) -> (&'static str, Vec<(&'static str, String)>) {
+        let session = session_id();
+        let (protocol, target) = match format {
+            StreamFormat::Mp3 => (
+                "hls",
+                "add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=mp3&replace=true)",
+            ),
+            _ => (
+                "http",
+                "add-transcode-target(type=musicProfile&context=streaming&protocol=http&container=mkv&audioCodec=opus&replace=true)",
+            ),
+        };
+        let mut q: Vec<(&str, String)> = plex_tv::headers(&self.client_id())
+            .into_iter()
+            .filter(|(k, _)| {
+                k.starts_with("X-Plex-")
+                    && *k != "X-Plex-Client-Identifier"
+                    && *k != "X-Plex-Product"
+            })
+            .collect();
+        q.extend([
+            ("path", format!("/library/metadata/{song_id}")),
+            ("mediaIndex", "0".into()),
+            ("partIndex", "0".into()),
+            ("protocol", protocol.into()),
+            ("directPlay", "0".into()),
+            ("directStream", "0".into()),
+            ("directStreamAudio", "0".into()),
+            ("hasMDE", "1".into()),
+            ("download", "0".into()),
+            ("musicBitrate", kbps.clamp(32, 512).to_string()),
+            ("transcodeSessionId", session.clone()),
+            ("X-Plex-Session-Identifier", session),
+            ("X-Plex-Client-Profile-Extra", target.into()),
+            (
+                "location",
+                if is_local(&self.base()) { "lan" } else { "wan" }.into(),
+            ),
+        ]);
+        let path = if protocol == "hls" {
+            "/music/:/transcode/universal/start.m3u8"
+        } else {
+            "/music/:/transcode/universal/start"
+        };
+        (path, q)
+    }
+
     fn extras_on(&self) -> bool {
         self.extras && self.pass
     }
@@ -982,61 +1065,23 @@ impl Client for Plex {
             let key = self.part_key(song_id)?;
             return Ok((self.url(&key, &[])?, true));
         }
-        // The universal transcoder. Opus is what Plex's own players get:
-        // in Matroska, over plain HTTP, the target Plex's Chromecast
-        // profile uses, so it comes as one file. MP3 stays on HLS in
-        // MPEG-TS, as the forum examples for music clients ask for it.
-        // Plex picks a client profile by platform, and with none it won't
-        // transcode at all ("unable to find a matching profile"), so the
-        // client's headers go along as arguments.
-        let session = session_id();
-        let (protocol, target) = match format {
-            StreamFormat::Mp3 => (
-                "hls",
-                "add-transcode-target(type=musicProfile&context=streaming&protocol=hls&container=mpegts&audioCodec=mp3&replace=true)",
-            ),
-            _ => (
-                "http",
-                "add-transcode-target(type=musicProfile&context=streaming&protocol=http&container=mkv&audioCodec=opus&replace=true)",
-            ),
-        };
-        let mut q: Vec<(&str, String)> = plex_tv::headers(&self.client_id())
-            .into_iter()
-            .filter(|(k, _)| {
-                k.starts_with("X-Plex-")
-                    && *k != "X-Plex-Client-Identifier"
-                    && *k != "X-Plex-Product"
-            })
-            .collect();
-        q.extend([
-            ("path", format!("/library/metadata/{song_id}")),
-            ("mediaIndex", "0".into()),
-            ("partIndex", "0".into()),
-            ("protocol", protocol.into()),
-            ("directPlay", "0".into()),
-            ("directStream", "0".into()),
-            ("directStreamAudio", "0".into()),
-            ("hasMDE", "1".into()),
-            ("download", "0".into()),
-            ("musicBitrate", kbps.clamp(32, 512).to_string()),
-            ("transcodeSessionId", session.clone()),
-            ("X-Plex-Session-Identifier", session),
-            ("X-Plex-Client-Profile-Extra", target.into()),
-            (
-                "location",
-                if is_local(&self.base()) { "lan" } else { "wan" }.into(),
-            ),
-        ]);
-        let path = if protocol == "hls" {
-            "/music/:/transcode/universal/start.m3u8"
-        } else {
-            "/music/:/transcode/universal/start"
-        };
+        let (path, q) = self.transcode_query(song_id, format, kbps);
         Ok((self.url(path, &q)?, false))
     }
 
     fn stream_setting(&self) -> (StreamFormat, u32) {
         (self.stream, self.bitrate)
+    }
+
+    /// Plex's transcode decision for the same request: its codes are 1000s
+    /// when all is well and 2000 up when it isn't, each with a sentence.
+    fn stream_trouble(&self, song_id: &str, format: StreamFormat, kbps: u32) -> Option<String> {
+        let (_, q) = self.transcode_query(song_id, format, kbps);
+        let v = match self.get("/music/:/transcode/universal/decision", &q) {
+            Ok(v) => v,
+            Err(e) => return Some(format!("Plex wouldn't say why either ({e})")),
+        };
+        decision_trouble(container(&v))
     }
 
     fn episode_url(&self, _stream_id: &str) -> Result<String> {
@@ -1314,6 +1359,7 @@ impl Client for Plex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn local_addresses() {
@@ -1345,6 +1391,28 @@ mod tests {
         assert_eq!(stars(Some(2.0)), Some(1));
         assert_eq!(stars(Some(0.0)), None);
         assert_eq!(stars(None), None);
+    }
+
+    #[test]
+    fn a_failed_decision_reads_as_plex_said_it() {
+        let bad = json!({
+            "generalDecisionCode": 2000,
+            "generalDecisionText": "Cannot transcode this item",
+            "transcodeDecisionCode": 4005,
+            "transcodeDecisionText": "Unable to find a matching profile",
+            "directPlayDecisionCode": 1000,
+            "directPlayDecisionText": "Direct play OK"
+        });
+        assert_eq!(
+            decision_trouble(&bad).unwrap(),
+            "Plex says: Cannot transcode this item; Unable to find a matching profile"
+        );
+        let fine = json!({"generalDecisionCode": "1001", "generalDecisionText": "Direct play not available; Conversion OK"});
+        assert!(
+            decision_trouble(&fine)
+                .unwrap()
+                .contains("transcoder failed")
+        );
     }
 
     #[test]

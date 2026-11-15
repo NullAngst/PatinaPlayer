@@ -229,6 +229,8 @@ pub struct State {
     pub stream_body: Option<Arc<Vec<u8>>>,
     /// The format each stream call asked for: "raw", "opus:128".
     pub streams: Vec<String>,
+    /// Converted streams answer 500 while this is above 0, counting down.
+    pub fail_converted: u32,
     /// Who the server says is similar to an artist, by name.
     pub similar_artists: HashMap<String, Vec<String>>,
     /// Songs the server says are similar to a song, by id.
@@ -363,6 +365,7 @@ pub fn library(gonic: bool) -> State {
         sessions: Vec::new(),
         stream_body: None,
         streams: Vec::new(),
+        fail_converted: 0,
         similar_artists: HashMap::new(),
         similar_songs: HashMap::new(),
         ratings: HashMap::new(),
@@ -556,11 +559,19 @@ fn subsonic(
                 let f = r.get("format").unwrap_or("").to_string();
                 let rec = match r.get("maxBitRate") {
                     Some(k) => format!("{f}:{k}"),
-                    None => f,
+                    None => f.clone(),
                 };
                 s.streams.push(rec);
                 let id = r.get("id").unwrap_or("").to_string();
                 s.calls.push(format!("stream {id}"));
+                if !f.is_empty() && f != "raw" && s.fail_converted > 0 {
+                    s.fail_converted -= 1;
+                    return Response {
+                        status: 500,
+                        ctype: "text/plain".into(),
+                        body: b"transcoder failed".to_vec(),
+                    };
+                }
                 let body = s.stream_body.clone().unwrap_or_else(audio);
                 Response::bytes("audio/flac", body.to_vec())
             }

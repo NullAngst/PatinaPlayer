@@ -189,6 +189,8 @@ enum Cmd {
         run: u64,
         key: JobKey,
         result: Result<Outcome, String>,
+        /// A conversion the server failed on, downloaded as the original.
+        raw: bool,
     },
     Quit,
 }
@@ -691,7 +693,12 @@ impl Worker {
                 self.plan();
             }
             Cmd::ClearCache => self.clear_cache(),
-            Cmd::Finished { run, key, result } => self.finished(run, key, result),
+            Cmd::Finished {
+                run,
+                key,
+                result,
+                raw,
+            } => self.finished(run, key, result, raw),
         }
     }
 
@@ -973,15 +980,38 @@ impl Worker {
         );
         let (tx, http, run) = (self.tx.clone(), self.http.clone(), a.run);
         let k2 = key.clone();
+        let song = match &key {
+            JobKey::Song(s) => {
+                let (format, kbps) = self.format_for(&s.server);
+                Some(SongJob {
+                    server: s.server.clone(),
+                    id: s.id.clone(),
+                    format,
+                    kbps,
+                    original: a.original,
+                })
+            }
+            JobKey::Episode(_) => None,
+        };
         std::thread::Builder::new()
             .name("patina-download".into())
             .spawn(move || {
-                let r = fetch::fetch(&http, &url, &dest, resume, &progress, &stop)
-                    .map_err(|e| e.to_string());
+                let (r, raw) = match &song {
+                    Some(g) => download_song(&http, &url, &dest, resume, &progress, &stop, g),
+                    None => (
+                        fetch::try_fetch(&http, &url, &dest, resume, &progress, &stop)
+                            .map_err(|e| e.to_string()),
+                        false,
+                    ),
+                };
+                if let Err(e) = &r {
+                    progress.fail(e);
+                }
                 let _ = tx.send(Cmd::Finished {
                     run,
                     key: k2,
                     result: r,
+                    raw,
                 });
             })
             .map_err(|e| StartError::Local(e.to_string()))?;
@@ -1156,7 +1186,7 @@ impl Worker {
         Ok(start)
     }
 
-    fn finished(&mut self, run: u64, key: JobKey, result: Result<Outcome, String>) {
+    fn finished(&mut self, run: u64, key: JobKey, result: Result<Outcome, String>, raw: bool) {
         let a = if self.active.as_ref().is_some_and(|a| a.run == run) {
             self.active.take()
         } else if self.stopping.get(&key).is_some_and(|a| a.run == run) {
@@ -1164,12 +1194,15 @@ impl Worker {
         } else {
             None
         };
-        let Some(a) = a else {
+        let Some(mut a) = a else {
             self.plan();
             return;
         };
         match result {
             Ok(Outcome::Done) => {
+                if raw && let JobKey::Song(s) = &key {
+                    self.as_original(s, &mut a);
+                }
                 self.parts.remove(&key);
                 self.failed.remove(&key);
                 if matches!(&key, JobKey::Song(s) if Some(s) == self.playing.as_ref()) {
@@ -1220,6 +1253,31 @@ impl Worker {
         }
         self.plan();
         self.emit(CacheEvent::Changed);
+    }
+
+    /// A conversion that came down as the original file after all: give
+    /// it the original's name, so it's kept and played as what it is.
+    fn as_original(&mut self, s: &SongKey, a: &mut Active) {
+        let path = self.meta.get(s).and_then(|m| m.path.clone());
+        let ext = path
+            .as_ref()
+            .and_then(|p| p.extension())
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| "audio".into());
+        let root = match a.tier {
+            Tier::Cache => &self.roots.cache,
+            Tier::Offline => &self.roots.offline,
+        };
+        let want = store::file_for(root, s, path.as_deref(), &ext);
+        let dest = store::free_name(&want, s, |p| self.file_taken(p, s));
+        if dest != a.dest {
+            match std::fs::rename(&a.dest, &dest) {
+                Ok(()) => a.dest = dest,
+                Err(e) => log::warn!("can't rename {}: {e}", a.dest.display()),
+            }
+        }
+        a.original = true;
+        a.format = "raw".into();
     }
 
     /// A song finished downloading: note it, and make room.
@@ -1617,6 +1675,86 @@ impl Worker {
 }
 
 /// Remove `.part` files under `root`.
+/// What a song's download thread needs to ask the server again.
+struct SongJob {
+    server: String,
+    id: String,
+    format: StreamFormat,
+    kbps: u32,
+    /// The original file was asked for, not a conversion.
+    original: bool,
+}
+
+/// Download a server song. When the server fails on its side (a 5xx)
+/// before sending anything, ask once more, a moment later, with a new
+/// conversion session. A conversion that fails twice comes down as the
+/// original file instead: Plex's transcoder gives up on some files it
+/// plays as they are, and the song playing beats it being skipped. The
+/// bool says that happened. Whoever reads the `.part` meanwhile only
+/// waits; the caller marks the download failed if it all comes to nothing.
+fn download_song(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    resume: bool,
+    progress: &Progress,
+    stop: &AtomicBool,
+    g: &SongJob,
+) -> (Result<Outcome, String>, bool) {
+    let worth_more = |e: &fetch::FetchError| {
+        e.server_side() && progress.done() == 0 && !stop.load(Ordering::Relaxed)
+    };
+    let e = match fetch::try_fetch(http, url, dest, resume, progress, stop) {
+        Ok(o) => return (Ok(o), false),
+        Err(e) if !worth_more(&e) => return (Err(e.to_string()), false),
+        Err(e) => e,
+    };
+    let Ok(client) = registry().client(&g.server) else {
+        return (Err(e.to_string()), false);
+    };
+    log::info!("{} failed on song {} ({e}); asking again", g.server, g.id);
+    std::thread::sleep(Duration::from_secs(1));
+    let again = if g.original {
+        Ok(url.to_string())
+    } else {
+        client
+            .stream_url_as(&g.id, g.format, g.kbps)
+            .map(|(u, _)| u)
+    };
+    let e = match again {
+        Ok(u) => match fetch::try_fetch(http, &u, dest, resume, progress, stop) {
+            Ok(o) => return (Ok(o), false),
+            Err(e) => e,
+        },
+        Err(_) => e,
+    };
+    if g.original || !worth_more(&e) {
+        return (Err(e.to_string()), false);
+    }
+    let why = client.stream_trouble(&g.id, g.format, g.kbps);
+    let because = why
+        .as_deref()
+        .map(|w| format!(" ({w})"))
+        .unwrap_or_default();
+    log::warn!(
+        "{} couldn't convert song {}: {e}{because}; downloading the original instead",
+        g.server,
+        g.id
+    );
+    match client.stream_url_as(&g.id, StreamFormat::Raw, 0) {
+        Ok((u, true)) => match fetch::try_fetch(http, &u, dest, false, progress, stop) {
+            Ok(o) => (Ok(o), true),
+            Err(e2) => (
+                Err(format!(
+                    "{e}{because}, and the original wouldn't come either: {e2}"
+                )),
+                false,
+            ),
+        },
+        _ => (Err(format!("{e}{because}")), false),
+    }
+}
+
 fn remove_parts(root: &Path) {
     let Ok(rd) = std::fs::read_dir(root) else {
         return;
