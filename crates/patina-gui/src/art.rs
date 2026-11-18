@@ -186,6 +186,16 @@ impl ArtCache {
         any
     }
 
+    /// A new picture was chosen for an artist: forget theirs, so it's
+    /// loaded again.
+    pub fn forget_artist(&mut self, name: &str) {
+        let hit =
+            |r: &Req| matches!(r, Req::Artist(n) if n.trim().eq_ignore_ascii_case(name.trim()));
+        self.images.retain(|k, _| !hit(&k.0));
+        self.order.retain(|k| !hit(&k.0));
+        self.pending.retain(|k| !hit(&k.0));
+    }
+
     /// A new cover was chosen for the album in `dir`: forget what was
     /// loaded for it, so it's loaded again.
     pub fn forget_under(&mut self, dir: &Path) {

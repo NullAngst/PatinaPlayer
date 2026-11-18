@@ -186,6 +186,23 @@ impl Source {
         Self::from_input(input, Path::new(""), opts)
     }
 
+    /// Open from a reader that can't seek: a live stream that isn't a URL
+    /// FFmpeg can fetch itself (a Snapcast stream). `name` helps FFmpeg
+    /// guess the format.
+    pub fn open_stream<R>(reader: R, name: &str, opts: OpenOptions) -> Result<Self, DecodeError>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        init_ffmpeg();
+        let io = ffmpeg::format::context::StreamIo::from_read(reader)?;
+        let abort = opts.abort.clone();
+        let input =
+            ffmpeg::format::input_from_stream_with_interrupt(io, Some(name), None, move || {
+                abort.as_ref().is_some_and(|a| a.load(Ordering::Relaxed))
+            })?;
+        Self::from_input(input, Path::new(""), opts)
+    }
+
     fn from_input(
         input: ffmpeg::format::context::Input,
         path: &Path,

@@ -65,7 +65,10 @@ pub(super) struct PlexState {
 }
 
 enum SnapMsg {
-    Clients(Target, Result<Vec<SnapClient>, String>),
+    Clients(
+        Target,
+        Result<(Vec<SnapClient>, Vec<snapcast::SnapStream>), String>,
+    ),
     Routed {
         client: String,
         on: bool,
@@ -344,7 +347,7 @@ impl Browser {
         };
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::spawn(move || {
-            let r = snapcast::clients(&t);
+            let r = snapcast::status(&t);
             let _ = tx.send(SnapMsg::Clients(t, r));
         });
         self.snap.rx = Some(rx);
@@ -379,6 +382,41 @@ impl Browser {
             c.on_patina = on;
         }
         self.refresh_or_stale(Section::Snapcast);
+    }
+
+    /// Listen to one of the snapserver's streams on this device. It goes
+    /// in Radio as a station (once), and plays.
+    pub fn snap_listen(&mut self, stream: &str) {
+        let Some(t) = self.snap_target() else {
+            return self.error("No snapserver to listen to");
+        };
+        // Playing to it as well would send Patina's sound round in a loop.
+        if self.casting().as_ref() == Some(&t) {
+            self.cast_to(None);
+        }
+        let url = crate::snapclient::station_url(&t.host(), stream);
+        let i = match self.stations.iter().position(|s| s.url == url) {
+            Some(i) => i,
+            None => {
+                self.stations.push(crate::config::Station {
+                    name: format!("{stream} (Snapcast on {})", t.host()),
+                    url: url.clone(),
+                });
+                self.save_stations();
+                self.stations.len() - 1
+            }
+        };
+        let st = self.stations[i].clone();
+        self.end_mix();
+        self.player.send(crate::Command::SetQueueTracks {
+            tracks: vec![super::model::station_info(&st)],
+            start: 0,
+            pos: std::time::Duration::ZERO,
+        });
+        self.note(format!(
+            "Listening to {stream} on {}. It's in Radio too.",
+            t.host()
+        ));
     }
 
     pub fn set_snap_volume(&mut self, client: &str, percent: i64) {
@@ -468,14 +506,16 @@ impl Browser {
                     self.snap.live.loading = false;
                     self.snap.live.server = Some(t.name.clone());
                     match r {
-                        Ok(c) => {
+                        Ok((c, s)) => {
                             self.snap.live.note = c
                                 .is_empty()
                                 .then(|| "The snapserver knows no rooms yet.".to_string());
                             self.snap.live.clients = c;
+                            self.snap.live.streams = s;
                         }
                         Err(e) => {
                             self.snap.live.clients.clear();
+                            self.snap.live.streams.clear();
                             self.snap.live.note =
                                 Some(format!("Couldn't ask {} for its rooms: {e}", t.name));
                         }

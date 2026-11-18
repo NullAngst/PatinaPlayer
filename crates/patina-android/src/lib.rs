@@ -151,6 +151,10 @@ impl Hooks for AndroidHooks {
         jni_glue::pick_image()
     }
 
+    fn pick_document(&self) -> Picked {
+        jni_glue::pick_document()
+    }
+
     fn save_file(&self, src: &std::path::Path, name: &str) -> Picked {
         jni_glue::save_copy(src, name)
     }

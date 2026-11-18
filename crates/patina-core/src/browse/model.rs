@@ -50,8 +50,21 @@ pub enum Section {
 }
 
 impl Section {
-    /// The Sources pages, in sidebar order.
-    pub const SOURCES: [Section; 5] = [
+    /// The Sources pages, in sidebar order: where music comes from.
+    pub const SOURCES: [Section; 4] = [
+        Section::Plex,
+        Section::MusicServers,
+        Section::Dlna,
+        Section::Icecast,
+    ];
+
+    /// The pages for where music goes, under "Play on" in the sidebar.
+    /// Snapcast's rooms, which Patina plays to (it can listen to a
+    /// snapserver's streams too, from the same page).
+    pub const OUTPUTS: [Section; 1] = [Section::Snapcast];
+
+    /// Every page of setting rows about a source or an output.
+    pub const PAGES: [Section; 5] = [
         Section::Plex,
         Section::MusicServers,
         Section::Dlna,

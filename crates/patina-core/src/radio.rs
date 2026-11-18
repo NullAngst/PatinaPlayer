@@ -305,6 +305,53 @@ impl StationCheck {
 
 /// Decode `want` of audio from a stream, following any format change, or
 /// say why not. Gives up after 15 seconds of trying.
+/// [`check`] for a Snapcast stream: connect as a snapclient, and play a
+/// second of it.
+fn check_snapcast(url: &str) -> Result<StationCheck, RadioError> {
+    let resolved = Resolved {
+        kind: Kind::Direct,
+        streams: vec![url.to_string()],
+    };
+    let failed = |e: String| StationCheck {
+        working: None,
+        rate: None,
+        channels: None,
+        codec: None,
+        kbps: None,
+        name: None,
+        error: Some(e),
+        resolved: resolved.clone(),
+    };
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (reader, name) = match crate::snapclient::open(url, abort) {
+        Ok(r) => r,
+        Err(e) => return Ok(failed(e)),
+    };
+    let opts = OpenOptions {
+        live: true,
+        ..Default::default()
+    };
+    let mut src = match Source::open_stream(reader, name, opts) {
+        Ok(s) => s,
+        Err(e) => return Ok(failed(e.to_string())),
+    };
+    if let Err(e) = listen(&mut src, Duration::from_secs(1)) {
+        return Ok(failed(format!("answers but doesn't play: {e}")));
+    }
+    let fmt = src.format();
+    let info = src.info();
+    Ok(StationCheck {
+        working: Some(0),
+        rate: Some(fmt.rate),
+        channels: Some(fmt.channels),
+        codec: Some(info.codec.clone()).filter(|c| !c.is_empty()),
+        kbps: info.kbps,
+        name: None,
+        error: None,
+        resolved,
+    })
+}
+
 fn listen(src: &mut Source, want: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut got = 0f64;
@@ -326,6 +373,9 @@ fn listen(src: &mut Source, want: Duration) -> Result<(), String> {
 
 /// Resolve and try to open a station, the way playing it would.
 pub fn check(url: &str) -> Result<StationCheck, RadioError> {
+    if crate::snapclient::is_url(url) {
+        return check_snapcast(url);
+    }
     let resolved = resolve(url)?;
     let mut last_err = None;
     for (i, s) in resolved.streams.iter().enumerate() {

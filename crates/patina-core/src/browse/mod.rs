@@ -9,6 +9,7 @@ mod cast;
 pub mod covers;
 mod downloads;
 pub mod eq;
+pub mod info;
 pub mod ipod;
 pub mod lastfm;
 mod leveling;
@@ -41,7 +42,7 @@ use crate::track::MediaKind;
 use crate::{Command, Event, Player, TrackInfo};
 
 pub use model::*;
-pub use select::{NowPlaying, SmartCheck};
+pub use select::{ExportFile, ExportKind, NowPlaying, SmartCheck};
 pub use settings::{Change, Control, Key, Setting, SettingsInfo};
 pub use sources::{PlexChoice, PlexSignIn};
 
@@ -465,6 +466,7 @@ impl Browser {
         self.poll_level();
         self.eq_tick();
         self.amp_tick();
+        self.follow_lyrics();
         self.poll_lyrics();
         self.poll_ipod();
         self.poll_cast();
@@ -617,6 +619,13 @@ impl Browser {
             s.push(SideEntry::Gap);
             s.push(SideEntry::Label("Sources"));
             s.extend(entries);
+        }
+        // Where music goes: Snapcast's rooms. A sink, not a source, though
+        // its page can listen to a snapserver's streams too.
+        if self.lib.is_some() {
+            s.push(SideEntry::Gap);
+            s.push(SideEntry::Label("Play on"));
+            s.extend(Section::OUTPUTS.iter().map(|&x| SideEntry::Section(x)));
         }
         s.push(SideEntry::Gap);
         s.push(SideEntry::Section(Section::Eq));
@@ -973,7 +982,7 @@ impl Browser {
     pub fn refresh_section(&mut self, s: Section) {
         // The Sources pages are Settings' rows too.
         if s == Section::Settings {
-            for p in Section::SOURCES {
+            for p in Section::PAGES {
                 self.refresh_or_stale(p);
             }
         }
@@ -1008,7 +1017,7 @@ impl Browser {
     /// Refresh a section now if it's open, or when it's next opened.
     pub fn refresh_or_stale(&mut self, s: Section) {
         if s == Section::Settings && self.section != Section::Settings {
-            for p in Section::SOURCES {
+            for p in Section::PAGES {
                 if p == self.section {
                     self.refresh_section(p);
                 } else if self.stacks.contains_key(&p) {
@@ -2028,6 +2037,10 @@ impl Browser {
         match key {
             Key::BackupLibrary => return self.backup_library(None),
             Key::SnapRefresh => return self.refresh_snap_rooms(),
+            Key::SnapListen(id) => {
+                let id = id.clone();
+                return self.snap_listen(&id);
+            }
             Key::PlexSignIn => return self.plex_sign_in(),
             _ => {}
         }

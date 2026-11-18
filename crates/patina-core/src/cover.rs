@@ -25,6 +25,9 @@ pub enum Saved {
     /// In the app's own folder: a server album, or a folder it can't
     /// write to.
     App(PathBuf),
+    /// An artist's picture, in the app's own folder: an artist on a
+    /// server, or whose albums don't share a folder it can write to.
+    ArtistApp(PathBuf),
 }
 
 impl Saved {
@@ -42,6 +45,7 @@ impl Saved {
                 "Saved the cover in PatinaPlayer's own folder (it can't write into that album's folder)"
                     .into()
             }
+            Saved::ArtistApp(_) => "Saved the artist's picture in PatinaPlayer's own folder".into(),
         }
     }
 }
@@ -100,7 +104,7 @@ pub fn is_chosen_file(p: &Path) -> bool {
 
 /// What kind of image some bytes are, as the extension to save them
 /// with. Anything that isn't JPEG or PNG is converted to PNG first.
-fn prepare(bytes: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
+pub(crate) fn prepare(bytes: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
     let fmt = image::guess_format(bytes).map_err(|_| "That isn't an image".to_string())?;
     // Check it decodes before anything is written over.
     let img =
@@ -191,9 +195,11 @@ pub struct Found {
     pub thumb: String,
     /// The biggest copy it offers.
     pub full: String,
+    /// The year it came out, where the source says.
+    pub year: Option<i32>,
 }
 
-fn http() -> Option<reqwest::blocking::Client> {
+pub(crate) fn http() -> Option<reqwest::blocking::Client> {
     crate::net::client_builder()
         .user_agent(concat!(
             "PatinaPlayer/",
@@ -205,7 +211,7 @@ fn http() -> Option<reqwest::blocking::Client> {
         .ok()
 }
 
-fn get_json(
+pub(crate) fn get_json(
     c: &reqwest::blocking::Client,
     url: &str,
     query: &[(&str, &str)],
@@ -237,6 +243,7 @@ pub fn parse_itunes(v: &serde_json::Value) -> Vec<Found> {
                 title,
                 thumb: art.replace("100x100bb", "300x300bb"),
                 full: art.replace("100x100bb", "1200x1200bb"),
+                year: year_of(r.get("releaseDate")),
             })
         })
         .collect()
@@ -268,6 +275,7 @@ pub fn parse_deezer(v: &serde_json::Value) -> Vec<Found> {
                 title: format!("{} · {artist}", r.get("title")?.as_str()?),
                 thumb: thumb.to_string(),
                 full: full.to_string(),
+                year: None,
             })
         })
         .collect()
@@ -301,9 +309,16 @@ pub fn parse_musicbrainz(v: &serde_json::Value) -> Vec<Found> {
                 title: format!("{} · {artist}", r.get("title")?.as_str()?),
                 thumb: format!("https://coverartarchive.org/release-group/{id}/front-250"),
                 full: format!("https://coverartarchive.org/release-group/{id}/front-1200"),
+                year: year_of(r.get("first-release-date")),
             })
         })
         .collect()
+}
+
+/// The year at the start of a date ("1989-06-15", "1989-06-15T07:00:00Z").
+fn year_of(v: Option<&serde_json::Value>) -> Option<i32> {
+    let s = v?.as_str()?;
+    s.get(..4)?.parse().ok().filter(|y| *y > 1000)
 }
 
 /// Lucene's special characters, escaped for a MusicBrainz query.
@@ -321,6 +336,23 @@ fn lucene(s: &str) -> String {
 /// Look for covers of an album. Asks iTunes, Deezer and MusicBrainz, and
 /// takes a few from each, best matches first.
 pub fn search(artist: &str, album: &str) -> Vec<Found> {
+    search_year(artist, album, None)
+}
+
+/// [`search`], with the year it came out where it's known. MusicBrainz
+/// is asked for that year's release only, and whatever any source says
+/// came out that year goes first. The other sources' searches don't take
+/// a year.
+pub fn search_year(artist: &str, album: &str, year: Option<i32>) -> Vec<Found> {
+    let mut out = search_now(artist, album, year);
+    if let Some(y) = year {
+        // Stable: the order within each part stays as it was.
+        out.sort_by_key(|f| f.year != Some(y));
+    }
+    out
+}
+
+fn search_now(artist: &str, album: &str, year: Option<i32>) -> Vec<Found> {
     let Some(c) = http() else { return Vec::new() };
     let artist = artist.trim();
     let album = album.trim();
@@ -359,6 +391,9 @@ pub fn search(artist: &str, album: &str) -> Vec<Found> {
             );
             if !artist.is_empty() {
                 q.push_str(&format!(" AND artist:\"{}\"", lucene(artist)));
+            }
+            if let Some(y) = year {
+                q.push_str(&format!(" AND firstreleasedate:{y}*"));
             }
             get_json(
                 &c,
@@ -440,7 +475,19 @@ mod tests {
             "artist-credit": [{"name": "Nirvana", "joinphrase": ""}]}]});
         let f = parse_musicbrainz(&mb);
         assert!(f[0].full.ends_with("/release-group/abc/front-1200"));
+        assert_eq!(f[0].year, None);
         assert!(parse_deezer(&serde_json::json!({"error": {}})).is_empty());
+    }
+
+    #[test]
+    fn reads_the_year_where_given() {
+        let it = serde_json::json!({"results": [{"collectionName": "Bleach", "artistName": "Nirvana",
+            "artworkUrl100": "https://x/100x100bb.jpg", "releaseDate": "1989-06-15T07:00:00Z"}]});
+        assert_eq!(parse_itunes(&it)[0].year, Some(1989));
+        let mb = serde_json::json!({"release-groups": [{"id": "abc", "title": "Bleach",
+            "first-release-date": "1989-06"}]});
+        assert_eq!(parse_musicbrainz(&mb)[0].year, Some(1989));
+        assert_eq!(year_of(Some(&serde_json::json!(""))), None);
     }
 
     #[test]

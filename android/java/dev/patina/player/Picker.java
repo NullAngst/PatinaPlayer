@@ -20,8 +20,10 @@ import java.io.OutputStream;
 
 /**
  * The system's own pickers (DocumentsUI): a music folder for the library,
- * an EQ file to import, and an image to use as an album's cover. Rust asks through Native.pickFolder and
- * Native.pickFile and waits; the answer goes back through Native.pickDone.
+ * an EQ file to import, an image to use as an album's cover, a playlist or
+ * smart playlist file to import, and the save dialog for backups and
+ * exports. Rust asks through Native.pickFolder, Native.pickFile and the
+ * rest, and waits; the answer goes back through Native.pickDone.
  *
  * The library scans folders by path, the way it does on Linux, so a picked
  * folder is turned back into one. That works for the phone's storage and
@@ -53,7 +55,7 @@ final class Picker {
         saving = src;
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.setType("application/vnd.sqlite3");
+        i.setType(mimeFor(name));
         i.putExtra(Intent.EXTRA_TITLE, name);
         try {
             a.startActivityForResult(i, REQUEST_BASE + Native.PICK_SAVE);
@@ -61,6 +63,23 @@ final class Picker {
             saving = null;
             Native.pickDone(Native.PICK_SAVE, null, "This phone has no save dialog");
         }
+    }
+
+    /**
+     * The type a save dialog offers a file as, from its extension. It's
+     * looked up in the same table the storage providers use, so they keep
+     * the name as given: a type that disagrees with the extension makes
+     * them add one of their own (Mix.m3u8.m3u). Unknown extensions go as
+     * plain bytes, which they leave alone too.
+     */
+    private static String mimeFor(String name) {
+        int dot = name.lastIndexOf('.');
+        String ext = dot < 0 ? "" : name.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
+        if (ext.equals("db")) {
+            return "application/vnd.sqlite3";
+        }
+        String mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+        return mime != null ? mime : "application/octet-stream";
     }
 
     /** Copy the file being saved to where the dialog said. */
@@ -112,6 +131,14 @@ final class Picker {
             i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
             i.setType("image/*");
+        } else if (what == Native.PICK_DOCUMENT) {
+            // Playlists come typed every which way (audio/x-mpegurl,
+            // application/vnd.apple.mpegurl, text/plain, plain bytes), and
+            // smart playlist files are text: show everything, and let the
+            // app say if it isn't one.
+            i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
         } else {
             i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -133,7 +160,8 @@ final class Picker {
     static boolean onResult(Activity a, int request, int result, Intent data) {
         int what = request - REQUEST_BASE;
         if (what != Native.PICK_FOLDER && what != Native.PICK_EQ_FILE
-                && what != Native.PICK_IMAGE && what != Native.PICK_SAVE) {
+                && what != Native.PICK_IMAGE && what != Native.PICK_SAVE
+                && what != Native.PICK_DOCUMENT) {
             return false;
         }
         Uri uri = result == Activity.RESULT_OK && data != null ? data.getData() : null;
@@ -158,8 +186,12 @@ final class Picker {
                 Native.pickDone(what, path, null);
             }
         } else {
+            // The file keeps its name: an imported playlist is named after
+            // it, and its extension says what kind it is.
             File f = what == Native.PICK_IMAGE
                 ? copyToCache(a, uri, "cover-pick", 40L << 20)
+                : what == Native.PICK_DOCUMENT
+                ? copyToCache(a, uri, "picked-file", 16L << 20)
                 : copyToCache(a, uri, "eq-import.txt", 4L << 20);
             if (f == null) {
                 Native.pickDone(what, null, "Couldn't read that file");
@@ -245,8 +277,8 @@ final class Picker {
                 return null;
             }
             byte[] buf = new byte[16384];
-            // EQ files are a few KB and covers a few MB: anything past the
-            // limit isn't one.
+            // EQ files are a few KB, covers a few MB and playlists rarely
+            // past one: anything past the limit isn't one.
             long total = 0;
             int n;
             while ((n = in.read(buf)) > 0) {

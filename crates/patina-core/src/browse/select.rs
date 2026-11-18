@@ -9,6 +9,7 @@ use super::{Browser, Item, Section, Source, count};
 use crate::library::TrackRow;
 use crate::library::playlist_io;
 use crate::library::smart;
+use crate::library::smart_io;
 use crate::{Command, Snapshot, TrackInfo};
 
 /// What a smart playlist's query would do, for the box it's typed in.
@@ -17,6 +18,32 @@ pub struct SmartCheck {
     pub ok: bool,
     /// "Matches 132 songs", or why the query doesn't work.
     pub message: String,
+}
+
+/// What an export writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    /// The selected playlist, or the open list of songs, as M3U8.
+    List,
+    /// The queue, as M3U8.
+    Queue,
+    /// The smart playlist open or selected: its rules, as a smart
+    /// playlist file.
+    SmartRules,
+}
+
+/// An export written where a save dialog can take it from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportFile {
+    pub path: PathBuf,
+    /// The name to offer it under: `Mix.m3u8`, `Blues.smart.toml`.
+    pub file_name: String,
+    /// What it holds, for the note once it's saved: "128 songs",
+    /// "the rules of \"Blues\"".
+    pub what: String,
+    /// A line for after the note, when there's something to say (songs on
+    /// a server, which only PatinaPlayer reads back). Empty otherwise.
+    pub caveat: String,
 }
 
 /// What the Now Playing page shows besides the cover and the transport.
@@ -482,9 +509,14 @@ impl Browser {
 
     /// Write the queue's songs to `path`, as M3U8.
     pub fn export_queue_to(&mut self, path: &Path) {
+        let tracks = self.queue_tracks();
+        self.write_export("Queue", &tracks, path);
+    }
+
+    /// The queue's songs, as the library has them.
+    fn queue_tracks(&self) -> Vec<TrackRow> {
         let paths = self.queue_playlist_paths();
-        let tracks: Vec<TrackRow> = self
-            .lib
+        self.lib
             .as_ref()
             .map(|l| {
                 paths
@@ -492,8 +524,87 @@ impl Browser {
                     .filter_map(|p| l.track_by_path(p).ok().flatten())
                     .collect()
             })
-            .unwrap_or_default();
-        self.write_export("Queue", &tracks, path);
+            .unwrap_or_default()
+    }
+
+    /// Where a smart playlist's rules go unless asked otherwise: beside
+    /// the M3U8 exports.
+    pub fn default_smart_export_path(&self, name: &str) -> PathBuf {
+        let m3u = self.default_export_path(name);
+        m3u.with_file_name(format!(
+            "{}{}",
+            playlist_io::file_name_for(name),
+            smart_io::EXT
+        ))
+    }
+
+    /// Write the rules of the smart playlist open or selected to `path`,
+    /// to import on another device.
+    pub fn export_smart_to(&mut self, path: &Path) {
+        let Some(s) = self.smart_target() else {
+            return self.note("Pick a smart playlist to export its rules");
+        };
+        let path = expand(path);
+        match smart_io::write(&path, &[smart_entry(&s)]) {
+            Ok(()) => self.note(format!(
+                "Exported the rules of \"{}\" to {}. Import the file on another device, in Playlists, Import.",
+                s.name,
+                path.display()
+            )),
+            Err(e) => self.error(format!("Couldn't write {}: {e}", path.display())),
+        }
+    }
+
+    /// Write an export into the app's cache, for the system's save dialog
+    /// to take wherever it's put (Android, where a typed path would land
+    /// inside the app's private storage). None, with a note saying why,
+    /// when there's nothing to export.
+    pub fn export_scratch(&mut self, kind: ExportKind) -> Option<ExportFile> {
+        if kind == ExportKind::SmartRules {
+            let Some(s) = self.smart_target() else {
+                self.note("Pick a smart playlist to export its rules");
+                return None;
+            };
+            let file_name = format!("{}{}", playlist_io::file_name_for(&s.name), smart_io::EXT);
+            let path = crate::library::backup_scratch(&file_name);
+            if let Err(e) = smart_io::write(&path, &[smart_entry(&s)]) {
+                self.error(format!("Couldn't write the rules: {e}"));
+                return None;
+            }
+            return Some(ExportFile {
+                path,
+                file_name,
+                what: format!("the rules of \"{}\"", s.name),
+                caveat: "Import the file on another device, in Playlists, Import.".into(),
+            });
+        }
+        let subject = if kind == ExportKind::Queue {
+            Some(("Queue".to_string(), self.queue_tracks()))
+        } else {
+            self.export_subject()
+        };
+        let Some((name, tracks)) = subject else {
+            self.note("Pick a playlist, or open a list of songs, to export");
+            return None;
+        };
+        if tracks.is_empty() {
+            self.note(format!("\"{name}\" has no songs to export"));
+            return None;
+        }
+        let file_name = format!("{}.m3u8", playlist_io::file_name_for(&name));
+        let path = crate::library::backup_scratch(&file_name);
+        match playlist_io::write_m3u8(&path, &tracks) {
+            Ok(n) => Some(ExportFile {
+                path,
+                file_name,
+                what: count(n),
+                caveat: server_caveat(&tracks),
+            }),
+            Err(e) => {
+                self.error(format!("Couldn't write the playlist: {e}"));
+                None
+            }
+        }
     }
 
     fn write_export(&mut self, name: &str, tracks: &[TrackRow], path: &Path) {
@@ -501,15 +612,13 @@ impl Browser {
             return self.note(format!("\"{name}\" has no songs to export"));
         }
         let path = expand(path);
-        let server = tracks.iter().filter(|t| t.remote_id.is_some()).count();
         match playlist_io::write_m3u8(&path, tracks) {
             Ok(n) => {
                 let mut msg = format!("Exported {} to {}", count(n), path.display());
-                if server > 0 {
-                    msg.push_str(&format!(
-                        ". {server} {} on a server, which only PatinaPlayer can read back",
-                        if server == 1 { "is" } else { "are" }
-                    ));
+                let caveat = server_caveat(tracks);
+                if !caveat.is_empty() {
+                    msg.push_str(". ");
+                    msg.push_str(&caveat);
                 }
                 self.note(msg);
             }
@@ -517,14 +626,20 @@ impl Browser {
         }
     }
 
-    /// Read an M3U, M3U8 or PLS file into a new playlist.
+    /// Read an M3U, M3U8 or PLS file into a new playlist, or a smart
+    /// playlist file into new smart playlists.
     pub fn import_playlist_file(&mut self, path: &Path) {
         let path = expand(path);
         if !path.is_file() {
             return self.error(format!("There's no file at {}", path.display()));
         }
+        if smart_io::is_smart_file(&path) {
+            return self.import_smart_file(&path);
+        }
         if !playlist_io::is_playlist_file(&path) {
-            return self.error("That isn't an .m3u, .m3u8 or .pls file");
+            return self.error(
+                "That isn't a playlist file (.m3u, .m3u8 or .pls) or a smart playlist file (.smart.toml)",
+            );
         }
         let name = playlist_io::name_of(&path);
         let Some(lib) = self.lib.as_mut() else {
@@ -551,6 +666,54 @@ impl Browser {
                 self.refresh_section(Section::Playlists);
             }
             Err(e) => self.error(format!("Couldn't import {}: {e}", path.display())),
+        }
+    }
+
+    /// Read a smart playlist file (see [`smart_io`]) into new smart
+    /// playlists.
+    pub fn import_smart_file(&mut self, path: &Path) {
+        let entries = match smart_io::read(path) {
+            Ok(e) => e,
+            Err(e) => return self.error(format!("Couldn't import {}: {e}", path.display())),
+        };
+        let Some(lib) = self.lib.as_ref() else {
+            return self.error("Smart playlists need the library");
+        };
+        let r = match lib.import_smart(&entries) {
+            Ok(r) => r,
+            Err(e) => return self.error(format!("Couldn't import {}: {e}", path.display())),
+        };
+        let mut msg = match r.made.as_slice() {
+            [] => String::new(),
+            [one] => format!("Imported the smart playlist \"{one}\""),
+            many => format!("Imported {} smart playlists", many.len()),
+        };
+        if r.renamed > 0 {
+            msg.push_str(&format!(
+                " ({} renamed, the name being taken)",
+                if r.renamed == 1 {
+                    "one".to_string()
+                } else {
+                    r.renamed.to_string()
+                }
+            ));
+        }
+        if !r.made.is_empty() {
+            self.refresh_section(Section::Playlists);
+        }
+        if r.failed.is_empty() {
+            return self.note(msg);
+        }
+        let bad = r
+            .failed
+            .iter()
+            .map(|(n, why)| format!("\"{n}\" ({why})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if msg.is_empty() {
+            self.error(format!("Nothing imported: the rules didn't read for {bad}"));
+        } else {
+            self.error(format!("{msg}. Left out, the rules didn't read: {bad}"));
         }
     }
 
@@ -688,6 +851,25 @@ fn khz(r: u32) -> String {
         format!("{}", r / 1000)
     } else {
         format!("{:.1}", r as f64 / 1000.0)
+    }
+}
+
+/// A smart playlist as a smart playlist file holds it.
+fn smart_entry(s: &smart::SmartRow) -> smart_io::SmartEntry {
+    smart_io::SmartEntry {
+        name: s.name.clone(),
+        rules: s.query.clone(),
+        exclude: s.exclude.clone(),
+    }
+}
+
+/// Server songs in an export: only PatinaPlayer reads them back. Empty
+/// when there are none.
+fn server_caveat(tracks: &[TrackRow]) -> String {
+    match tracks.iter().filter(|t| t.remote_id.is_some()).count() {
+        0 => String::new(),
+        1 => "1 is on a server, which only PatinaPlayer can read back".into(),
+        n => format!("{n} are on a server, which only PatinaPlayer can read back"),
     }
 }
 

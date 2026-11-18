@@ -1,0 +1,51 @@
+--- a/androidwindowadapter.rs
++++ b/androidwindowadapter.rs
+@@ -358,5 +358,20 @@
+                         };
+ 
++                    let mouse = motion_event.source() == android_activity::input::Source::Mouse;
+                     match motion_event.action() {
++                        // A mouse's clicks come as ButtonPress and ButtonRelease, which
++                        // say which button. Android also sends Down and Up around them;
++                        // taken as a finger, those pressed the left button as well, so
++                        // a right click was a left press and a right press at once.
++                        MotionAction::Down | MotionAction::Up if mouse => InputStatus::Handled,
++                        // A mouse moving with a button held: a drag, as on a desktop.
++                        MotionAction::Move if mouse => {
++                            let position = position_for_event(motion_event, offset, scale);
++                            result = self
++                                .window
++                                .dispatch_event_with_result(WindowEvent::PointerMoved { position })
++                                .map(|_| ());
++                            InputStatus::Handled
++                        }
+                         MotionAction::ButtonPress => {
+                             result = self
+@@ -559,5 +574,26 @@
+                             InputStatus::Handled
+                         }
+-                        MotionAction::Scroll => todo!(),
++                        // A mouse wheel, or a touchpad's two-finger scroll, which used
++                        // to panic here. One notch is 1.0 on each axis, and the desktop
++                        // backends scroll 60 px a notch. Android counts up and right as
++                        // positive; Slint wants up and left.
++                        MotionAction::Scroll => {
++                            let position = position_for_event(motion_event, offset, scale);
++                            let (h, v) = motion_event.pointers().next().map_or((0., 0.), |p| {
++                                (
++                                    p.axis_value(android_activity::input::Axis::Hscroll),
++                                    p.axis_value(android_activity::input::Axis::Vscroll),
++                                )
++                            });
++                            result = self
++                                .window
++                                .dispatch_event_with_result(WindowEvent::PointerScrolled {
++                                    position,
++                                    delta_x: -h * 60.,
++                                    delta_y: v * 60.,
++                                })
++                                .map(|_| ());
++                            InputStatus::Handled
++                        }
+                         MotionAction::HoverEnter | MotionAction::HoverExit => {
+                             InputStatus::Unhandled

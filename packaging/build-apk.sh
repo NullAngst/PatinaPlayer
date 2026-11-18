@@ -109,7 +109,20 @@ export PKG_CONFIG_ALLOW_CROSS=1
 export "PKG_CONFIG_PATH_${TARGET//-/_}=$FFMPEG/lib/pkgconfig"
 export "PKG_CONFIG_LIBDIR_${TARGET//-/_}=$FFMPEG/lib/pkgconfig"
 
-cargo build --release --target "$TARGET" -p patina-android --features static-ffmpeg
+# Slint's Android backend, patched for mice (a wheel crashed it, and a
+# click counted as a finger too): see patch-slint-android.sh. Cargo takes
+# it as a [patch] for this build only. While it builds, Cargo.lock lists
+# the patched copy by its path, so the lockfile is put back afterwards.
+SLINT_DIR="$(bash "$ROOT/packaging/patch-slint-android.sh" "$ROOT/target/slint-android")"
+CARGO_PATCH=()
+if [ -n "$SLINT_DIR" ]; then
+    CARGO_PATCH=(--config "patch.crates-io.i-slint-backend-android-activity.path=\"$SLINT_DIR\"")
+fi
+LOCK_SAVED="$ROOT/target/Cargo.lock.before-apk"
+cp -- "$ROOT/Cargo.lock" "$LOCK_SAVED"
+trap 'cp -- "$LOCK_SAVED" "$ROOT/Cargo.lock"' EXIT
+
+cargo build --release --target "$TARGET" -p patina-android --features static-ffmpeg "${CARGO_PATCH[@]}"
 SO="$ROOT/target/$TARGET/release/libpatina_android.so"
 [ -f "$SO" ] || die "the build made no $SO"
 

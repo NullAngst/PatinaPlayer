@@ -492,6 +492,12 @@ impl Feeder {
     /// Open a radio station: resolve its URL, then try each stream.
     fn open_station(&self, info: &TrackInfo) -> Result<Source, String> {
         let url = info.url.clone().ok_or("station has no URL")?;
+        // A Snapcast stream: listened to as a snapclient, not fetched.
+        if crate::snapclient::is_url(&url) {
+            let (reader, name) = crate::snapclient::open(&url, self.shared.abort_io.clone())?;
+            return Source::open_stream(reader, name, self.open_options(info))
+                .map_err(|e| e.to_string());
+        }
         let resolved = crate::radio::resolve(&url).map_err(|e| e.to_string())?;
         let mut last = String::new();
         for s in &resolved.streams {

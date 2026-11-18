@@ -19,6 +19,11 @@
 //! source that nothing ever sends to ([`IDLE_NAME`], one port up) and
 //! parks the room there: silence, without touching its mute or volume.
 //! Volume is per client (`Client.SetVolume`).
+//!
+//! Patina can also listen to a stream here ([`crate::snapclient`]), as one
+//! more client. [`streams`] lists what there is to listen to, and
+//! [`listen_route`] puts that client on the stream asked for. It's left
+//! out of the rooms Patina plays to, so it can't end up hearing itself.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -196,6 +201,39 @@ fn groups(status: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// A stream on the snapserver, to listen to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapStream {
+    /// What `Group.SetStream` takes, and what a station names.
+    pub id: String,
+    /// "playing", "idle" or "unknown", as the snapserver says.
+    pub status: String,
+}
+
+/// The streams worth listening to: not Patina's own, not the silent one.
+fn streams_of(status: &Value, patina: Option<&str>) -> Vec<SnapStream> {
+    status
+        .pointer("/server/streams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            let id = s.get("id")?.as_str()?;
+            if Some(id) == patina || id == IDLE_NAME {
+                return None;
+            }
+            Some(SnapStream {
+                id: id.to_string(),
+                status: s
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
 fn clients_of(status: &Value, patina: Option<&str>) -> Vec<SnapClient> {
     let mut out = Vec::new();
     for g in groups(status) {
@@ -218,6 +256,10 @@ fn clients_of(status: &Value, patina: Option<&str>) -> Vec<SnapClient> {
             let Some(id) = c.get("id").and_then(Value::as_str) else {
                 continue;
             };
+            // Patina listening here: not a room to play to.
+            if id.starts_with(crate::snapclient::ID_PREFIX) {
+                continue;
+            }
             let name = c
                 .pointer("/config/name")
                 .and_then(Value::as_str)
@@ -254,9 +296,117 @@ pub fn clients(t: &Target) -> Result<Vec<SnapClient>, String> {
 }
 
 fn clients_at(t: &Target, ports: (u16, u16)) -> Result<Vec<SnapClient>, String> {
+    status_at(t, ports).map(|(c, _)| c)
+}
+
+/// The rooms, and the streams there are to listen to, in one question.
+pub fn status(t: &Target) -> Result<(Vec<SnapClient>, Vec<SnapStream>), String> {
+    status_at(t, (RPC_TCP, RPC_HTTP))
+}
+
+fn status_at(t: &Target, ports: (u16, u16)) -> Result<(Vec<SnapClient>, Vec<SnapStream>), String> {
     let status = rpc(&t.host(), ports, "Server.GetStatus", json!({}))?;
     let patina = tcp_stream_id(&status, port_of(t));
-    Ok(clients_of(&status, patina.as_deref()))
+    Ok((
+        clients_of(&status, patina.as_deref()),
+        streams_of(&status, patina.as_deref()),
+    ))
+}
+
+/// The group a client is in: its id, the stream it plays, and the other
+/// clients in it.
+fn group_of(status: &Value, client: &str) -> Option<(String, String, Vec<String>)> {
+    groups(status).into_iter().find_map(|g| {
+        let ids: Vec<String> = g
+            .get("clients")?
+            .as_array()?
+            .iter()
+            .filter_map(|c| c.get("id")?.as_str().map(str::to_string))
+            .collect();
+        ids.iter().any(|i| i == client).then(|| {
+            (
+                g.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                g.get("stream_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                ids.into_iter().filter(|i| i != client).collect(),
+            )
+        })
+    })
+}
+
+/// Put a client on a stream. Sharing a group, it gets a group of its own
+/// first, and the others stay where they are. True if it moved.
+fn set_client_stream(
+    host: &str,
+    ports: (u16, u16),
+    status: &Value,
+    client: &str,
+    want: &str,
+) -> Result<bool, String> {
+    let (group, current, others) =
+        group_of(status, client).ok_or_else(|| format!("the snapserver doesn't know {client}"))?;
+    if current == want {
+        return Ok(false);
+    }
+    let group = if others.is_empty() {
+        group
+    } else {
+        let after = rpc(
+            host,
+            ports,
+            "Group.SetClients",
+            json!({ "id": group, "clients": others }),
+        )?;
+        let after = if after.pointer("/server/groups").is_some() {
+            after
+        } else {
+            rpc(host, ports, "Server.GetStatus", json!({}))?
+        };
+        group_of(&after, client)
+            .map(|(g, _, _)| g)
+            .ok_or_else(|| format!("{client} went missing from the snapserver"))?
+    };
+    rpc(
+        host,
+        ports,
+        "Group.SetStream",
+        json!({ "id": group, "stream_id": want }),
+    )?;
+    Ok(true)
+}
+
+/// Put Patina's listening client on `stream`. None when the snapserver
+/// doesn't know the client yet (it hasn't connected before); otherwise
+/// whether it had to move.
+pub fn listen_route(host: &str, client: &str, stream: &str) -> Result<Option<bool>, String> {
+    listen_route_at(host, (RPC_TCP, RPC_HTTP), client, stream)
+}
+
+fn listen_route_at(
+    host: &str,
+    ports: (u16, u16),
+    client: &str,
+    stream: &str,
+) -> Result<Option<bool>, String> {
+    let status = rpc(host, ports, "Server.GetStatus", json!({}))?;
+    if group_of(&status, client).is_none() {
+        return Ok(None);
+    }
+    let known = status
+        .pointer("/server/streams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|s| s.get("id").and_then(Value::as_str) == Some(stream));
+    if !known {
+        return Err(format!("the snapserver has no stream called {stream}"));
+    }
+    set_client_stream(host, ports, &status, client, stream).map(Some)
 }
 
 /// Put one client on Patina's stream, or take it off. Off sets it back to
@@ -280,31 +430,8 @@ fn route_at(
     let status = rpc(&host, ports, "Server.GetStatus", json!({}))?;
     let patina = tcp_stream_id(&status, port_of(t))
         .ok_or_else(|| "the snapserver has no Patina stream yet".to_string())?;
-    let find = |st: &Value| -> Option<(String, String, Vec<String>)> {
-        groups(st).into_iter().find_map(|g| {
-            let ids: Vec<String> = g
-                .get("clients")?
-                .as_array()?
-                .iter()
-                .filter_map(|c| c.get("id")?.as_str().map(str::to_string))
-                .collect();
-            ids.iter().any(|i| i == client).then(|| {
-                (
-                    g.get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    g.get("stream_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    ids.into_iter().filter(|i| i != client).collect(),
-                )
-            })
-        })
-    };
-    let (group, current, others) =
-        find(&status).ok_or_else(|| format!("the snapserver doesn't know {client}"))?;
+    let (_, current, _) =
+        group_of(&status, client).ok_or_else(|| format!("the snapserver doesn't know {client}"))?;
     let want = if on {
         patina.clone()
     } else {
@@ -332,35 +459,9 @@ fn route_at(
             None => add_idle(&host, ports, port_of(t))?,
         }
     };
-    if current == want {
-        return Ok(current);
-    }
     // Sharing a group: the others stay where they are, and this one gets
     // a group of its own.
-    let group = if others.is_empty() {
-        group
-    } else {
-        let after = rpc(
-            &host,
-            ports,
-            "Group.SetClients",
-            json!({ "id": group, "clients": others }),
-        )?;
-        let after = if after.pointer("/server/groups").is_some() {
-            after
-        } else {
-            rpc(&host, ports, "Server.GetStatus", json!({}))?
-        };
-        find(&after)
-            .map(|(g, _, _)| g)
-            .ok_or_else(|| format!("{client} went missing from the snapserver"))?
-    };
-    rpc(
-        &host,
-        ports,
-        "Group.SetStream",
-        json!({ "id": group, "stream_id": want }),
-    )?;
+    set_client_stream(&host, ports, &status, client, &want)?;
     Ok(current)
 }
 
@@ -700,5 +801,78 @@ mod tests {
     fn no_control_api_says_so() {
         let t = Target::snapcast("127.0.0.1:4953").unwrap();
         assert!(matches!(ensure_source_at(&t, (1, 1)), Ready::NoControl(_)));
+    }
+
+    #[test]
+    fn streams_to_listen_to_leave_out_patinas_own() {
+        let mut st = two_rooms(true);
+        st["server"]["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": IDLE_NAME, "status": "idle", "uri": {"scheme": "tcp", "host": "0.0.0.0:4954", "query": {"name": IDLE_NAME, "mode": "server"}}}));
+        let patina = tcp_stream_id(&st, 4953);
+        let s = streams_of(&st, patina.as_deref());
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].id, "radio");
+        assert_eq!(s[0].status, "unknown");
+    }
+
+    #[test]
+    fn the_listening_client_isnt_a_room() {
+        let mut st = two_rooms(true);
+        let me = format!("{}abc", crate::snapclient::ID_PREFIX);
+        st["server"]["groups"][0]["clients"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": me, "connected": true}));
+        let names: Vec<String> = clients_of(&st, None).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["Den", "Kitchen"]);
+    }
+
+    #[test]
+    fn the_listener_moves_to_its_stream_on_its_own() {
+        let me = format!("{}abc", crate::snapclient::ID_PREFIX);
+        let shared = {
+            let me = me.clone();
+            move || {
+                json!({"server": {
+                    "groups": [{"id": "g1", "stream_id": "Patina", "clients": [
+                        {"id": "kitchen", "connected": true}, {"id": me, "connected": true}]}],
+                    "streams": [{"id": "radio"}, {"id": "Patina"}]
+                }})
+            }
+        };
+        let after = {
+            let me = me.clone();
+            move || {
+                json!({"server": {
+                    "groups": [
+                        {"id": "g1", "stream_id": "Patina", "clients": [{"id": "kitchen"}]},
+                        {"id": "g9", "stream_id": "Patina", "clients": [{"id": me}]}],
+                    "streams": [{"id": "radio"}, {"id": "Patina"}]
+                }})
+            }
+        };
+        let (port, h) = fake_rpc(3, move |m, _| match m {
+            "Server.GetStatus" => shared(),
+            "Group.SetClients" => after(),
+            _ => json!({}),
+        });
+        assert_eq!(
+            listen_route_at("127.0.0.1", (port, 1), &me, "radio"),
+            Ok(Some(true))
+        );
+        let seen = h.join().unwrap();
+        assert_eq!(seen[1].0, "Group.SetClients");
+        assert_eq!(seen[1].1["clients"], json!(["kitchen"]));
+        assert_eq!(seen[2].0, "Group.SetStream");
+        assert_eq!(seen[2].1, json!({"id": "g9", "stream_id": "radio"}));
+        // Not known yet: nothing to move.
+        let (port, h) = fake_rpc(1, |_, _| json!({"server": {"groups": [], "streams": []}}));
+        assert_eq!(
+            listen_route_at("127.0.0.1", (port, 1), "new", "radio"),
+            Ok(None)
+        );
+        h.join().unwrap();
     }
 }

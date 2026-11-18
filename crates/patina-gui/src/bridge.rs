@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use patina_core::browse::covers::CoverTarget;
+use patina_core::browse::covers::{CoverKind, CoverTarget};
+use patina_core::browse::info::{InfoTarget, InfoView};
 use patina_core::browse::{
-    Activated, Browser, Change, Control, Item, Key as SettingKey, ListAction, Note, PlexSignIn,
-    Section, SideEntry, Source, fmt_duration, fmt_length,
+    Activated, Browser, Change, Control, ExportKind, Item, Key as SettingKey, ListAction, Note,
+    PlexSignIn, Section, SideEntry, Source, fmt_duration, fmt_length,
 };
 use patina_core::config::Theme;
 use patina_core::library::PlaylistRow;
@@ -28,8 +29,8 @@ use crate::art::{ArtCache, LARGE, Req, THUMB};
 use crate::desktop::Action;
 use crate::platform::{self, Picked, Prompt, PromptEvent, PromptField};
 use crate::{
-    AmpKnob, AmpUnit, AppWindow, ChainRow, CoverPick, EqBand, Hero, Icons, P, QueueRow, Row,
-    SideItem, SmartRule, Tint, Ui,
+    AmpKnob, AmpUnit, AppWindow, ChainRow, CoverPick, EqBand, Hero, Icons, InfoRow, P, QueueRow,
+    Row, SideItem, SmartRule, Tint, Ui,
 };
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
@@ -74,11 +75,13 @@ enum Dlg {
     SmartNew,
     /// Changing one.
     SmartEdit(i64),
-    /// Where to write a playlist file: the selection's (false) or the
-    /// queue's (true).
-    Export(bool),
+    /// Where to write a playlist file (the selection's or the queue's),
+    /// or a smart playlist's rules.
+    Export(ExportKind),
     /// The path of a playlist file to read, when there's no file picker.
     ImportPath,
+    /// Other words to search for a cover or an artist's picture with.
+    CoverTerms(CoverTarget),
     /// The sleep timer's own time.
     Sleep,
     /// The paths, the servers offering "New playlist on…", the playlists.
@@ -149,6 +152,9 @@ pub struct State {
     fav_keys: std::collections::HashSet<(patina_core::library::marks::FavKind, Vec<u8>)>,
     /// The lyrics as last shown, so the list is only replaced on change.
     lyrics_shown: (Vec<String>, i32),
+    /// The Info page: what it's about, and whether it follows the song
+    /// playing (opened from Now Playing).
+    info: Option<(InfoTarget, bool)>,
     /// The rack: a row per unit, and each unit's knobs in a model of its
     /// own, updated in place so a knob being dragged keeps its grip.
     amp_units: Rc<VecModel<AmpUnit>>,
@@ -176,7 +182,8 @@ pub struct State {
     plex_shown: u64,
     /// Android's system bars as last set, in pixels.
     insets: [i32; 4],
-    /// A backup on its way through the save dialog: a note, or an error.
+    /// A backup or an export on its way through the save dialog: a note,
+    /// or an error.
     backup: Option<crossbeam_channel::Receiver<Result<Option<String>, String>>>,
     /// The Back being handled came from a swipe in from the left.
     back_from_left: Rc<std::cell::Cell<bool>>,
@@ -311,8 +318,8 @@ enum CoverMsg {
     Thumb(u64, usize, Option<image::RgbaImage>),
     /// Every thumbnail is in.
     Done(u64),
-    /// The picked cover is saved, or why not.
-    Saved(Result<(patina_core::cover::Saved, PathBuf), String>),
+    /// The picked picture is saved, or why not.
+    Saved(Result<(patina_core::cover::Saved, CoverTarget), String>),
 }
 
 const HELP: &str = "Space        play / pause
@@ -398,6 +405,7 @@ fn jp_label(l: &str) -> &'static str {
     match l {
         "Listening" => "きいた",
         "Sources" => "ソース",
+        "Play on" => "ながす",
         _ => "",
     }
 }
@@ -447,6 +455,7 @@ impl State {
             eq_bands: Rc::new(VecModel::default()),
             fav_keys: Default::default(),
             lyrics_shown: (Vec::new(), -1),
+            info: None,
             amp_units: Rc::new(VecModel::default()),
             amp_knobs: Vec::new(),
             amp_kinds: Vec::new(),
@@ -744,6 +753,7 @@ impl State {
                                 | SettingKey::AddPlex
                                 | SettingKey::AddIcecast
                                 | SettingKey::SnapRefresh
+                                | SettingKey::SnapListen(_)
                         ) =>
                     {
                         (11, false)
@@ -988,7 +998,11 @@ impl State {
             (_, Some(Source::Smart { .. })) => (
                 0,
                 tracks_cols,
-                vec![("smart-edit", "Edit".into()), ("export", "Export…".into())],
+                vec![
+                    ("smart-edit", "Edit".into()),
+                    ("export", "Export…".into()),
+                    ("smart-export", "Export rules…".into()),
+                ],
             ),
             (Section::History, _) => (0, tracks_cols, vec![]),
             (Section::Ipod, _) => (0, vec![], vec![]),
@@ -1303,7 +1317,7 @@ impl State {
                 "Live streams from Icecast servers. They're in Radio too.".to_string()
             }
             Some(Source::Section(Section::Snapcast)) => {
-                "Which rooms hear PatinaPlayer, and how loud".to_string()
+                "Which rooms hear PatinaPlayer, and how loud. Its streams can play here too.".to_string()
             }
             _ if items.is_empty() => String::new(),
             _ => count_label(items),
@@ -1728,6 +1742,7 @@ impl State {
         // position.
         ui.set_np_rating(self.b.playing_rating().map(i32::from).unwrap_or(-1));
         self.sync_lyrics(ui);
+        self.follow_info(ui);
         if ui.get_np_open() {
             self.sync_now_playing(ui);
         }
@@ -2484,8 +2499,9 @@ impl State {
                 }
             }
             "import" => self.import_playlist(),
-            "export" => self.open_export(ui, false),
-            "queue-export" => self.open_export(ui, true),
+            "export" => self.open_export(ui, ExportKind::List),
+            "queue-export" => self.open_export(ui, ExportKind::Queue),
+            "smart-export" => self.open_export(ui, ExportKind::SmartRules),
             "ipod" => self.b.send_view_to_ipod(),
             _ => {}
         }
@@ -3110,6 +3126,7 @@ impl State {
                         | SettingKey::AddPlex
                         | SettingKey::AddIcecast
                         | SettingKey::SnapRefresh
+                        | SettingKey::SnapListen(_)
                 ) =>
             {
                 "measure"
@@ -3147,7 +3164,7 @@ impl State {
             return self.open_players(ui);
         }
         match key {
-            SettingKey::PlexSignIn | SettingKey::SnapRefresh => {
+            SettingKey::PlexSignIn | SettingKey::SnapRefresh | SettingKey::SnapListen(_) => {
                 return self.b.change_setting(&key, Change::Toggle);
             }
             SettingKey::AddPlex => return self.open_add_plex(ui),
@@ -3559,6 +3576,57 @@ impl State {
     }
 
     /// Lyrics: up for the song playing, or closed if they already are.
+    /// Open the Info page on a song or an album. `follow`: it's the song
+    /// playing, and moves on with it.
+    fn open_info(&mut self, ui: &AppWindow, target: Option<InfoTarget>, follow: bool) {
+        let Some(t) = target else {
+            return self.b.note("There's no song or album there to show");
+        };
+        let Some(v) = self.b.info(&t) else {
+            return self.b.note("That isn't in the library");
+        };
+        self.info = Some((t, follow));
+        show_info(ui, v);
+        // No room for both side panels on a narrow window.
+        if narrow_window(ui) {
+            ui.set_queue_panel(false);
+        }
+    }
+
+    fn close_info(&mut self, ui: &AppWindow) {
+        self.info = None;
+        ui.set_info_open(false);
+    }
+
+    /// Info from Now Playing: the song playing, or closed again.
+    fn np_info(&mut self, ui: &AppWindow) {
+        if matches!(self.info, Some((_, true))) {
+            return self.close_info(ui);
+        }
+        let t = self.b.playing_info_target();
+        self.open_info(ui, t, true);
+    }
+
+    /// Info opened from Now Playing moves on with the song.
+    fn follow_info(&mut self, ui: &AppWindow) {
+        let Some((shown, true)) = &self.info else {
+            return;
+        };
+        let Some(now) = self.b.playing_info_target() else {
+            return;
+        };
+        if *shown == now {
+            return;
+        }
+        match self.b.info(&now) {
+            Some(v) => {
+                self.info = Some((now, true));
+                show_info(ui, v);
+            }
+            None => self.close_info(ui),
+        }
+    }
+
     fn toggle_lyrics(&mut self, ui: &AppWindow) {
         if self.b.lyrics().is_some() && !self.b.lyrics_stale() {
             self.b.lyrics_hide();
@@ -3818,7 +3886,9 @@ impl State {
     /// A menu's cover action, for the album it was picked on.
     fn cover_action(&mut self, ui: &AppWindow, a: &str, target: Option<CoverTarget>) {
         let Some(t) = target else {
-            return self.b.note("That has no album to find a cover for");
+            return self
+                .b
+                .note("That has no album or artist to find a picture for");
         };
         match a {
             "cover-find" => self.open_cover_find(ui, t),
@@ -3839,16 +3909,19 @@ impl State {
         let seq = self.covers.seq;
         self.covers.found.clear();
         self.covers_model.set_vec(Vec::new());
-        let what = match (t.album.is_empty(), t.artist.is_empty()) {
-            (false, false) => format!("\"{}\" by {}", t.album, t.artist),
-            (false, true) => format!("\"{}\"", t.album),
-            _ => t.label.clone(),
-        };
-        ui.set_covers_note(ss(format!(
-            "Looking for {what} on iTunes, Deezer and MusicBrainz…"
-        )));
-        ui.set_dlg_title(ss(format!("Cover for {}", t.label)));
-        let (artist, album) = (t.artist.clone(), t.album.clone());
+        let what = t.what();
+        let year = t.year.map(|y| format!(" ({y})")).unwrap_or_default();
+        ui.set_covers_note(ss(match t.kind {
+            CoverKind::Album => {
+                format!("Looking for {what}{year} on iTunes, Deezer and MusicBrainz…")
+            }
+            CoverKind::Artist => format!("Looking for pictures of {what} on Deezer…"),
+        }));
+        ui.set_dlg_title(ss(match t.kind {
+            CoverKind::Album => format!("Cover for {}", t.label),
+            CoverKind::Artist => format!("Picture of {}", t.label),
+        }));
+        let search = t.clone();
         self.covers.target = Some(t);
         self.dlg = Dlg::Covers;
         ui.set_dialog(5);
@@ -3856,7 +3929,7 @@ impl State {
         std::thread::Builder::new()
             .name("patina-covers".into())
             .spawn(move || {
-                let found = patina_core::cover::search(&artist, &album);
+                let found = search.search();
                 let thumbs: Vec<String> = found.iter().map(|f| f.thumb.clone()).collect();
                 if tx.send(CoverMsg::Found(seq, found)).is_err() {
                     return;
@@ -3884,6 +3957,43 @@ impl State {
             .ok();
     }
 
+    /// Search for other words than the tags': the artist, the album and the
+    /// year, or the artist's name for a picture of them.
+    fn open_cover_terms(&mut self, ui: &AppWindow) {
+        let Some(t) = self.covers.target.clone() else {
+            return;
+        };
+        match t.kind {
+            CoverKind::Album => {
+                open_text(
+                    ui,
+                    "Search for a cover",
+                    "Artist",
+                    &t.artist,
+                    Some(("Album", &t.album)),
+                    "Search",
+                );
+                ui.set_dlg_label3(ss("Year (optional)"));
+                ui.set_dlg_text3(ss(t.year.map(|y| y.to_string()).unwrap_or_default()));
+                ui.set_dlg_three_fields(true);
+            }
+            CoverKind::Artist => {
+                open_text(
+                    ui,
+                    "Search for a picture",
+                    "Artist",
+                    &t.artist,
+                    None,
+                    "Search",
+                );
+            }
+        }
+        ui.set_dlg_note(ss(
+            "What to look for online. The tags stay as they are; the picture goes to the same album or artist.",
+        ));
+        self.dlg = Dlg::CoverTerms(t);
+    }
+
     /// One of the covers found was picked: fetch it whole and save it.
     fn cover_pick(&mut self, ui: &AppWindow, i: usize) {
         let (Some(t), Some(f)) = (
@@ -3901,9 +4011,9 @@ impl State {
             let bytes =
                 patina_core::cover::fetch(&f.full).or_else(|_| patina_core::cover::fetch(&f.thumb));
             let r = bytes
-                .map_err(|e| format!("Couldn't download that cover: {e}"))
-                .and_then(|b| patina_core::cover::save(&t.dir, &b))
-                .map(|s| (s, t.dir.clone()));
+                .map_err(|e| format!("Couldn't download that picture: {e}"))
+                .and_then(|b| t.save(&b))
+                .map(|s| (s, t));
             let _ = tx.send(CoverMsg::Saved(r));
         });
     }
@@ -3930,8 +4040,8 @@ impl State {
             let (_, t) = self.cover_file_pick.take().unwrap();
             match picked {
                 Picked::Path(p) => {
-                    match patina_core::cover::save_file(&t.dir, &p) {
-                        Ok(saved) => self.cover_done(ui, &saved, &t.dir),
+                    match t.save_file(&p) {
+                        Ok(saved) => self.cover_done(ui, &saved, &t),
                         Err(e) => self.b.error(e),
                     }
                     // Android hands over a copy in the app's cache.
@@ -3959,7 +4069,7 @@ impl State {
                             .collect::<Vec<_>>(),
                     );
                     ui.set_covers_note(ss(if found.is_empty() {
-                        "Nothing found. Use an image file instead, or fix the album's tags and look again."
+                        "Nothing found. Search for other words, or use an image file instead."
                             .to_string()
                     } else {
                         "Loading the pictures… Tap one to use it.".to_string()
@@ -3994,29 +4104,35 @@ impl State {
                         .filter_map(|&i| self.covers.found.get(i).cloned())
                         .collect();
                     self.covers_model.set_vec(rows);
+                    let artist = self
+                        .covers
+                        .target
+                        .as_ref()
+                        .is_some_and(|t| t.kind == CoverKind::Artist);
                     ui.set_covers_note(ss(match self.covers.found.len() {
-                        0 => "None of what was found has a picture. Use an image file instead."
+                        0 => "None of what was found has a picture. Search for other words, or use an image file instead."
                             .to_string(),
+                        n if artist => format!(
+                            "{n} found. Tap one to use it; it's saved as artist.jpg in the artist's folder."
+                        ),
                         n => format!(
                             "{n} found. Tap one to use it; it's saved as album_art.jpg in the album's folder."
                         ),
                     }));
                 }
-                CoverMsg::Saved(Ok((saved, dir))) => self.cover_done(ui, &saved, &dir),
+                CoverMsg::Saved(Ok((saved, t))) => self.cover_done(ui, &saved, &t),
                 CoverMsg::Saved(Err(e)) => self.b.error(e),
                 _ => {}
             }
         }
     }
 
-    /// A cover is saved: show it everywhere it shows.
-    fn cover_done(
-        &mut self,
-        ui: &AppWindow,
-        saved: &patina_core::cover::Saved,
-        dir: &std::path::Path,
-    ) {
-        self.art.forget_under(dir);
+    /// A cover or an artist's picture is saved: show it everywhere it shows.
+    fn cover_done(&mut self, ui: &AppWindow, saved: &patina_core::cover::Saved, t: &CoverTarget) {
+        match t.kind {
+            CoverKind::Album => self.art.forget_under(&t.dir),
+            CoverKind::Artist => self.art.forget_artist(&t.artist),
+        }
         self.blur_key = None;
         // The album header and any list kept for later show it too.
         self.rows_sig = None;
@@ -4413,9 +4529,34 @@ impl State {
         ui.set_dlg_note_warn(!c.ok);
     }
 
-    /// Write the selected playlist, or the open list, as a file.
-    fn open_export(&mut self, ui: &AppWindow, queue: bool) {
-        let name = if queue {
+    /// Write the selected playlist, the open list or the queue as a
+    /// file, or a smart playlist's rules. Where there's a save dialog
+    /// (Android) it's written to the cache and the dialog takes it from
+    /// there; elsewhere it goes to the path typed.
+    fn open_export(&mut self, ui: &AppWindow, kind: ExportKind) {
+        if let Some(hooks) = platform::hooks() {
+            return self.export_through_dialog(hooks, kind);
+        }
+        if kind == ExportKind::SmartRules {
+            let Some(s) = self.b.smart_target() else {
+                return self.b.note("Pick a smart playlist to export its rules");
+            };
+            let path = self.b.default_smart_export_path(&s.name);
+            self.dlg = Dlg::Export(kind);
+            open_text(
+                ui,
+                &format!("Export the rules of \"{}\"", s.name),
+                "Save as",
+                &path.display().to_string(),
+                None,
+                "Export",
+            );
+            ui.set_dlg_note(ss(
+                "The name and rules only. Import the file on another device, in Playlists, Import, and the songs come from its library.",
+            ));
+            return;
+        }
+        let name = if kind == ExportKind::Queue {
             Some("Queue".to_string())
         } else {
             self.b.export_subject().map(|(n, _)| n)
@@ -4426,7 +4567,7 @@ impl State {
                 .note("Pick a playlist, or open a list of songs, to export");
         };
         let path = self.b.default_export_path(&name);
-        self.dlg = Dlg::Export(queue);
+        self.dlg = Dlg::Export(kind);
         open_text(
             ui,
             &format!("Export \"{name}\""),
@@ -4440,15 +4581,48 @@ impl State {
         ));
     }
 
-    /// Read an M3U, M3U8 or PLS file into a new playlist: the desktop's
-    /// file picker, or a typed path where there isn't one.
+    /// An export through the system's save dialog: written to the cache,
+    /// then copied wherever it's saved (Downloads, a cloud drive).
+    fn export_through_dialog(&mut self, hooks: &'static dyn platform::Hooks, kind: ExportKind) {
+        if self.backup.is_some() {
+            return self.b.note("A save dialog is open already");
+        }
+        let Some(f) = self.b.export_scratch(kind) else {
+            return;
+        };
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let r = match hooks.save_file(&f.path, &f.file_name) {
+                Picked::Path(p) => {
+                    let mut m = format!("Exported {} as {}", f.what, p.display());
+                    if !f.caveat.is_empty() {
+                        m.push_str(". ");
+                        m.push_str(&f.caveat);
+                    }
+                    Ok(Some(m))
+                }
+                Picked::Cancelled => Ok(None),
+                Picked::Unavailable(why) => Err(why),
+            };
+            let _ = std::fs::remove_file(&f.path);
+            let _ = tx.send(r);
+        });
+        self.backup = Some(rx);
+    }
+
+    /// Read an M3U, M3U8 or PLS file into a new playlist, or a smart
+    /// playlist file into smart playlists: the system's file picker
+    /// (DocumentsUI on Android), or a typed path where there isn't one.
     fn import_playlist(&mut self) {
         if self.import_pick.is_some() {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.send(pick_playlist_dialog());
+            let _ = tx.send(match platform::hooks() {
+                Some(h) => h.pick_document(),
+                None => pick_playlist_dialog(),
+            });
         });
         self.import_pick = Some((rx, Instant::now()));
     }
@@ -4499,7 +4673,7 @@ impl State {
         open_text(
             ui,
             "Import a playlist",
-            "Path to an .m3u, .m3u8 or .pls file",
+            "Path to an .m3u, .m3u8, .pls or .smart.toml file",
             "~/",
             None,
             "Import",
@@ -4511,10 +4685,16 @@ impl State {
             return;
         };
         let Ok(picked) = rx.try_recv() else { return };
-        let quick = opened.elapsed() < Duration::from_millis(700);
+        let quick = opened.elapsed() < Duration::from_millis(700) && platform::hooks().is_none();
         self.import_pick = None;
         match picked {
-            Picked::Path(p) => self.b.import_playlist_file(&p),
+            Picked::Path(p) => {
+                self.b.import_playlist_file(&p);
+                // Android's picker copied it into the cache to be read.
+                if platform::hooks().is_some() {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
             Picked::Unavailable(why) => {
                 self.b.note(why);
                 self.import_path_dialog(ui);
@@ -4550,6 +4730,10 @@ impl State {
                 let t = self.b.selected_cover_target();
                 self.cover_action(ui, a, t);
             }
+            "info" => {
+                let t = self.b.selected_info_target();
+                self.open_info(ui, t, false);
+            }
             "select" => {
                 if let Some(i) = self.selected_index() {
                     self.b.toggle_mark(i);
@@ -4558,7 +4742,8 @@ impl State {
                 self.marks_dirty = true;
             }
             "ipod" => self.b.send_selection_to_ipod(),
-            "export" => self.open_export(ui, false),
+            "export" => self.open_export(ui, ExportKind::List),
+            "smart-export" => self.open_export(ui, ExportKind::SmartRules),
             "smart-edit" => {
                 if let Some(Item::Smart(p)) = item {
                     self.open_smart(ui, Some(p));
@@ -4757,6 +4942,10 @@ impl State {
                 self.b.go_to_queue_position(i, a == "go-artist");
                 self.after_go_to(ui);
             }
+            "info" => {
+                let t = self.b.queue_info_target(i);
+                self.open_info(ui, t, false);
+            }
             _ => {}
         }
     }
@@ -4889,15 +5078,32 @@ impl State {
                     return;
                 }
             }
-            Dlg::Export(queue) => {
+            Dlg::Export(kind) => {
                 let path = std::path::PathBuf::from(&t1);
-                if queue {
-                    self.b.export_queue_to(&path);
-                } else {
-                    self.b.export_to(&path);
+                match kind {
+                    ExportKind::List => self.b.export_to(&path),
+                    ExportKind::Queue => self.b.export_queue_to(&path),
+                    ExportKind::SmartRules => self.b.export_smart_to(&path),
                 }
             }
             Dlg::ImportPath => self.b.import_playlist_file(std::path::Path::new(&t1)),
+            Dlg::CoverTerms(mut t) => {
+                let t3 = ui.get_dlg_text3().trim().to_string();
+                t.artist = t1.trim().to_string();
+                if t.kind == CoverKind::Album {
+                    t.album = t2.trim().to_string();
+                    t.year = t3.parse().ok();
+                }
+                if t.artist.is_empty() && t.album.is_empty() {
+                    self.dlg = Dlg::CoverTerms(t);
+                    ui.set_dlg_note(ss("Type something to look for"));
+                    ui.set_dlg_note_warn(true);
+                    return;
+                }
+                ui.set_dlg_note(SharedString::new());
+                // The covers dialog comes back up with what's found.
+                return self.open_cover_find(ui, t);
+            }
             Dlg::Sleep => {
                 if let Err(e) = self.b.set_sleep_text(&t1) {
                     // Leave it up to fix.
@@ -5667,6 +5873,8 @@ pub fn install(
     on!(on_hero_rate, |s, _u, n| s.b.rate_level(n.clamp(0, 5) as u8));
     on!(on_hero_fav, |s, _u| s.b.toggle_favorite_level());
     on!(on_lyrics_clicked, |s, u| s.toggle_lyrics(&u));
+    on!(on_info_close, |s, u| s.close_info(&u));
+    on!(on_np_info, |s, u| s.np_info(&u));
     on!(on_side_act, |s, _u, i, a| {
         let core = (i - SIDE_EXTRA).max(0) as usize;
         if let Some(SideEntry::Favorite { id, .. }) = s.b.sidebar.get(core).cloned() {
@@ -5702,6 +5910,7 @@ pub fn install(
             s.pick_cover_file(t);
         }
     });
+    on!(on_cover_terms, |s, u| s.open_cover_terms(&u));
     on!(on_level_clicked, |s, u| {
         let tip = u.get_level_tip().to_string();
         if !tip.is_empty() {
@@ -5981,6 +6190,13 @@ pub fn install(
             s.b.cancel_plex_sign_in();
             s.plex_shown = s.b.plex_generation();
         }
+        // Back to what was found before, not out of it altogether.
+        if matches!(s.dlg, Dlg::CoverTerms(_)) {
+            s.dlg = Dlg::Covers;
+            u.set_dlg_note(SharedString::new());
+            u.set_dialog(5);
+            return;
+        }
         s.dlg = Dlg::None;
         s.smart_edit = None;
         u.set_dialog(0);
@@ -6188,7 +6404,10 @@ fn pick_image_dialog() -> Picked {
 fn pick_playlist_dialog() -> Picked {
     match rfd::FileDialog::new()
         .set_title("Import a playlist")
-        .add_filter("Playlists", &["m3u", "m3u8", "pls"])
+        .add_filter(
+            "Playlists and smart playlists",
+            &["m3u", "m3u8", "pls", "toml"],
+        )
         .pick_file()
     {
         Some(p) => Picked::Path(p),
@@ -6199,6 +6418,28 @@ fn pick_playlist_dialog() -> Picked {
 #[cfg(target_os = "android")]
 fn pick_playlist_dialog() -> Picked {
     Picked::Unavailable("Type the playlist file's path.".into())
+}
+
+/// Put an Info page on screen.
+fn show_info(ui: &AppWindow, v: InfoView) {
+    let rows: Vec<InfoRow> = v
+        .rows
+        .into_iter()
+        .map(|r| InfoRow {
+            label: ss(if r.head {
+                r.label.to_uppercase()
+            } else {
+                r.label
+            }),
+            value: ss(r.value),
+            head: r.head,
+            code: r.code,
+        })
+        .collect();
+    ui.set_info_kicker(ss(v.kicker));
+    ui.set_info_title(ss(v.title));
+    ui.set_info_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+    ui.set_info_open(true);
 }
 
 /// Bring the window back from the tray, or forward from behind others.

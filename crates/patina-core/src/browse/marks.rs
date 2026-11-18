@@ -458,6 +458,29 @@ impl Browser {
             .is_some_and(|t| t.path != v.path)
     }
 
+    /// With the lyrics panel open, a new song's lyrics are looked up as it
+    /// starts: the panel being open is the ask, so nothing is looked up
+    /// that wasn't asked for. Radio gets a line saying it has none.
+    pub(super) fn follow_lyrics(&mut self) {
+        if !self.lyrics_stale() {
+            return;
+        }
+        let Some(t) = self.player.snapshot().track else {
+            return;
+        };
+        if t.is_live() {
+            self.lyrics = Some(LyricsView {
+                title: t.display_title(),
+                path: t.path.clone(),
+                status: LyricsStatus::Nothing("Radio has no lyrics to look up.".into()),
+            });
+            self.lyrics_job = None;
+            self.touch();
+            return;
+        }
+        self.lyrics_show();
+    }
+
     pub(super) fn poll_lyrics(&mut self) {
         let Some(job) = &self.lyrics_job else { return };
         let Ok(res) = job.rx.try_recv() else { return };

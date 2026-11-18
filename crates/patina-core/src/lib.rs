@@ -31,6 +31,7 @@ pub mod scrobble;
 pub mod secrets;
 pub mod session;
 pub mod sleep;
+pub mod snapclient;
 pub mod track;
 pub mod visual;
 

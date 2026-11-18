@@ -17,6 +17,7 @@ pub mod scope;
 pub mod scrobbles;
 pub mod service;
 pub mod smart;
+pub mod smart_io;
 pub mod tags;
 
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -70,7 +71,8 @@ pub fn backup_dest() -> PathBuf {
         .join(backup_name())
 }
 
-/// Where a backup waits for a save dialog to take it: the app's cache.
+/// Where a backup or an export waits for a save dialog to take it: the
+/// app's cache.
 pub fn backup_scratch(name: &str) -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)

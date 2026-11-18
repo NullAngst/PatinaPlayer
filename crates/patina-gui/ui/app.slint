@@ -296,6 +296,15 @@ export struct SmartRule {
     unit: int,
 }
 
+// One line on the Info page: a label and its value, or a heading (its
+// label already in capitals). `code` is a path or an id, broken anywhere.
+export struct InfoRow {
+    label: string,
+    value: string,
+    head: bool,
+    code: bool,
+}
+
 // A cover found online, in the picker.
 export struct CoverPick {
     art: image,
@@ -425,6 +434,8 @@ export global Icons {
     out property <string> queue-panel: "M3 6h13M3 11h13M3 16h8M18 14v6l4-3z";
     // A speech bubble with lines: lyrics.
     out property <string> lyrics: "M4 5h16v11H9l-5 4zM8 9h8M8 12h5";
+    // An i in a circle: a song's or an album's details.
+    out property <string> info: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 11v6M12 7.5v.5";
     out property <string> star: "M12 3l2.7 5.6 6.1 .9 -4.4 4.3 1 6.1 -5.4 -2.9 -5.4 2.9 1 -6.1 -4.4 -4.3 6.1 -.9z";
     out property <string> plus: "M12 5v14M5 12h14";
     out property <string> close: "M6 6l12 12M18 6L6 18";
@@ -1208,7 +1219,11 @@ component Pick inherits Rectangle {
     // long one (the smart playlist fields) ran off a phone's screen with
     // its ends out of reach. This one stays between the system bars,
     // scrolls, and opens with the current choice in view.
+    // Only a click outside closes it: the default closes on any release,
+    // so lifting the finger at the end of a scroll shut the list before
+    // anything could be picked. A choice closes it itself.
     pop := PopupWindow {
+        close-policy: close-on-click-outside;
         x: 0px;
         y: root.pop-y;
         width: max(root.width, 160px);
@@ -1748,10 +1763,16 @@ component ListRow inherits Rectangle {
             if item.kind == 0: MenuSeparator {}
             if item.kind == 0: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
             if item.kind == 0: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
+            if item.kind == 1: MenuSeparator {}
+            if item.kind == 0 || item.kind == 1: MenuItem { title: "View info"; activated => { root.act("info"); } }
             // Cover art: an album's, a folder's, or a song's album's.
             if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuSeparator {}
             if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
             if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
+            // An artist's picture.
+            if item.kind == 2: MenuSeparator {}
+            if item.kind == 2: MenuItem { title: "Find artist picture…"; activated => { root.act("cover-find"); } }
+            if item.kind == 2: MenuItem { title: "Artist picture from an image file…"; activated => { root.act("cover-file"); } }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
             if item.rating >= 0: Menu {
@@ -1819,6 +1840,7 @@ component ListRow inherits Rectangle {
             // Smart playlists.
             if item.kind == 17: MenuSeparator {}
             if item.kind == 17: MenuItem { title: "Edit…"; activated => { root.act("smart-edit"); } }
+            if item.kind == 17: MenuItem { title: "Export rules…"; activated => { root.act("smart-export"); } }
             if item.kind == 17: MenuItem { title: "Delete…"; activated => { root.act("smart-delete"); } }
             // On the iPod.
             if item.kind == 18: MenuItem { title: "Remove from iPod…"; activated => { root.act("ipod-remove"); } }
@@ -2234,9 +2256,10 @@ component AlbumTile inherits Rectangle {
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
             if root.ipod: MenuItem { title: "Send to iPod"; activated => { root.act("ipod"); } }
             if item.can-mix: MenuItem { title: "Artist mix"; activated => { root.act("mix"); } }
+            if item.kind == 1: MenuItem { title: "View info"; activated => { root.act("info"); } }
             MenuSeparator {}
-            MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
-            MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
+            MenuItem { title: item.kind == 2 ? "Find artist picture…" : "Find cover art…"; activated => { root.act("cover-find"); } }
+            MenuItem { title: item.kind == 2 ? "Artist picture from an image file…" : "Cover from an image file…"; activated => { root.act("cover-file"); } }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
             if item.rating >= 0: Menu {
@@ -2389,6 +2412,7 @@ component QueueLine inherits Rectangle {
             MenuSeparator {}
             MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
             MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
+            MenuItem { title: "View info"; activated => { root.act("info"); } }
             MenuSeparator {}
             MenuItem { title: "Remove"; activated => { root.act("remove"); } }
         }
@@ -2644,6 +2668,7 @@ component NowPlayingPage inherits Rectangle {
     in property <int> rating: -1;
     in property <int> love-state;
     in property <bool> lyrics-open;
+    in property <bool> info-open;
     in property <bool> tight;
     in property <bool> sleep-on;
     in property <string> sleep-label;
@@ -2663,6 +2688,7 @@ component NowPlayingPage inherits Rectangle {
     callback rate(int);
     callback love;
     callback lyrics;
+    callback info;
     callback queue;
     callback sleep(string);
     // The cover's menu: "cover-find", "cover-file".
@@ -2695,6 +2721,7 @@ component NowPlayingPage inherits Rectangle {
                 if root.sleep-on: Badge { y: (parent.height - self.height) / 2; text: root.sleep-label; fg: P.verdigris; }
                 SleepButton { active: root.sleep-on; label: root.sleep-label; live: root.live; act(a) => { root.sleep(a); } }
                 IconButton { icon: Icons.lyrics; tip: "Lyrics"; active: root.lyrics-open; clicked => { root.lyrics(); } }
+                if !root.live: IconButton { icon: Icons.info; tip: "Info"; active: root.info-open; clicked => { root.info(); } }
                 IconButton { icon: Icons.queue-panel; tip: "Queue"; clicked => { root.queue(); } }
                 IconButton { icon: Icons.close; tip: "Close"; clicked => { root.close(); } }
             }
@@ -3101,6 +3128,7 @@ component NowPlayingPhone inherits Rectangle {
     in property <bool> sleep-on;
     in property <string> sleep-label;
     in property <bool> lyrics-open;
+    in property <bool> info-open;
     in property <bool> queue-open;
     // Minimal UX: no sound chain in the menu.
     in property <bool> minimal;
@@ -3136,6 +3164,7 @@ component NowPlayingPhone inherits Rectangle {
     callback set-volume(float);
     callback toggle-mute;
     callback lyrics;
+    callback info;
     callback queue;
     callback love;
     callback rate(int);
@@ -3222,6 +3251,7 @@ component NowPlayingPhone inherits Rectangle {
                             }
                             if root.has-track && !root.live: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
                             if root.has-track && !root.live: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
+                            if root.has-track && !root.live: MenuItem { title: "Info"; activated => { root.info(); } }
                             if root.has-track && !root.live: MenuSeparator {}
                             if root.has-track && !root.live: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
                             if root.has-track && !root.live: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
@@ -3579,6 +3609,17 @@ component NowPlayingPhone inherits Rectangle {
                     tip: "Lyrics";
                     active: root.lyrics-open;
                     clicked => { root.lyrics(); }
+                }
+                if !root.remote && !root.live: Rectangle { horizontal-stretch: 1; }
+                if !root.remote && !root.live: IconButton {
+                    tint: Tint.accent;
+                    width: 44px;
+                    height: 44px;
+                    icon: Icons.info;
+                    icon-size: 20px;
+                    tip: "Info";
+                    active: root.info-open;
+                    clicked => { root.info(); }
                 }
                 Rectangle { horizontal-stretch: 1; }
                 if !root.remote: IconButton {
@@ -4104,8 +4145,12 @@ export component AppWindow inherits Window {
     // A panel over the list on a phone or narrow window: the whole view
     // scrolls as one page, list and all.
     property <bool> page-scroll: (amp-panel || eq-panel) && (Ui.touch || tight);
+    // The selection bar floats over the foot of the view. While it's up,
+    // the lists end two rows short of the bottom, so the last ones can be
+    // scrolled out from under it and still be tapped.
+    property <length> sel-gap: (layout != 2 && (marked-count > 0 || marking)) || (layout == 2 && (queue-marked-count > 0 || queue-marking)) ? 80px : 0px;
     // Roughly the list's width, for the column header's choices.
-    property <length> list-w: win-w - side-w - (lyrics-open ? lyrics-w : 0px) - (queue-panel ? queue-w : 0px) - 2 * pad;
+    property <length> list-w: win-w - side-w - (lyrics-open || info-open ? lyrics-w : 0px) - (queue-panel ? queue-w : 0px) - 2 * pad;
     // The sidebar's hover label while it's folded to icons.
     property <string> side-tip;
     property <length> side-tip-y;
@@ -4240,6 +4285,15 @@ export component AppWindow inherits Window {
     in property <int> lyrics-current: -1;
     in property <bool> lyrics-synced;
     callback lyrics-clicked;
+    // The Info page: a song's or an album's details, in the lyrics panel's
+    // place. Opened from a row's menu, or from Now Playing for the song
+    // playing (and then it follows the song).
+    in property <bool> info-open;
+    in property <string> info-kicker;
+    in property <string> info-title;
+    in property <[InfoRow]> info-rows;
+    callback info-close;
+    callback np-info;
     // The sleep timer: time left ("41:23", "end of song"), empty when off.
     in property <string> sleep-label;
     callback sleep-act(string);
@@ -4264,6 +4318,8 @@ export component AppWindow inherits Window {
     in property <string> covers-note;
     callback cover-pick(int);
     callback cover-file;
+    // Search again for words of your own: artist, album and year.
+    callback cover-terms;
     in property <string> np-artist;
     in property <string> np-album;
     in property <string> np-format;
@@ -4533,6 +4589,10 @@ export component AppWindow inherits Window {
                 root.volume-open = false;
                 return accept;
             }
+            if (e.text == Key.Back || e.text == Key.Escape) && root.info-open {
+                root.info-close();
+                return accept;
+            }
             if e.text == Key.Back && root.drawer-open {
                 root.drawer-open = false;
                 return accept;
@@ -4701,6 +4761,7 @@ export component AppWindow inherits Window {
                             padding-left: root.pad;
                             padding-right: root.pad;
                             padding-top: root.hero.show ? (root.short ? 16px : 28px) : (root.short ? 12px : 20px);
+                            padding-bottom: root.sel-gap;
                             spacing: 0px;
 
                             if root.hero.show: Rectangle {
@@ -5090,7 +5151,7 @@ export component AppWindow inherits Window {
                                 vertical-stretch: 1;
                                 property <int> cols: max(root.tiny ? 2 : 1, floor(self.width / 188px));
                                 property <length> cell: self.width / cols;
-                                content-height: ceil(root.rows.length / cols) * (cell + 44px);
+                                content-height: ceil(root.rows.length / cols) * (cell + 44px) + root.sel-gap;
                                 // Only the tiles near the screen exist: Rust
                                 // hands over that slice of the rows, starting
                                 // at grid-base. A grid of thousands of albums
@@ -5121,6 +5182,7 @@ export component AppWindow inherits Window {
                             padding-left: root.pad;
                             padding-right: root.pad;
                             padding-top: root.short ? 12px : 20px;
+                            padding-bottom: root.sel-gap;
                             HorizontalLayout {
                                 padding-bottom: root.tight ? 10px : 18px;
                                 spacing: 8px;
@@ -5229,12 +5291,14 @@ export component AppWindow inherits Window {
                             rate(n) => { root.np-rate(n); keys.focus(); }
                             love => { root.love-clicked(); keys.focus(); }
                             lyrics => { root.lyrics-clicked(); keys.focus(); }
+                            info-open: root.info-open;
+                            info => { root.np-info(); keys.focus(); }
                             queue => { root.toggle-queue(); keys.focus(); }
                         }
                     }
                 }
 
-                Rectangle { width: root.lyrics-open ? root.lyrics-w : 0px; }
+                Rectangle { width: root.lyrics-open || root.info-open ? root.lyrics-w : 0px; }
                 Rectangle { width: root.queue-panel ? root.queue-w : 0px; }
             }
 
@@ -6089,6 +6153,8 @@ export component AppWindow inherits Window {
             sleep-on: root.sleep-label != "";
             sleep-label: root.sleep-label;
             lyrics-open: root.lyrics-open;
+            info-open: root.info-open;
+            info => { root.np-info(); keys.focus(); }
             queue-open: root.queue-panel;
             speed-label: root.speed-label;
             speed-tempo: root.speed-tempo;
@@ -6170,6 +6236,63 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                             font-size: 13.5px;
                             color: P.text;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ----- Info panel -----
+        // In the lyrics panel's place, over it when both are open.
+        if root.info-open: Rectangle {
+            x: root.tiny ? 0px : keys.width - root.lyrics-w - (root.queue-panel ? root.queue-w : 0px);
+            y: 0;
+            width: root.tiny ? keys.width : root.lyrics-w;
+            height: keys.height - (root.np-phone ? 0px : root.bar-h);
+            background: root.np-phone || root.lyrics-open ? P.surface : P.panel;
+            clip: true;
+            TouchArea {}
+            Rectangle { width: 1px; x: 0; background: P.border; }
+            VerticalLayout {
+                padding-top: 16px;
+                padding-left: 18px;
+                padding-right: 16px;
+                padding-bottom: 12px;
+                spacing: 4px;
+                HorizontalLayout {
+                    Text { text: "Info"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton { icon: Icons.close; tip: "Close"; clicked => { root.info-close(); keys.focus(); } }
+                }
+                Text { text: root.info-kicker; font-size: 11px; letter-spacing: 1.2px; color: P.muted; }
+                Text { text: root.info-title; wrap: word-wrap; font-weight: 600; font-size: 15px; color: P.text; }
+                Rectangle { height: 4px; }
+                // A Flickable, as for the lyrics: the rows can run far past
+                // the panel (a file with many tags).
+                Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 7px;
+                        padding-bottom: 12px;
+                        for r in root.info-rows: VerticalLayout {
+                            padding-top: r.head ? 12px : 0px;
+                            spacing: 1px;
+                            Text {
+                                text: r.label;
+                                wrap: word-wrap;
+                                font-size: r.head ? 11px : 11.5px;
+                                font-weight: r.head ? 600 : 400;
+                                letter-spacing: r.head ? 1.1px : 0px;
+                                color: r.head ? P.accent-text : P.muted;
+                            }
+                            if !r.head: Text {
+                                text: r.value;
+                                wrap: r.code ? char-wrap : word-wrap;
+                                font-family: r.code ? P.mono : P.sans;
+                                font-size: r.code ? 12px : 13.5px;
+                                color: P.text;
+                            }
                         }
                     }
                 }
@@ -6694,6 +6817,11 @@ export component AppWindow inherits Window {
                             text: root.dialog == 4 ? "Close" : "Cancel";
                             h: 36px;
                             clicked => { root.dlg-cancel(); }
+                        }
+                        if root.dialog == 5: Chip {
+                            text: "Search for…";
+                            h: 36px;
+                            clicked => { root.cover-terms(); }
                         }
                         if root.dialog == 5: Chip {
                             text: "Use an image file…";

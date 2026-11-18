@@ -303,6 +303,108 @@ fn lyrics_wait_for_the_button_and_follow_the_song() {
     assert!(b.lyrics().is_none());
 }
 
+#[test]
+fn open_lyrics_follow_the_next_song() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    let first = fx.root.join("Other/Thing/01.flac");
+    let next = fx.root.join("Nirvana/Bleach/01.flac");
+    b.player.send(Command::SetQueueTracks {
+        tracks: vec![
+            TrackInfo {
+                path: first.clone(),
+                ..Default::default()
+            },
+            TrackInfo {
+                path: next.clone(),
+                ..Default::default()
+            },
+        ],
+        start: 0,
+        pos: Duration::ZERO,
+    });
+    let end = Instant::now() + Duration::from_secs(10);
+    while b.player.snapshot().track.is_none() {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    b.lyrics_show();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !matches!(b.lyrics().unwrap().status, LyricsStatus::Found(_)) {
+        b.poll();
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The next song, with the panel still open: looked up without asking.
+    b.player.send(Command::Next);
+    let end = Instant::now() + Duration::from_secs(10);
+    while b.player.snapshot().track.map(|t| t.path) != Some(next.clone()) {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    b.poll();
+    let v = b.lyrics().expect("the panel stays open");
+    assert_eq!(v.path, next);
+    assert!(v.title.starts_with("Bleach Song 1"), "{}", v.title);
+    assert!(!b.lyrics_stale());
+    // Closed, a new song doesn't open it.
+    b.lyrics_hide();
+    b.player.send(Command::Back);
+    std::thread::sleep(Duration::from_millis(300));
+    b.poll();
+    assert!(b.lyrics().is_none());
+}
+
+#[test]
+fn info_for_a_song_and_its_album() {
+    use patina_core::browse::info::InfoTarget;
+    let fx = fixture();
+    let b = browser(&fx);
+    let song = fx.root.join("Nirvana/Bleach/01.flac");
+    let v = b.info(&InfoTarget::Song(song.clone())).unwrap();
+    assert_eq!(v.kicker, "SONG");
+    assert_eq!(v.title, "Bleach Song 1");
+    let get = |label: &str| {
+        v.rows
+            .iter()
+            .find(|r| !r.head && r.label == label)
+            .map(|r| r.value.clone())
+    };
+    assert_eq!(get("Artist").as_deref(), Some("Nirvana"));
+    assert_eq!(get("Album").as_deref(), Some("Bleach"));
+    assert_eq!(get("Track").as_deref(), Some("1"));
+    assert_eq!(get("Rating").as_deref(), Some("None"));
+    assert_eq!(get("Path").as_deref(), Some(song.to_str().unwrap()));
+    assert!(v.rows.iter().any(|r| r.label == "Path" && r.code));
+    // The file's own tags, read from it now.
+    let tags = v
+        .rows
+        .iter()
+        .position(|r| r.head && r.label.starts_with("Tags in the file"))
+        .expect("a section for the file's tags");
+    assert!(v.rows[tags..].iter().any(|r| r.value == "Bleach Song 1"));
+
+    let key = b
+        .lib
+        .as_ref()
+        .unwrap()
+        .track_by_path(&song)
+        .unwrap()
+        .unwrap()
+        .album_key;
+    let a = b.info(&InfoTarget::Album(key)).unwrap();
+    assert_eq!(a.kicker, "ALBUM");
+    assert_eq!(a.title, "Bleach");
+    let songs = a.rows.iter().find(|r| r.label == "Songs").unwrap();
+    assert_eq!(songs.value, "2");
+    assert!(a.rows.iter().any(|r| r.label == "Folder" && r.code));
+    // Not in the library and not playing: nothing to show.
+    assert!(
+        b.info(&InfoTarget::Song(fx.root.join("nope.flac")))
+            .is_none()
+    );
+}
+
 // ----- With a server -----
 
 fn cfg(name: &str, url: &str, kind: ServerKind) -> ServerConfig {

@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table};
 
-use crate::app::{App, Focus, InputPurpose, Modal};
+use crate::app::{App, CastRow, Focus, InputPurpose, Modal};
 use patina_core::browse::SideEntry;
 use patina_core::browse::{Control, Item, Section, Source, fmt_duration, fmt_length};
 use patina_core::remote::ServerState;
@@ -101,7 +101,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 }
                 InputPurpose::Export { queue: true } => "Export the queue as M3U8 to",
                 InputPurpose::Export { .. } => "Export as M3U8 to",
-                InputPurpose::Import => "Import an .m3u, .m3u8 or .pls file",
+                InputPurpose::ExportRules => "Export the smart playlist's rules to",
+                InputPurpose::Import => "Import an .m3u, .m3u8, .pls or .smart.toml file",
+                InputPurpose::CastSnapcast => {
+                    "Snapcast server: host or host:port (its TCP source, 4953 unless changed)"
+                }
                 InputPurpose::Sleep if app.snap.sleep.is_some() => {
                     "Sleep timer (empty turns it off)"
                 }
@@ -197,6 +201,31 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             selected,
             ..
         } => draw_pick(f, app, area, title, options, *selected, false),
+        Modal::PickCast { rows, selected, .. } => {
+            let on = app.b.casting();
+            let names: Vec<String> = rows
+                .iter()
+                .map(|r| match r {
+                    CastRow::Here if on.is_none() => "This device   (playing)".to_string(),
+                    CastRow::Here => "This device".to_string(),
+                    CastRow::To(t) if on.as_ref() == Some(t) => {
+                        format!("{}   (playing)", t.label())
+                    }
+                    CastRow::To(t) => t.label(),
+                    CastRow::Looking => "Looking for devices…".to_string(),
+                    CastRow::Snapcast => "A Snapcast server, by address…".to_string(),
+                })
+                .collect();
+            draw_pick(
+                f,
+                app,
+                area,
+                "Play on. Enter picks",
+                &names,
+                *selected,
+                false,
+            );
+        }
         Modal::PickRate {
             title, selected, ..
         } => {
@@ -1782,6 +1811,14 @@ fn draw_bar(f: &mut Frame, app: &mut App, area: Rect) {
         right.push(Span::styled(tag, Style::default().fg(t.copper)));
         right.push(Span::raw(" "));
     }
+    // Playing on another device (Ctrl+T).
+    if let Some(to) = app.b.casting() {
+        right.push(Span::styled(
+            format!(" → {} ", to.label()),
+            Style::default().fg(t.verdigris).bg(t.raised),
+        ));
+        right.push(Span::raw(" "));
+    }
     match (&s.exclusive, &s.bit_perfect_refused) {
         (Some(e), _) => {
             let (label, fg) = if e.exact {
@@ -2333,7 +2370,15 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ),
         (
             "< / >",
-            "Import an .m3u/.m3u8/.pls file / export the playlist, the view or the queue",
+            "Import an .m3u/.m3u8/.pls file or a smart playlist file / export the playlist, the view or the queue",
+        ),
+        (
+            "}",
+            "Export a smart playlist's rules, to import on another device with <",
+        ),
+        (
+            "Ctrl+T",
+            "Play on another device: a Chromecast, a DLNA renderer or a Snapcast server",
         ),
         ("H", "Recently played"),
         (

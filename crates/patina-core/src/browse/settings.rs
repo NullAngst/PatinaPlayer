@@ -73,6 +73,8 @@ pub enum Key {
     /// A snapclient: on Patina's stream or not.
     SnapClient(String),
     SnapVolume(String),
+    /// Listen to one of the snapserver's streams here, as a station.
+    SnapListen(String),
     /// The cache's size cap.
     CacheSize,
     /// Prefetch by size or by song count.
@@ -410,6 +412,8 @@ pub struct SnapLive {
     /// The snapserver they're on.
     pub server: Option<String>,
     pub clients: Vec<crate::cast::snapcast::SnapClient>,
+    /// Its streams, to listen to here.
+    pub streams: Vec<crate::cast::snapcast::SnapStream>,
     /// Why there are none, or how the last change went.
     pub note: Option<String>,
     pub loading: bool,
@@ -1256,6 +1260,18 @@ pub fn rows(
                 label: "Snapcast".into(),
                 help: "",
                 control: Control::Info(n.clone()),
+            },
+        );
+    }
+    for s in &snap.streams {
+        push(
+            GROUP_SNAPCAST,
+            Setting {
+                disabled: None,
+                key: Key::SnapListen(s.id.clone()),
+                label: format!("Stream: {} ({})", s.id, s.status),
+                help: "Plays this stream on this device, as a station (it's added to Radio). It runs about a second ahead of the rooms: PatinaPlayer doesn't keep in step with them the way a snapclient does.",
+                control: Control::Action("Listen here"),
             },
         );
     }

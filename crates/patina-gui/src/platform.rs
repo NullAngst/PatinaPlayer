@@ -68,6 +68,12 @@ pub trait Hooks: Send + Sync {
     fn pick_image(&self) -> Picked {
         Picked::Unavailable("No picker for images here".into())
     }
+    /// Ask for any file (a playlist or a smart playlist to import), copied
+    /// where the app can read it, under its own name. Blocks, like
+    /// [`Hooks::pick_folder`].
+    fn pick_document(&self) -> Picked {
+        Picked::Unavailable("No file picker here".into())
+    }
     /// Save a copy of the file at `src` wherever the person picks, offered
     /// under `name`: the system's save dialog. Blocks, like
     /// [`Hooks::pick_folder`]; `Picked::Path` is where it went, as the

@@ -38,6 +38,8 @@ final class Native {
     static final int PICK_EQ_FILE = 2;
     static final int PICK_IMAGE = 3;
     static final int PICK_SAVE = 4;
+    /** Any file, copied where Rust can read it: a playlist or smart playlist to import. */
+    static final int PICK_DOCUMENT = 5;
 
     /** Playback state, as Rust reports it. */
     static final int STOPPED = 0;
@@ -233,6 +235,11 @@ final class Native {
     /** Open the system's picker for an image (an album's cover). */
     static void pickImage() {
         main.post(() -> Picker.start(activity.get(), PICK_IMAGE));
+    }
+
+    /** Open the system's picker for any file (a playlist to import). */
+    static void pickDocument() {
+        main.post(() -> Picker.start(activity.get(), PICK_DOCUMENT));
     }
 
     /** Show a text dialog; the answer comes to promptDone. */

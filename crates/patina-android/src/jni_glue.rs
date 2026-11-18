@@ -48,6 +48,7 @@ const PICK_FOLDER: jint = 1;
 const PICK_EQ_FILE: jint = 2;
 const PICK_IMAGE: jint = 3;
 const PICK_SAVE: jint = 4;
+const PICK_DOCUMENT: jint = 5;
 
 /// How long a picker may stay open before the wait for it is given up.
 const PICK_PATIENCE: Duration = Duration::from_secs(15 * 60);
@@ -538,6 +539,12 @@ pub fn save_copy(src: &std::path::Path, name: &str) -> Picked {
 /// a cover for an album.
 pub fn pick_image() -> Picked {
     pick(PICK_IMAGE, "pickImage")
+}
+
+/// The system's picker for any file, copied where the app can read it
+/// under its own name: a playlist or smart playlist to import.
+pub fn pick_document() -> Picked {
+    pick(PICK_DOCUMENT, "pickDocument")
 }
 
 /// Show a text form as an Android dialog. False if Java isn't there.

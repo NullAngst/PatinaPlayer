@@ -111,8 +111,12 @@ pub enum InputPurpose {
     Export {
         queue: bool,
     },
-    /// An .m3u, .m3u8 or .pls file to read in.
+    /// Where to write a smart playlist's rules, to import elsewhere.
+    ExportRules,
+    /// An .m3u, .m3u8 or .pls file, or a smart playlist file, to read in.
     Import,
+    /// A Snapcast server to play on, by address.
+    CastSnapcast,
     /// The sleep timer: a length, a time, or "end".
     Sleep,
 }
@@ -174,6 +178,24 @@ pub enum Modal {
     },
     /// The Now Playing page: the cover large, the format, the sound chain.
     NowPlaying,
+    /// Where to play: here, or a device found on the network. `shown` is
+    /// the search's generation the rows were made from.
+    PickCast {
+        rows: Vec<CastRow>,
+        selected: usize,
+        shown: u64,
+    },
+}
+
+/// A row of the cast picker.
+#[derive(Debug, Clone)]
+pub enum CastRow {
+    Here,
+    To(patina_core::cast::Target),
+    /// Still looking: not a choice.
+    Looking,
+    /// Type a snapserver's address.
+    Snapcast,
 }
 
 pub struct App {
@@ -257,6 +279,7 @@ impl App {
             }
             self.take_notes();
             self.plex_tick();
+            self.cast_tick();
             if matches!(self.modal, Modal::None)
                 && let Some(found) = self.b.take_dlna_found()
             {
@@ -457,6 +480,10 @@ impl App {
             };
             return;
         }
+        if ctrl && k.code == KeyCode::Char('t') && matches!(self.modal, Modal::None) {
+            self.open_cast();
+            return;
+        }
         if ctrl && k.code == KeyCode::Char('p') && matches!(self.modal, Modal::None) {
             if self.b.section == Section::Queue {
                 return self.b.note("Send to iPod works on the library's lists");
@@ -533,6 +560,40 @@ impl App {
                             title,
                             item,
                             selected,
+                        }
+                    }
+                }
+                return;
+            }
+            Modal::PickCast {
+                rows,
+                mut selected,
+                shown,
+            } => {
+                match k.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter => self.cast_pick(rows.get(selected).cloned()),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        self.modal = Modal::PickCast {
+                            rows,
+                            selected,
+                            shown,
+                        };
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(rows.len().saturating_sub(1));
+                        self.modal = Modal::PickCast {
+                            rows,
+                            selected,
+                            shown,
+                        };
+                    }
+                    _ => {
+                        self.modal = Modal::PickCast {
+                            rows,
+                            selected,
+                            shown,
                         }
                     }
                 }
@@ -943,6 +1004,19 @@ impl App {
                         .note("Pick a playlist, or open a list of songs, to export"),
                 }
             }
+            KeyCode::Char('}') => match self.b.smart_target() {
+                Some(p) => {
+                    self.modal = Modal::Input {
+                        purpose: InputPurpose::ExportRules,
+                        buf: self
+                            .b
+                            .default_smart_export_path(&p.name)
+                            .display()
+                            .to_string(),
+                    }
+                }
+                None => self.b.note("Pick a smart playlist to export its rules"),
+            },
             KeyCode::Char('S') if lists => {
                 self.modal = Modal::Input {
                     purpose: InputPurpose::SmartName {
@@ -1254,7 +1328,12 @@ impl App {
                     .b
                     .note("Controlling another player is in the window app"),
                 Control::Action(_)
-                    if matches!(st.key, SettingKey::PlexSignIn | SettingKey::SnapRefresh) =>
+                    if matches!(
+                        st.key,
+                        SettingKey::PlexSignIn
+                            | SettingKey::SnapRefresh
+                            | SettingKey::SnapListen(_)
+                    ) =>
                 {
                     self.b.change_setting(&st.key, Change::Toggle)
                 }
@@ -1357,6 +1436,71 @@ impl App {
                 options: options.into_iter().map(|(_, l)| l).collect(),
                 selected: index,
             };
+        }
+    }
+
+    /// Where to play: this device, a Chromecast, a DLNA renderer or a
+    /// Snapcast server found on the network, or a snapserver typed in.
+    fn open_cast(&mut self) {
+        self.b.look_for_cast_targets();
+        let current = match self.b.casting() {
+            None => 0,
+            Some(t) => self
+                .cast_rows()
+                .iter()
+                .position(|r| matches!(r, CastRow::To(x) if *x == t))
+                .unwrap_or(0),
+        };
+        self.modal = Modal::PickCast {
+            rows: self.cast_rows(),
+            selected: current,
+            shown: self.b.cast_generation,
+        };
+    }
+
+    fn cast_rows(&self) -> Vec<CastRow> {
+        let mut rows = vec![CastRow::Here];
+        rows.extend(self.b.cast_targets().into_iter().map(CastRow::To));
+        if self.b.cast_looking() {
+            rows.push(CastRow::Looking);
+        }
+        rows.push(CastRow::Snapcast);
+        rows
+    }
+
+    /// The picker's rows follow the search as devices answer.
+    fn cast_tick(&mut self) {
+        let generation = self.b.cast_generation;
+        if let Modal::PickCast { shown, .. } = &self.modal
+            && *shown != generation
+        {
+            let rows = self.cast_rows();
+            if let Modal::PickCast {
+                rows: r,
+                selected,
+                shown,
+            } = &mut self.modal
+            {
+                *selected = (*selected).min(rows.len().saturating_sub(1));
+                *r = rows;
+                *shown = generation;
+            }
+        }
+    }
+
+    fn cast_pick(&mut self, row: Option<CastRow>) {
+        match row {
+            Some(CastRow::Here) => self.b.cast_to(None),
+            Some(CastRow::To(t)) => self.b.cast_to(Some(t)),
+            // Still looking: leave the list up.
+            Some(CastRow::Looking) => self.open_cast(),
+            Some(CastRow::Snapcast) => {
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::CastSnapcast,
+                    buf: self.b.config.cast.snapcast.clone().unwrap_or_default(),
+                }
+            }
+            None => {}
         }
     }
 
@@ -1607,7 +1751,18 @@ impl App {
                     self.b.export_to(&path);
                 }
             }
+            InputPurpose::ExportRules => self.b.export_smart_to(std::path::Path::new(&text)),
             InputPurpose::Import => self.b.import_playlist_file(std::path::Path::new(&text)),
+            InputPurpose::CastSnapcast => match patina_core::cast::Target::snapcast(&text) {
+                Some(t) => {
+                    self.b
+                        .change_setting(&SettingKey::CastSnapcast, Change::Set(text));
+                    self.b.cast_to(Some(t));
+                }
+                None => self
+                    .b
+                    .note("Type the snapserver's address: host or host:port"),
+            },
             InputPurpose::Sleep => {
                 if self.b.set_sleep_text(&text).is_err() {
                     // Keep the box up to fix it; the note says what's wrong.
