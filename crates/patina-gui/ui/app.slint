@@ -6214,7 +6214,11 @@ export component AppWindow inherits Window {
                                     clicked => {
                                         if long-fired { return; }
                                         root.side-tip = "";
-                                        root.drawer-open = false;
+                                        // A group heading only folds or opens
+                                        // its group, so the drawer stays.
+                                        if item.kind != 2 {
+                                            root.drawer-open = false;
+                                        }
                                         root.side-clicked(i);
                                         keys.focus();
                                     }

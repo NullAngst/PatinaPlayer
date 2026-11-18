@@ -1,5 +1,11 @@
 # Changes
 
+2026.11.18 - Bug fix (phone drawer closing on group headings)
+
+* On a phone, tapping a sidebar group heading (Listening, Sources, Play on) folded or opened the group and also closed the drawer. A heading now leaves the drawer open. Tapping a page in it still closes it, as before.
+
+Reasons for changes: folding a group meant opening the drawer again after every tap.
+
 2026.11.18 - Bug fix (sidebar group headings drawn twice)
 
 * The sidebar's group headings (Listening, Sources, Play on) were drawn twice, once small with an arrow and once in section-sized type over it. Making the headings clickable for folding also turned on the layout that draws a section's label. That layout is now left off for headings.
