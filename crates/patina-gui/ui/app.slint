@@ -6013,14 +6013,17 @@ export component AppWindow inherits Window {
                         for item[i] in root.side: Rectangle {
                             // Kawaii: the open one is a pink pill.
                             property <bool> pill: item.active && P.kawaii && item.kind == 0;
+                            // A group heading's "active" means open, not picked.
+                            property <bool> picked: item.active && item.kind != 2;
                             // Favorites sit like sections, with a menu. A
                             // group's heading folds it.
-                            property <bool> entry: item.kind <= 1 || item.kind == 4 || (item.kind == 2 && !sidebar.folded);
+                            property <bool> heading: item.kind == 2 && !sidebar.folded;
+                            property <bool> entry: item.kind <= 1 || item.kind == 4 || heading;
                             height: item.kind == 3 ? 12px : (item.kind == 2 ? 28px : 34px);
                             border-radius: 6px * P.round;
                             border-width: 1px;
-                            border-color: pill ? P.verdigris : (item.active ? P.verdigris-dim : transparent);
-                            background: pill ? P.verdigris : (item.active ? P.raised : (sta.has-hover && entry ? P.raised : transparent));
+                            border-color: pill ? P.verdigris : (picked ? P.verdigris-dim : transparent);
+                            background: pill ? P.verdigris : (picked ? P.raised : (sta.has-hover && entry ? P.raised : transparent));
                             drop-shadow-offset-y: pill ? 3px : 0px;
                             drop-shadow-color: pill ? P.accent-edge : transparent;
                             if item.kind == 2 && sidebar.folded: Rectangle {
@@ -6030,15 +6033,31 @@ export component AppWindow inherits Window {
                                 height: 1px;
                                 background: P.border;
                             }
-                            if item.kind == 2 && !sidebar.folded: Text {
+                            // A group heading: its name, and a chevron that
+                            // points down while it's open.
+                            if heading: Text {
                                 x: 10px;
                                 y: parent.height - self.height - 4px;
-                                text: (item.active ? "▾  " : "▸  ") + (item.sub != "" ? item.label + "  ·  " + item.sub : item.label);
+                                width: parent.width - 40px;
+                                overflow: elide;
+                                text: item.sub != "" ? item.label + "  ·  " + item.sub : item.label;
                                 font-size: 11px;
                                 letter-spacing: 0.9px;
-                                color: P.muted;
+                                color: sta.has-hover ? P.text : P.muted;
                             }
-                            if entry: HorizontalLayout {
+                            if heading: Path {
+                                width: 12px;
+                                height: 12px;
+                                x: parent.width - self.width - 12px;
+                                y: parent.height - self.height - 6px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: item.active ? "M6 9l6 6 6-6" : "M9 6l6 6-6 6";
+                                stroke: sta.has-hover ? P.text : P.muted;
+                                stroke-width: 2px;
+                                fill: transparent;
+                            }
+                            if entry && !heading: HorizontalLayout {
                                 padding-left: sidebar.folded ? (item.kind == 0 && P.kawaii ? 12px : 16px) : 10px;
                                 padding-right: sidebar.folded ? 0px : 10px;
                                 spacing: 10px;

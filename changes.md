@@ -1,5 +1,13 @@
 # Changes
 
+2026.11.18 - Bug fix (sidebar group headings drawn twice)
+
+* The sidebar's group headings (Listening, Sources, Play on) were drawn twice, once small with an arrow and once in section-sized type over it. Making the headings clickable for folding also turned on the layout that draws a section's label. That layout is now left off for headings.
+* The fold arrows were text characters the bundled font doesn't have. They're now drawn chevrons at the right of the heading, as Settings' groups have, pointing down while open.
+* An open heading no longer gets a selected row's outline.
+
+Reasons for changes: the sidebar's group headings showed overlapping text after folding was added.
+
 2026.11.18 - UX overhaul (touch sheet, panel tabs, undo, Settings search, folding sidebar, terminal palette)
 
 * Touch: a long press opens a sheet from the bottom instead of a desktop menu. The song or album at the top, Play, Play next, Queue and Playlist as big buttons, stars for a song or an album, and the rest of the menu as full rows. Back or a tap outside closes it.
