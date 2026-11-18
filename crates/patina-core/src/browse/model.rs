@@ -526,6 +526,8 @@ pub struct SettingsState<'a> {
     pub snap: super::settings::SnapLive,
     /// Settings groups that are open; the rest are folded.
     pub open_groups: &'a std::collections::HashSet<String>,
+    /// Words to find settings by. Empty shows them all, by group.
+    pub filter: &'a str,
 }
 
 /// Everything a view can draw from besides the library itself.
@@ -677,6 +679,43 @@ pub fn build(ctx: &Ctx, source: &Source) -> Result<(String, Vec<Item>), String> 
                         Some((_, v)) => v.push(setting),
                         None => groups.push((g, vec![setting])),
                     }
+                }
+                // Looking for a setting: only the groups with one that
+                // matches, open, with only the ones that match (all of a
+                // group whose own name matches).
+                let words: Vec<String> = st
+                    .filter
+                    .split_whitespace()
+                    .map(str::to_lowercase)
+                    .collect();
+                if !words.is_empty() {
+                    let hit = |text: &str| {
+                        let t = text.to_lowercase();
+                        words.iter().all(|w| t.contains(w.as_str()))
+                    };
+                    for (g, list) in groups {
+                        let all = hit(g);
+                        let found: Vec<_> = list
+                            .into_iter()
+                            .filter(|s| all || hit(&format!("{} {} {}", s.label, s.help, g)))
+                            .collect();
+                        if found.is_empty() {
+                            continue;
+                        }
+                        items.push(Item::Group {
+                            name: g.to_string(),
+                            open: true,
+                            count: found.len(),
+                        });
+                        items.extend(found.into_iter().map(Item::Setting));
+                    }
+                    if items.is_empty() {
+                        items.push(Item::Header(std::borrow::Cow::Owned(format!(
+                            "No setting has \"{}\" in it",
+                            st.filter.trim()
+                        ))));
+                    }
+                    return Ok((page.label().into(), items));
                 }
                 for (g, list) in groups {
                     let open = st.open_groups.contains(g);

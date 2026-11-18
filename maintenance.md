@@ -115,6 +115,15 @@ Slint's Android backend panics on a mouse wheel (`MotionAction::Scroll => todo!(
 5. Export a smart playlist's rules on one device and import the file on another. The format is `crates/patina-core/src/library/smart_io.rs`; `cargo test -p patina-core --lib smart_io` round-trips it. If the smart playlist language ever changes in a way old rules don't read, the import lists them as left out rather than failing the rest.
 6. On Android, Import in Playlists should open the system's file picker and Export (a playlist, the queue, a smart playlist's rules) its save dialog. That's `Picker.start` with `PICK_DOCUMENT` and `Picker.save` in `android/java/dev/patina/player/Picker.java`. The save dialog's file type comes from the extension through Android's `MimeTypeMap`, so the name is kept as given; if a provider ever adds `.m3u` after `.m3u8`, that's where to look.
 
+## 5.14. The touch sheet, panel tabs, undo and the palette
+
+1. The touch sheet's rows are built in Rust (`row_sheet` in `crates/patina-gui/src/bridge.rs`), and the desktop menu is in Slint (the `ContextMenuArea` blocks in `ListRow`, `AlbumTile` and `QueueLine` in `ui/app.slint`). They have to offer the same things. When a menu item is added or changed in one, do it in the other, with the same action name, since both end up in the same `act` handler. Quick check: long press a song, an album, an artist, a folder, a playlist, a smart playlist, a station and a queue row with a finger, then right-click the same with a mouse, and compare.
+2. Touch or mouse comes from `Ui.saw(e)` at the top of every `pointer-event` handler in `app.slint`, which reads `touch-finger-id` (0 is a mouse). A new `TouchArea` with a `pointer-event` handler needs that line too. After a Slint update, check `touch-finger-id` is still in `PointerEvent` (`cargo check -p patina-gui` fails if it's gone) and that a mouse on Android still reads as a mouse.
+3. Undo lives in `crates/patina-core/src/browse/undo.rs`. Something new that deletes or takes things out should call `offer_undo` with a way back, not add a confirm. Anything that can't be put back (a server deleting for good, removing a server, clearing the cache) keeps its confirm. `cargo test -p patina-core --test browse --test picking` covers a station, a smart playlist, a playlist and songs taken out of one.
+4. The terminal app's palette is `crates/patina-tui/src/palette.rs`. A new key binding should get a line there too, or the palette falls behind the keys. `cargo test -p patina-tui palette` checks the matching.
+5. Settings search matches the label, the help line and the group name (`model.rs`, the `filter` words). A setting nobody can find usually needs a better help line.
+6. Sidebar folding: with a fresh config and a library folder set, Sources and Play on should start folded; click them open, restart, and they should stay open.
+
 ## 6. ListenBrainz and Last.fm
 
 1. In Settings, check the ListenBrainz row still shows your user name. If it says the token is refused, make a new one at listenbrainz.org/settings and paste it in.

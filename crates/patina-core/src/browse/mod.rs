@@ -22,6 +22,7 @@ mod select;
 mod servers;
 pub mod settings;
 mod sources;
+pub mod undo;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -158,6 +159,12 @@ pub struct Browser {
     backup_job: Option<Receiver<Result<String, String>>>,
     /// Settings groups opened this session.
     settings_open: std::collections::HashSet<String>,
+    /// Words Settings is narrowed to; empty for all of it.
+    settings_filter: String,
+    /// The last thing done that can be undone, and until when.
+    undo: Option<(undo::Undo, std::time::Instant)>,
+    /// What the note said it was.
+    undo_label: String,
     snap: sources::SnapState,
     /// Where "Find DLNA servers" asks. The local network when unset.
     pub dlna_probe: Option<std::net::SocketAddr>,
@@ -328,6 +335,9 @@ impl Browser {
             timeline: servers::TimelineSync::default(),
             plex: sources::PlexState::default(),
             settings_open: std::collections::HashSet::new(),
+            settings_filter: String::new(),
+            undo: None,
+            undo_label: String::new(),
             backup_job: None,
             snap: sources::SnapState::default(),
             dlna_probe: None,
@@ -803,6 +813,7 @@ impl Browser {
                 remote_port: self.remote_server.as_ref().map(|s| s.port()),
                 snap: self.snap.live.clone(),
                 open_groups: &self.settings_open,
+                filter: &self.settings_filter,
             },
             stations: &self.stations,
             checks: &self.checks,
@@ -1510,6 +1521,14 @@ impl Browser {
         if id == HEARTED {
             return self.note("Hearted songs is always there; unheart songs to empty it");
         }
+        // One on this device can come back.
+        let keep = if self.playlist_undoable(id) {
+            self.playlist_row(id)
+                .zip(self.playlist_uris(id))
+                .map(|(p, uris)| (p.name, uris))
+        } else {
+            None
+        };
         if !self.server_playlist_job(id, |rid| servers::Job::DeletePlaylist { id: rid }) {
             return;
         }
@@ -1522,6 +1541,12 @@ impl Browser {
             stack.truncate(1);
         }
         self.refresh_section(Section::Playlists);
+        if let Some((name, uris)) = keep {
+            self.offer_undo(
+                format!("Deleted the playlist \"{name}\""),
+                undo::Undo::Playlist { name, uris },
+            );
+        }
     }
 
     /// The open playlist's id, if a playlist is open.
@@ -1558,6 +1583,10 @@ impl Browser {
         if sel >= uris.len() {
             return;
         }
+        let before = undo::Undo::PlaylistItems {
+            id,
+            uris: uris.clone(),
+        };
         if remove && !level.marked.is_empty() {
             let keep: Vec<Vec<u8>> = level
                 .items
@@ -1568,7 +1597,8 @@ impl Browser {
                 .map(|(_, u)| u)
                 .collect();
             let gone = level.items.len() - keep.len();
-            return self.store_playlist(id, keep, sel, Some(gone));
+            self.store_playlist(id, keep, sel, Some(gone));
+            return self.offer_undo(format!("Took {} out of the playlist", count(gone)), before);
         }
         let new_sel = if remove {
             uris.remove(sel);
@@ -1583,6 +1613,9 @@ impl Browser {
             to
         };
         self.store_playlist(id, uris, new_sel, None);
+        if remove {
+            self.offer_undo("Took a song out of the playlist", before);
+        }
     }
 
     /// Save a playlist's new order (or what's left of it), on the server
@@ -1608,9 +1641,6 @@ impl Browser {
                 l.anchor = None;
             }
         }
-        if let Some(n) = removed {
-            self.note(format!("Took {} out of the playlist", count(n)));
-        }
         // The Playlists list shows item counts.
         if self
             .stacks
@@ -1630,10 +1660,12 @@ impl Browser {
         }
     }
 
-    pub fn remove_queue_position(&self, pos: usize) {
+    pub fn remove_queue_position(&mut self, pos: usize) {
         let id = self.player.queue().at(pos).map(|e| e.id);
         if let Some(id) = id {
+            let infos = self.queue_infos(&[id]);
             self.player.send(Command::RemoveEntry(id));
+            self.offer_undo("Took a song out of the queue", undo::Undo::Queue(infos));
         }
     }
 
@@ -1650,8 +1682,15 @@ impl Browser {
     }
 
     pub fn clear_queue(&mut self) {
+        let upcoming = self.queue_upcoming();
         self.end_mix();
         self.player.send(Command::ClearQueue);
+        if !upcoming.is_empty() {
+            self.offer_undo(
+                format!("Cleared {} from the queue", count(upcoming.len())),
+                undo::Undo::Queue(upcoming),
+            );
+        }
     }
 
     /// The queue's songs in play order, for adding to a playlist. Stations
@@ -1983,6 +2022,31 @@ impl Browser {
     /// The button at the bottom of the GUI's sidebar: fold it to icons, or
     /// expand it, for the way the screen is held now. Sticks, like the
     /// setting it changes.
+    /// Narrow Settings to the settings with these words in their name or
+    /// their help. Empty shows all of it again.
+    pub fn set_settings_filter(&mut self, q: &str) {
+        if self.settings_filter == q {
+            return;
+        }
+        self.settings_filter = q.to_string();
+        self.refresh_section(Section::Settings);
+        self.touch();
+    }
+
+    pub fn settings_filter(&self) -> &str {
+        &self.settings_filter
+    }
+
+    /// Fold a sidebar group to its heading, or open it, and keep it so.
+    pub fn set_sidebar_folded(&mut self, folded: Vec<String>) {
+        let arr: toml_edit::Array = folded.iter().map(String::as_str).collect();
+        if let Err(e) = config::set_value(&self.config_path, "appearance", "sidebar_folded", arr) {
+            self.error(format!("couldn't save the sidebar: {e}"));
+        }
+        self.config.appearance.sidebar_folded = Some(folded);
+        self.touch();
+    }
+
     pub fn set_sidebar(&mut self, landscape: bool, fold: bool) {
         let mode = if fold {
             config::SidebarMode::Folded
@@ -2462,8 +2526,12 @@ impl Browser {
 
     pub fn delete_station(&mut self, i: usize) {
         if i < self.stations.len() {
-            self.stations.remove(i);
+            let station = self.stations.remove(i);
             self.save_stations();
+            self.offer_undo(
+                format!("Deleted the station \"{}\"", station.name),
+                undo::Undo::Station { index: i, station },
+            );
         }
     }
 

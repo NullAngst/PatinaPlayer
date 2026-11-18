@@ -64,6 +64,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match &app.modal {
         Modal::Help => draw_help(f, app, area),
+        Modal::Palette { query, selected } => draw_palette(f, app, area, query, *selected),
         Modal::Input { purpose, buf } if !matches!(purpose, InputPurpose::Search) => {
             let title = match purpose {
                 InputPurpose::NewPlaylist { .. } => "New playlist",
@@ -102,6 +103,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 InputPurpose::Export { queue: true } => "Export the queue as M3U8 to",
                 InputPurpose::Export { .. } => "Export as M3U8 to",
                 InputPurpose::ExportRules => "Export the smart playlist's rules to",
+                InputPurpose::FindSetting => "Find a setting (empty shows them all)",
                 InputPurpose::Import => "Import an .m3u, .m3u8, .pls or .smart.toml file",
                 InputPurpose::CastSnapcast => {
                     "Snapcast server: host or host:port (its TCP source, 4953 unless changed)"
@@ -999,8 +1001,13 @@ fn item_row<'a>(
                     (c.clone(), Style::default().fg(t.copper))
                 }
                 Some(c) => (c.clone(), muted),
+                None if patina_core::snapclient::is_url(&station.url) => (
+                    "Snapcast stream, a second ahead of the rooms".to_string(),
+                    dim,
+                ),
                 None => (station.url.clone(), dim),
             };
+            let snap = patina_core::snapclient::is_url(&station.url);
             vec![
                 Cell::from(Span::styled(
                     if now { "▶" } else { " " },
@@ -1009,7 +1016,10 @@ fn item_row<'a>(
                 Cell::from(""),
                 Cell::from(Span::styled(station.name.clone(), style)),
                 Cell::from(Span::styled(status, st)),
-                Cell::from(""),
+                Cell::from(Span::styled(
+                    if snap { "SNAPCAST" } else { "" },
+                    Style::default().fg(t.verdigris),
+                )),
                 Cell::from(""),
             ]
         }
@@ -2293,6 +2303,46 @@ fn draw_pick(
     f.render_widget(Paragraph::new(lines).block(frame_block(app, title)), r);
 }
 
+/// The command palette: what's typed, then the actions that match, with
+/// their keys.
+fn draw_palette(f: &mut Frame, app: &App, area: Rect, query: &str, selected: usize) {
+    let t = &app.theme;
+    let hits = crate::palette::matches(query);
+    let rows_h = 14usize;
+    let r = popup(area, 64, rows_h as u16 + 4);
+    f.render_widget(Clear, r);
+    let offset = selected.saturating_sub(rows_h.saturating_sub(1));
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" : ", Style::default().fg(t.verdigris)),
+            Span::styled(query.to_string(), Style::default().fg(t.text)),
+            Span::styled("▏", Style::default().fg(t.verdigris)),
+        ]),
+        Line::from(""),
+    ];
+    if hits.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " Nothing by that name",
+            Style::default().fg(t.muted),
+        )));
+    }
+    for (i, c) in hits.iter().enumerate().skip(offset).take(rows_h) {
+        let style = if i == selected {
+            Style::default().fg(t.verdigris).bg(t.raised)
+        } else {
+            Style::default().fg(t.text)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {}", pad(c.name, 46)), style),
+            Span::styled(format!(" {:>12} ", c.keys), Style::default().fg(t.muted)),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(frame_block(app, "Run. Type to narrow, Enter runs")),
+        r,
+    );
+}
+
 fn draw_confirm(f: &mut Frame, app: &App, area: Rect, msg: &str) {
     let t = &app.theme;
     let r = popup(area, (msg.len() as u16 + 6).max(30), 4);
@@ -2312,6 +2362,7 @@ fn draw_confirm(f: &mut Frame, app: &App, area: Rect, msg: &str) {
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     const KEYS: &[(&str, &str)] = &[
+        (":", "Run anything by name: type a few letters of it"),
         ("c   Ctrl+Space", "Play / pause (Space too, outside lists)"),
         (
             "Space   U   Esc",
@@ -2326,7 +2377,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "Folders, Artists, Albums, Songs, Genres, Playlists, Radio, Podcasts, Queue, Downloads",
         ),
         ("Tab", "Switch between sidebar and list"),
-        ("/", "Search the library"),
+        ("/", "Search the library; in Settings, find a setting"),
         ("Enter", "Open, or play from here"),
         ("v / V", "Play the whole view in order / shuffled"),
         ("e", "Add the whole view to the queue"),
@@ -2379,6 +2430,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (
             "Ctrl+T",
             "Play on another device: a Chromecast, a DLNA renderer or a Snapcast server",
+        ),
+        (
+            "Ctrl+Z",
+            "Undo: put back what was just deleted or taken out (for 10 seconds)",
         ),
         ("H", "Recently played"),
         (

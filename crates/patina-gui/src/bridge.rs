@@ -30,7 +30,7 @@ use crate::desktop::Action;
 use crate::platform::{self, Picked, Prompt, PromptEvent, PromptField};
 use crate::{
     AmpKnob, AmpUnit, AppWindow, ChainRow, CoverPick, EqBand, Hero, Icons, InfoRow, P, QueueRow,
-    Row, SideItem, SmartRule, Tint, Ui,
+    Row, SheetItem, SideItem, SmartRule, Tint, Ui,
 };
 use patina_core::dsp::amp::Kind as AmpKind;
 use patina_core::eq::Mode as EqMode;
@@ -130,13 +130,9 @@ enum Confirm {
     Setting(SettingKey, Change),
     RemoveFolder(PathBuf),
     DeletePlaylist(i64),
-    ClearQueue,
-    DeleteStation(usize),
     Unsubscribe(String),
     RemoveServer(String),
     ClearCache,
-    DeleteMix(i64),
-    DeleteSmart(i64),
     IpodRemove(patina_core::browse::ipod::IpodRow),
 }
 
@@ -155,6 +151,10 @@ pub struct State {
     /// The Info page: what it's about, and whether it follows the song
     /// playing (opened from Now Playing).
     info: Option<(InfoTarget, bool)>,
+    /// What the touch menu is open on.
+    sheet_for: Option<SheetFor>,
+    /// What each sidebar row stands for, folded groups left out.
+    side_map: Vec<SideTarget>,
     /// The rack: a row per unit, and each unit's knobs in a model of its
     /// own, updated in place so a knob being dragged keeps its grip.
     amp_units: Rc<VecModel<AmpUnit>>,
@@ -440,10 +440,6 @@ fn date(ts: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Rows the GUI puts at the top of the sidebar ahead of the core's (Now
-/// Playing), so a sidebar index minus this is the core's index.
-const SIDE_EXTRA: i32 = 1;
-
 impl State {
     fn new(b: Browser, hide_on_close: Rc<std::cell::Cell<bool>>) -> Self {
         let desktop = crate::desktop::Desktop::start(b.player.clone(), b.config.desktop.tray);
@@ -456,6 +452,8 @@ impl State {
             fav_keys: Default::default(),
             lyrics_shown: (Vec::new(), -1),
             info: None,
+            sheet_for: None,
+            side_map: Vec::new(),
             amp_units: Rc::new(VecModel::default()),
             amp_knobs: Vec::new(),
             amp_kinds: Vec::new(),
@@ -655,6 +653,14 @@ impl State {
                         r.sub = ss(c);
                     }
                     None => r.sub = ss(&station.url),
+                }
+                // A Snapcast stream: say so, and that it isn't in step with
+                // the rooms, so it doesn't look broken next to them.
+                if patina_core::snapclient::is_url(&station.url) {
+                    r.right = ss("SNAPCAST");
+                    if check.is_none() {
+                        r.sub = ss("Snapcast stream, a second ahead of the rooms");
+                    }
                 }
                 r.playing =
                     self.snap.track.as_ref().is_some_and(|t| {
@@ -1462,6 +1468,14 @@ impl State {
 
     fn sync_side(&mut self, ui: &AppWindow) {
         ui.set_scope_label(ss(self.b.scope().label()));
+        let in_settings = self.b.section == Section::Settings;
+        ui.set_search_settings(in_settings);
+        // Settings narrowed, then left: it's all there next time, and the
+        // box is empty for the library.
+        if !in_settings && !self.b.settings_filter().is_empty() {
+            self.b.set_settings_filter("");
+            ui.set_search_text(SharedString::new());
+        }
         let icons = ui.global::<Icons>();
         let kawaii = self.b.config.appearance.theme.is_kawaii();
         let np = ui.get_np_open();
@@ -1473,7 +1487,7 @@ impl State {
         };
         // Now Playing first. It isn't one of the core's sections (the
         // terminal app opens it as a popup), so it's added here and the
-        // sidebar's indexes are one past the core's: see SIDE_EXTRA.
+        // sidebar's rows map to the core's through side_map.
         let now_playing = SideItem {
             kind: 0,
             label: ss("Now Playing"),
@@ -1483,8 +1497,45 @@ impl State {
             count: SharedString::new(),
             dot: 0,
         };
+        // Groups folded to their heading: what's under them, up to the next
+        // gap or heading, is left out.
+        // In icons only there are no headings to open them from, so
+        // nothing is folded there.
+        let icons_only = ui.get_side_folded() && !ui.get_drawer();
+        let folded = if icons_only {
+            Vec::new()
+        } else {
+            self.side_folded()
+        };
+        let mut map = vec![SideTarget::NowPlaying];
+        let mut skipping = false;
+        let shown: Vec<(usize, &SideEntry)> = self
+            .b
+            .sidebar
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                match e {
+                    SideEntry::Label(l) => {
+                        skipping = folded.iter().any(|f| f == l);
+                        return true;
+                    }
+                    SideEntry::Gap => skipping = false,
+                    _ => {}
+                }
+                !skipping
+            })
+            .collect();
+        for (j, e) in &shown {
+            map.push(match e {
+                SideEntry::Label(l) => SideTarget::Fold(l),
+                SideEntry::Gap => SideTarget::Nothing,
+                _ => SideTarget::Core(*j),
+            });
+        }
+        self.side_map = map;
         let items: Vec<SideItem> = std::iter::once(now_playing)
-            .chain(self.b.sidebar.iter().map(|e| match e {
+            .chain(shown.into_iter().map(|(_, e)| match e {
                 SideEntry::Section(s) => SideItem {
                     kind: 0,
                     label: ss(match s {
@@ -1608,6 +1659,8 @@ impl State {
                     kind: 2,
                     label: ss(l.to_uppercase()),
                     sub: ss(if kawaii { jp_label(l) } else { "" }),
+                    // Open: the chevron points down.
+                    active: !folded.iter().any(|f| f == l),
                     ..Default::default()
                 },
                 SideEntry::Gap => SideItem {
@@ -1624,6 +1677,22 @@ impl State {
             }
         } else {
             self.side.set_vec(items);
+        }
+    }
+
+    /// The sidebar groups folded to their heading. Until one's been folded
+    /// or opened by hand, Sources and Play on start folded once there's
+    /// somewhere to play from (a music folder or a server): set up, they're
+    /// visited now and then, and the rest of the sidebar gets the room.
+    fn side_folded(&self) -> Vec<String> {
+        if let Some(f) = &self.b.config.appearance.sidebar_folded {
+            return f.clone();
+        }
+        let set_up = !self.b.config.library.folders.is_empty() || !self.b.config.servers.is_empty();
+        if set_up {
+            vec!["Sources".into(), "Play on".into()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -1891,11 +1960,17 @@ impl State {
                 Note::Info(m) => (m, false),
                 Note::Error(m) => (m, true),
             };
+            // The note for something that can be undone carries Undo, and
+            // stays as long as the offer does.
+            let undo = !err && self.b.undo_offer() == Some(msg.as_str());
             ui.set_toast(ss(msg));
             ui.set_toast_error(err);
+            ui.set_toast_undo(undo);
             self.toast_until = Some(
                 Instant::now()
-                    + if err {
+                    + if undo {
+                        patina_core::browse::undo::UNDO_FOR
+                    } else if err {
                         Duration::from_secs(8)
                     } else {
                         Duration::from_secs(3)
@@ -1905,6 +1980,7 @@ impl State {
         if self.toast_until.is_some_and(|t| Instant::now() > t) {
             self.toast_until = None;
             ui.set_toast(SharedString::new());
+            ui.set_toast_undo(false);
         }
     }
 
@@ -2036,11 +2112,6 @@ impl State {
         self.sync_backdrop(ui);
         self.poll_covers(ui);
         self.notes(ui);
-        // Both side panels only fit on a wide window: shrinking the window
-        // with both open folds the queue away.
-        if ui.get_queue_panel() && ui.get_lyrics_open() && narrow_window(ui) {
-            ui.set_queue_panel(false);
-        }
         // The drawer only exists on a tiny window (with the sidebar not
         // set to stay folded).
         if ui.get_drawer_open() && !ui.get_drawer() {
@@ -2214,6 +2285,10 @@ impl State {
         if ui.get_search_text().as_str() != t {
             ui.set_search_text(ss(t));
         }
+        // In Settings, the box finds settings instead.
+        if self.b.section == Section::Settings {
+            return self.b.set_settings_filter(t.trim());
+        }
         if t.trim().is_empty() {
             if self.b.in_search() {
                 self.b.set_search("");
@@ -2229,6 +2304,7 @@ impl State {
     /// Search dropped: the box emptied and the results closed.
     fn search_cancel(&mut self, ui: &AppWindow) {
         ui.set_search_text(SharedString::new());
+        self.b.set_settings_filter("");
         if self.b.in_search() {
             self.b.pop();
         }
@@ -3576,6 +3652,66 @@ impl State {
     }
 
     /// Lyrics: up for the song playing, or closed if they already are.
+    /// The touch menu for a row in the list or the grid: what its
+    /// right-click menu has, from the same row.
+    fn open_row_sheet(&mut self, ui: &AppWindow, i: usize) {
+        let Some(r) = ui.get_rows().row_data(i) else {
+            return;
+        };
+        let icons = ui.global::<Icons>();
+        let ctx = SheetCtx {
+            album_tracks: ui.get_album_tracks(),
+            hearted: ui.get_hearted_open(),
+            ipod: ui.get_ipod(),
+            play: icons.get_play(),
+            next: icons.get_next(),
+            queue: icons.get_plus(),
+            playlist: icons.get_playlists(),
+        };
+        let (quick, items) = row_sheet(&r, &ctx);
+        if quick.is_empty() && items.is_empty() && r.rating < 0 {
+            return;
+        }
+        self.sheet_for = Some(SheetFor::Row(i));
+        show_sheet(ui, &r.title, &r.sub, quick, items, r.rating);
+    }
+
+    /// The touch menu for a line in the queue.
+    fn open_queue_sheet(&mut self, ui: &AppWindow, i: usize) {
+        let Some(q) = ui.get_queue().row_data(i) else {
+            return;
+        };
+        let icons = ui.global::<Icons>();
+        let quick = vec![
+            sheet_item("play", "Play", icons.get_play()),
+            sheet_item("playlist", "Playlist", icons.get_playlists()),
+        ];
+        let items = vec![
+            sheet_item("select", if q.marked { "Unselect" } else { "Select" }, ""),
+            sheet_item("up", "Move up", ""),
+            sheet_item("down", "Move down", ""),
+            sheet_item("go-album", "Go to album", ""),
+            sheet_item("go-artist", "Go to artist", ""),
+            sheet_item("info", "View info", ""),
+            danger_item("remove", "Remove from the queue"),
+        ];
+        self.sheet_for = Some(SheetFor::Queue(i));
+        show_sheet(ui, &q.title, &q.sub, quick, items, -1);
+    }
+
+    /// An entry picked in the touch menu: what the right-click menu's
+    /// entry would have done.
+    fn sheet_pick(&mut self, ui: &AppWindow, a: &str) {
+        match self.sheet_for.take() {
+            Some(SheetFor::Row(i)) => {
+                self.select_row(ui, i);
+                self.row_act(ui, a);
+            }
+            Some(SheetFor::Queue(i)) => self.queue_act(ui, i, a),
+            None => {}
+        }
+    }
+
     /// Open the Info page on a song or an album. `follow`: it's the song
     /// playing, and moves on with it.
     fn open_info(&mut self, ui: &AppWindow, target: Option<InfoTarget>, follow: bool) {
@@ -3587,10 +3723,6 @@ impl State {
         };
         self.info = Some((t, follow));
         show_info(ui, v);
-        // No room for both side panels on a narrow window.
-        if narrow_window(ui) {
-            ui.set_queue_panel(false);
-        }
     }
 
     fn close_info(&mut self, ui: &AppWindow) {
@@ -3627,15 +3759,11 @@ impl State {
         }
     }
 
-    fn toggle_lyrics(&mut self, ui: &AppWindow) {
+    fn toggle_lyrics(&mut self) {
         if self.b.lyrics().is_some() && !self.b.lyrics_stale() {
             self.b.lyrics_hide();
         } else {
             self.b.lyrics_show();
-            // No room for both panels on a narrow window.
-            if narrow_window(ui) {
-                ui.set_queue_panel(false);
-            }
         }
     }
 
@@ -3663,11 +3791,8 @@ impl State {
     }
 
     fn toggle_queue_panel(&mut self, ui: &AppWindow) {
-        let open = !ui.get_queue_panel();
-        if open && narrow_window(ui) && self.b.lyrics().is_some() {
-            self.b.lyrics_hide();
-        }
-        ui.set_queue_panel(open);
+        // Lyrics and Info stay open beside it, as tabs.
+        ui.set_queue_panel(!ui.get_queue_panel());
     }
 
     fn open_amp_save(&mut self, ui: &AppWindow) {
@@ -3922,6 +4047,10 @@ impl State {
             CoverKind::Artist => format!("Picture of {}", t.label),
         }));
         let search = t.clone();
+        ui.set_covers_artist(ss(&t.artist));
+        ui.set_covers_album(ss(&t.album));
+        ui.set_covers_year(ss(t.year.map(|y| y.to_string()).unwrap_or_default()));
+        ui.set_covers_for_artist(t.kind == CoverKind::Artist);
         self.covers.target = Some(t);
         self.dlg = Dlg::Covers;
         ui.set_dialog(5);
@@ -4283,6 +4412,11 @@ impl State {
                     self.b.clear_queue_marks();
                     self.queue_marking = false;
                 }
+                // Let go of every pick, still picking.
+                "none" => {
+                    self.b.clear_queue_marks();
+                }
+                "invert" => self.b.invert_queue_marks(),
                 _ => {}
             }
             return;
@@ -4298,6 +4432,10 @@ impl State {
             "ipod" => self.b.send_selection_to_ipod(),
             "remove" => self.b.edit_playlist(true, 0),
             "all" => self.b.mark_all(),
+            "none" => {
+                self.b.clear_marks();
+            }
+            "invert" => self.b.invert_marks(),
             "clear" => {
                 self.b.clear_marks();
                 self.marking = false;
@@ -4750,16 +4888,9 @@ impl State {
                 }
             }
             "smart-delete" => {
+                // At once: the note that follows offers Undo.
                 if let Some(Item::Smart(p)) = item {
-                    self.confirm(
-                        ui,
-                        format!(
-                            "Delete the smart playlist \"{}\"? The songs stay in the library.",
-                            p.name
-                        ),
-                        "Delete",
-                        Confirm::DeleteSmart(p.id),
-                    );
+                    self.b.delete_smart(p.id);
                 }
             }
             "ipod-remove" => {
@@ -4815,13 +4946,8 @@ impl State {
                 }
             }
             "st-delete" => {
-                if let Some(Item::Station { index, station, .. }) = item {
-                    self.confirm(
-                        ui,
-                        format!("Delete the station \"{}\"?", station.name),
-                        "Delete",
-                        Confirm::DeleteStation(index),
-                    );
+                if let Some(Item::Station { index, .. }) = item {
+                    self.b.delete_station(index);
                 }
             }
             "unsubscribe" => {
@@ -4869,12 +4995,7 @@ impl State {
             }
             "mix-delete" => {
                 if let Some(Item::Mix(m)) = item {
-                    self.confirm(
-                        ui,
-                        format!("Delete the saved mix \"{}\"?", m.name),
-                        "Delete",
-                        Confirm::DeleteMix(m.id),
-                    );
+                    self.b.delete_mix(m.id);
                 }
             }
             "unpin" => {
@@ -4899,13 +5020,22 @@ impl State {
                 }
             }
             "pl-delete" => {
+                // On this device: at once, with Undo. A server's goes for
+                // good, so that one still asks.
                 if let Some(Item::Playlist(p)) = item {
-                    self.confirm(
-                        ui,
-                        format!("Delete the playlist \"{}\"?", p.name),
-                        "Delete",
-                        Confirm::DeletePlaylist(p.id),
-                    );
+                    if self.b.playlist_undoable(p.id) {
+                        self.b.delete_playlist(p.id);
+                    } else {
+                        self.confirm(
+                            ui,
+                            format!(
+                                "Delete the playlist \"{}\"? It's deleted on the server too, for good.",
+                                p.name
+                            ),
+                            "Delete",
+                            Confirm::DeletePlaylist(p.id),
+                        );
+                    }
                 }
             }
             _ => {}
@@ -5120,13 +5250,11 @@ impl State {
                 Confirm::Setting(key, change) => self.b.change_setting(&key, change),
                 Confirm::RemoveFolder(p) => self.b.remove_folder(&p),
                 Confirm::DeletePlaylist(id) => self.b.delete_playlist(id),
-                Confirm::ClearQueue => self.b.clear_queue(),
-                Confirm::DeleteStation(i) => self.b.delete_station(i),
+
                 Confirm::Unsubscribe(url) => self.b.unsubscribe(&url),
                 Confirm::RemoveServer(n) => self.b.remove_server(&n),
                 Confirm::ClearCache => self.b.list_action(ListAction::ClearCache),
-                Confirm::DeleteMix(id) => self.b.delete_mix(id),
-                Confirm::DeleteSmart(id) => self.b.delete_smart(id),
+
                 Confirm::IpodRemove(row) => self.b.remove_from_ipod(&row),
             },
             Dlg::Pick(..)
@@ -5253,7 +5381,17 @@ impl State {
                 "e" | "E" => self.b.switch(Section::Eq),
                 "a" | "A" => self.b.switch(Section::Amp),
                 "o" | "O" => self.pick_device(ui),
-                "l" | "L" => self.toggle_lyrics(ui),
+                "z" | "Z" => {
+                    ui.set_toast_undo(false);
+                    self.b.undo();
+                }
+                "l" | "L" => {
+                    if ui.get_lyrics_open() && side_shown(ui) != 0 {
+                        ui.set_side_tab(0);
+                    } else {
+                        self.toggle_lyrics();
+                    }
+                }
                 "f" | "F" => {
                     let q = self.b.start_search();
                     ui.set_search_text(ss(q));
@@ -5385,7 +5523,13 @@ impl State {
                 "s" => p.send(Command::ToggleShuffle),
                 "r" => p.send(Command::CycleRepeat),
                 "l" => self.b.toggle_love(),
-                "q" => self.toggle_queue_panel(ui),
+                "q" => {
+                    if ui.get_queue_panel() && side_shown(ui) != 2 {
+                        ui.set_side_tab(2);
+                    } else {
+                        self.toggle_queue_panel(ui);
+                    }
+                }
                 "/" => {
                     let q = self.b.start_search();
                     ui.set_search_text(ss(q));
@@ -5838,14 +5982,25 @@ pub fn install(
     on!(on_pick_scope, |s, u| s.pick_scope(&u));
 
     on!(on_side_clicked, |s, u, i| {
-        if i < SIDE_EXTRA {
-            u.set_np_open(true);
-        } else {
-            // Somewhere else: Now Playing gets out of the way, even when
-            // it's the view already open underneath.
-            u.set_np_open(false);
-            s.b.activate_sidebar((i - SIDE_EXTRA) as usize);
-            u.invoke_scroll_top();
+        match s.side_map.get(i.max(0) as usize).copied() {
+            Some(SideTarget::NowPlaying) => u.set_np_open(true),
+            Some(SideTarget::Core(j)) => {
+                // Somewhere else: Now Playing gets out of the way, even
+                // when it's the view already open underneath.
+                u.set_np_open(false);
+                s.b.activate_sidebar(j);
+                u.invoke_scroll_top();
+            }
+            Some(SideTarget::Fold(l)) => {
+                let mut f = s.side_folded();
+                if let Some(at) = f.iter().position(|x| x == l) {
+                    f.remove(at);
+                } else {
+                    f.push(l.to_string());
+                }
+                s.b.set_sidebar_folded(f);
+            }
+            _ => {}
         }
     });
     on!(on_side_fold, |s, _u, landscape, fold| s
@@ -5872,11 +6027,20 @@ pub fn install(
     on!(on_np_rate, |s, _u, n| s.b.rate_playing(n.clamp(0, 5) as u8));
     on!(on_hero_rate, |s, _u, n| s.b.rate_level(n.clamp(0, 5) as u8));
     on!(on_hero_fav, |s, _u| s.b.toggle_favorite_level());
-    on!(on_lyrics_clicked, |s, u| s.toggle_lyrics(&u));
+    on!(on_lyrics_clicked, |s, _u| s.toggle_lyrics());
     on!(on_info_close, |s, u| s.close_info(&u));
+    on!(on_undo, |s, u| {
+        u.set_toast_undo(false);
+        s.b.undo();
+    });
     on!(on_np_info, |s, u| s.np_info(&u));
+    on!(on_info_copied, |s, _u, label| s
+        .b
+        .note(format!("Copied the {}", label.to_lowercase())));
     on!(on_side_act, |s, _u, i, a| {
-        let core = (i - SIDE_EXTRA).max(0) as usize;
+        let Some(SideTarget::Core(core)) = s.side_map.get(i.max(0) as usize).copied() else {
+            return;
+        };
         if let Some(SideEntry::Favorite { id, .. }) = s.b.sidebar.get(core).cloned() {
             match a.as_str() {
                 "up" => s.b.favorite_move(id, -1),
@@ -5911,6 +6075,20 @@ pub fn install(
         }
     });
     on!(on_cover_terms, |s, u| s.open_cover_terms(&u));
+    on!(on_cover_search, |s, u, artist, album, year| {
+        let Some(mut t) = s.covers.target.clone() else {
+            return;
+        };
+        t.artist = artist.trim().to_string();
+        if t.kind == CoverKind::Album {
+            t.album = album.trim().to_string();
+            t.year = year.trim().parse().ok();
+        }
+        if t.artist.is_empty() && t.album.is_empty() {
+            return u.set_covers_note(ss("Type something to look for"));
+        }
+        s.open_cover_find(&u, t);
+    });
     on!(on_level_clicked, |s, u| {
         let tip = u.get_level_tip().to_string();
         if !tip.is_empty() {
@@ -5927,6 +6105,11 @@ pub fn install(
         s.select_row(&u, i as usize);
         s.row_act(&u, a.as_str());
     });
+    on!(on_sheet_row, |s, u, i| s
+        .open_row_sheet(&u, i.max(0) as usize));
+    on!(on_sheet_queue, |s, u, i| s
+        .open_queue_sheet(&u, i.max(0) as usize));
+    on!(on_sheet_pick, |s, u, a| s.sheet_pick(&u, a.as_str()));
     on!(on_view_action, |s, u, a| s.view_action(&u, a.as_str()));
     on!(on_row_mark, |s, u, i, range| s
         .row_mark(&u, i as usize, range));
@@ -5991,14 +6174,9 @@ pub fn install(
         let _ = &u;
         s.b.load_server_queue(name.as_str());
     });
-    on!(on_queue_clear, |s, u| {
+    on!(on_queue_clear, |s, _u| {
         if !s.b.player.queue().is_empty() {
-            s.confirm(
-                &u,
-                "Clear the whole queue?".into(),
-                "Clear",
-                Confirm::ClearQueue,
-            );
+            s.b.clear_queue();
         }
     });
     on!(on_play_pause, |s, u| s.b.player.send(Command::TogglePause));
@@ -6420,6 +6598,232 @@ fn pick_playlist_dialog() -> Picked {
     Picked::Unavailable("Type the playlist file's path.".into())
 }
 
+/// The side panel's tab showing: 0 lyrics, 1 info, 2 queue, -1 none. The
+/// same as `side-shown` in `app.slint`.
+fn side_shown(ui: &AppWindow) -> i32 {
+    let open = [
+        ui.get_lyrics_open(),
+        ui.get_info_open(),
+        ui.get_queue_panel(),
+    ];
+    let tab = ui.get_side_tab();
+    if (0..3).contains(&tab) && open[tab as usize] {
+        return tab;
+    }
+    [1, 0, 2]
+        .into_iter()
+        .find(|&t| open[t as usize])
+        .unwrap_or(-1)
+}
+
+/// What a row of the sidebar does when it's clicked.
+#[derive(Debug, Clone, Copy)]
+enum SideTarget {
+    NowPlaying,
+    /// The core's sidebar entry at this index.
+    Core(usize),
+    /// A group's heading: fold it, or open it.
+    Fold(&'static str),
+    Nothing,
+}
+
+/// What the touch menu was opened on.
+#[derive(Debug, Clone, Copy)]
+enum SheetFor {
+    Row(usize),
+    Queue(usize),
+}
+
+/// What a row's touch menu depends on besides the row: the list it's in,
+/// whether an iPod is plugged in, and the icons for the big buttons.
+struct SheetCtx {
+    album_tracks: bool,
+    hearted: bool,
+    ipod: bool,
+    play: SharedString,
+    next: SharedString,
+    queue: SharedString,
+    playlist: SharedString,
+}
+
+fn sheet_item(action: &str, label: &str, icon: impl Into<SharedString>) -> SheetItem {
+    SheetItem {
+        action: ss(action),
+        label: ss(label),
+        icon: icon.into(),
+        danger: false,
+    }
+}
+
+fn danger_item(action: &str, label: &str) -> SheetItem {
+    SheetItem {
+        danger: true,
+        ..sheet_item(action, label, "")
+    }
+}
+
+/// A row's touch menu: the big buttons, then the list. The same entries,
+/// under the same conditions, as `ListRow`'s and `AlbumTile`'s menus in
+/// `app.slint`; keep them in step. The stars go separately.
+fn row_sheet(r: &Row, c: &SheetCtx) -> (Vec<SheetItem>, Vec<SheetItem>) {
+    let k = r.kind;
+    let mut quick = Vec::new();
+    let mut items = Vec::new();
+    if !r.selectable || matches!(k, 9 | 10 | 12 | 15 | 19) {
+        return (quick, items);
+    }
+    if k <= 8 || k == 13 || k == 16 {
+        let label = if k == 8 { "Resume" } else { "Play" };
+        quick.push(sheet_item("play", label, c.play.clone()));
+    }
+    if k <= 8 || k == 13 {
+        quick.push(sheet_item("next", "Play next", c.next.clone()));
+        quick.push(sheet_item("queue", "Queue", c.queue.clone()));
+    }
+    if k <= 5 || k == 17 {
+        quick.push(sheet_item("playlist", "Playlist", c.playlist.clone()));
+    }
+    let markable = k <= 8 || k == 11 || k == 16 || k == 17;
+    if markable {
+        let label = if r.marked { "Unselect" } else { "Select" };
+        items.push(sheet_item("select", label, ""));
+    }
+    if r.can_mix {
+        let label = match k {
+            0 => "Track mix",
+            4 => "Genre mix",
+            _ => "Artist mix",
+        };
+        items.push(sheet_item("mix", label, ""));
+    }
+    if k == 4 {
+        let label = if r.on {
+            "Unmark for a mix"
+        } else {
+            "Mark for a mix"
+        };
+        items.push(sheet_item("mark", label, ""));
+    }
+    if c.ipod && (k <= 5 || k == 16 || k == 17) {
+        items.push(sheet_item("ipod", "Send to iPod", ""));
+    }
+    if k == 0 {
+        items.push(sheet_item("go-album", "Go to album", ""));
+        items.push(sheet_item("go-artist", "Go to artist", ""));
+    }
+    if k == 0 || k == 1 {
+        items.push(sheet_item("info", "View info", ""));
+    }
+    if k == 0 || k == 1 || k == 3 {
+        items.push(sheet_item("cover-find", "Find cover art…", ""));
+        items.push(sheet_item("cover-file", "Cover from an image file…", ""));
+    }
+    if k == 2 {
+        items.push(sheet_item("cover-find", "Find artist picture…", ""));
+        items.push(sheet_item(
+            "cover-file",
+            "Artist picture from an image file…",
+            "",
+        ));
+    }
+    if r.fav >= 0 {
+        let label = if r.fav == 1 {
+            "Remove from Favorites"
+        } else {
+            "Add to Favorites"
+        };
+        items.push(sheet_item("fav", label, ""));
+    }
+    if (k == 0 || k == 11) && !c.album_tracks && !r.dim {
+        let label = if c.hearted {
+            "Unheart"
+        } else {
+            "Remove from this playlist"
+        };
+        items.push(danger_item("pl-remove", label));
+    }
+    match k {
+        6 => {
+            items.push(sheet_item("st-edit", "Edit…", ""));
+            items.push(sheet_item("st-test", "Test", ""));
+            items.push(sheet_item("st-up", "Move up", ""));
+            items.push(sheet_item("st-down", "Move down", ""));
+            items.push(danger_item("st-delete", "Delete"));
+        }
+        7 => items.push(danger_item("unsubscribe", "Unsubscribe…")),
+        8 => {
+            items.push(if r.downloaded {
+                danger_item("dl-delete", "Delete download")
+            } else {
+                sheet_item("download", "Download", "")
+            });
+            let label = if r.dim {
+                "Mark as not played"
+            } else {
+                "Mark as played"
+            };
+            items.push(sheet_item("played", label, ""));
+        }
+        _ => {}
+    }
+    if r.can_pin {
+        let label = if r.pinned {
+            "Stop keeping offline"
+        } else {
+            "Keep offline"
+        };
+        items.push(sheet_item("pin", label, ""));
+    }
+    match k {
+        13 => items.push(sheet_item("unpin", "Unpin", "")),
+        14 => {
+            let label = if r.on { "Resume" } else { "Pause" };
+            items.push(sheet_item("job-pause", label, ""));
+            items.push(danger_item("job-cancel", "Cancel"));
+        }
+        16 => {
+            items.push(sheet_item("mix-rename", "Rename…", ""));
+            items.push(sheet_item("export", "Export as M3U8…", ""));
+            items.push(danger_item("mix-delete", "Delete"));
+        }
+        5 => {
+            if !r.fixed {
+                items.push(sheet_item("pl-rename", "Rename…", ""));
+            }
+            items.push(sheet_item("export", "Export as M3U8…", ""));
+            if !r.fixed {
+                items.push(danger_item("pl-delete", "Delete"));
+            }
+        }
+        17 => {
+            items.push(sheet_item("smart-edit", "Edit…", ""));
+            items.push(sheet_item("export", "Export as M3U8…", ""));
+            items.push(sheet_item("smart-export", "Export rules…", ""));
+            items.push(danger_item("smart-delete", "Delete"));
+        }
+        18 => items.push(danger_item("ipod-remove", "Remove from iPod…")),
+        _ => {}
+    }
+    (quick, items)
+}
+
+/// Put the touch menu on screen.
+fn show_sheet(
+    ui: &AppWindow,
+    title: &str,
+    sub: &str,
+    quick: Vec<SheetItem>,
+    items: Vec<SheetItem>,
+    rating: i32,
+) {
+    ui.set_sheet_title(ss(title));
+    ui.set_sheet_sub(ss(sub));
+    ui.set_sheet_quick(ModelRc::from(Rc::new(VecModel::from(quick))));
+    ui.set_sheet_items(ModelRc::from(Rc::new(VecModel::from(items))));
+    ui.set_sheet_rating(rating);
+    ui.set_sheet_open(true);
+}
+
 /// Put an Info page on screen.
 fn show_info(ui: &AppWindow, v: InfoView) {
     let rows: Vec<InfoRow> = v
@@ -6447,11 +6851,6 @@ fn show_window(ui: &AppWindow) {
     let _ = ui.window().show();
     ui.window().set_minimized(false);
     ui.invoke_focus_root();
-}
-
-/// Too narrow for both side panels at once (the sidebar is folded, or a drawer).
-fn narrow_window(ui: &AppWindow) -> bool {
-    ui.get_narrow()
 }
 
 /// The last nested row of each open Settings group gets 2, so the

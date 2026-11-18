@@ -113,6 +113,8 @@ pub enum InputPurpose {
     },
     /// Where to write a smart playlist's rules, to import elsewhere.
     ExportRules,
+    /// Words to narrow Settings to.
+    FindSetting,
     /// An .m3u, .m3u8 or .pls file, or a smart playlist file, to read in.
     Import,
     /// A Snapcast server to play on, by address.
@@ -124,15 +126,11 @@ pub enum InputPurpose {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeletePlaylist(i64),
-    ClearQueue,
-    DeleteStation(usize),
     RemoveFeed(String),
     Setting(SettingKey, Change),
     RemoveFolder(PathBuf),
     RemoveServer(String),
     ClearCache,
-    DeleteMix(i64),
-    DeleteSmart(i64),
     IpodRemove(patina_core::browse::ipod::IpodRow),
 }
 
@@ -178,6 +176,11 @@ pub enum Modal {
     },
     /// The Now Playing page: the cover large, the format, the sound chain.
     NowPlaying,
+    /// The command palette: what's typed, and the match picked.
+    Palette {
+        query: String,
+        selected: usize,
+    },
     /// Where to play: here, or a device found on the network. `shown` is
     /// the search's generation the rows were made from.
     PickCast {
@@ -304,8 +307,15 @@ impl App {
                 self.theme = Theme::new(self.b.config.appearance.theme);
             }
             self.art.update(self.snap.track.as_ref());
-            if let Some((_, t, err)) = &self.toast
-                && t.elapsed() > if *err { ERROR_TIME } else { NOTE_TIME }
+            if let Some((msg, t, err)) = &self.toast
+                && t.elapsed()
+                    > if *err {
+                        ERROR_TIME
+                    } else if msg.ends_with("Ctrl+Z puts it back") {
+                        patina_core::browse::undo::UNDO_FOR
+                    } else {
+                        NOTE_TIME
+                    }
             {
                 self.toast = None;
             }
@@ -365,6 +375,10 @@ impl App {
     fn take_notes(&mut self) {
         for n in self.b.take_notes() {
             self.toast = Some(match n {
+                // Something just done that can be put back: say how.
+                Note::Info(m) if self.b.undo_offer() == Some(m.as_str()) => {
+                    (format!("{m}. Ctrl+Z puts it back"), Instant::now(), false)
+                }
                 Note::Info(m) => (m, Instant::now(), false),
                 Note::Error(m) => (m, Instant::now(), true),
             });
@@ -480,6 +494,10 @@ impl App {
             };
             return;
         }
+        if ctrl && k.code == KeyCode::Char('z') && matches!(self.modal, Modal::None) {
+            self.b.undo();
+            return;
+        }
         if ctrl && k.code == KeyCode::Char('t') && matches!(self.modal, Modal::None) {
             self.open_cast();
             return;
@@ -494,6 +512,41 @@ impl App {
         match std::mem::replace(&mut self.modal, Modal::None) {
             Modal::None => {}
             Modal::Help => return,
+            Modal::Palette {
+                mut query,
+                mut selected,
+            } => {
+                let hits = crate::palette::matches(&query);
+                match k.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter => {
+                        if let Some(c) = hits.get(selected) {
+                            if c.wants_list() {
+                                self.focus = Focus::Content;
+                            }
+                            self.key(c.event());
+                        }
+                    }
+                    KeyCode::Up => {
+                        selected = selected.saturating_sub(1);
+                        self.modal = Modal::Palette { query, selected };
+                    }
+                    KeyCode::Down => {
+                        selected = (selected + 1).min(hits.len().saturating_sub(1));
+                        self.modal = Modal::Palette { query, selected };
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                        self.modal = Modal::Palette { query, selected: 0 };
+                    }
+                    KeyCode::Char(ch) if !ctrl => {
+                        query.push(ch);
+                        self.modal = Modal::Palette { query, selected: 0 };
+                    }
+                    _ => self.modal = Modal::Palette { query, selected },
+                }
+                return;
+            }
             // The playback keys still work over the page; Esc closes it.
             Modal::NowPlaying => {
                 if matches!(k.code, KeyCode::Esc | KeyCode::Backspace) {
@@ -680,6 +733,19 @@ impl App {
             KeyCode::Char('Y') => self.pick_rate(None),
             KeyCode::Char('q') => self.queue_panel = !self.queue_panel,
             KeyCode::Char('?') => self.modal = Modal::Help,
+            KeyCode::Char(':') => {
+                self.modal = Modal::Palette {
+                    query: String::new(),
+                    selected: 0,
+                }
+            }
+            KeyCode::Char('/') if self.b.section == Section::Settings => {
+                self.focus = Focus::Content;
+                self.modal = Modal::Input {
+                    purpose: InputPurpose::FindSetting,
+                    buf: self.b.settings_filter().to_string(),
+                };
+            }
             KeyCode::Char('/') if self.b.lib.is_some() => {
                 let q = self.b.start_search();
                 self.focus = Focus::Content;
@@ -844,11 +910,9 @@ impl App {
                     }
                 }
                 KeyCode::Char('D') => {
-                    if let Some(Item::Station { index, station, .. }) = item {
-                        self.modal = Modal::Confirm {
-                            msg: format!("Delete station \"{}\"?", station.name),
-                            action: ConfirmAction::DeleteStation(index),
-                        }
+                    // At once; Ctrl+Z puts it back.
+                    if let Some(Item::Station { index, .. }) = item {
+                        self.b.delete_station(index);
                     }
                 }
                 KeyCode::Char('T') => {
@@ -1057,10 +1121,7 @@ impl App {
                 if lists && matches!(self.b.selected_item(), Some(Item::Smart(_))) =>
             {
                 if let Some(Item::Smart(p)) = self.b.selected_item() {
-                    self.modal = Modal::Confirm {
-                        msg: format!("Delete the smart playlist \"{}\"?", p.name),
-                        action: ConfirmAction::DeleteSmart(p.id),
-                    }
+                    self.b.delete_smart(p.id);
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
@@ -1108,10 +1169,7 @@ impl App {
             }
             KeyCode::Char('D') if lists && matches!(self.b.selected_item(), Some(Item::Mix(_))) => {
                 if let Some(Item::Mix(m)) = self.b.selected_item() {
-                    self.modal = Modal::Confirm {
-                        msg: format!("Delete the saved mix \"{}\"?", m.name),
-                        action: ConfirmAction::DeleteMix(m.id),
-                    }
+                    self.b.delete_mix(m.id);
                 }
             }
             KeyCode::Char('f') if !queue => self.b.toggle_pin_selected(),
@@ -1146,12 +1204,7 @@ impl App {
                 self.queue_sel = self.b.move_queue_position(self.queue_sel, -1);
                 self.follow = false;
             }
-            KeyCode::Char('C') if queue => {
-                self.modal = Modal::Confirm {
-                    msg: "Clear the whole queue?".into(),
-                    action: ConfirmAction::ClearQueue,
-                }
-            }
+            KeyCode::Char('C') if queue => self.b.clear_queue(),
             KeyCode::Char('L') if queue => match self.b.queue_servers().first() {
                 Some(s) => {
                     let s = s.clone();
@@ -1187,10 +1240,16 @@ impl App {
                 }
             }
             KeyCode::Char('D') if lists => {
+                // On this device: at once, with Ctrl+Z to put it back. A
+                // server's goes for good, so that one asks.
                 if let Some(Item::Playlist(p)) = self.b.selected_item() {
-                    self.modal = Modal::Confirm {
-                        msg: format!("Delete playlist \"{}\"?", p.name),
-                        action: ConfirmAction::DeletePlaylist(p.id),
+                    if self.b.playlist_undoable(p.id) {
+                        self.b.delete_playlist(p.id);
+                    } else {
+                        self.modal = Modal::Confirm {
+                            msg: format!("Delete playlist \"{}\" on the server too?", p.name),
+                            action: ConfirmAction::DeletePlaylist(p.id),
+                        }
                     }
                 }
             }
@@ -1585,6 +1644,10 @@ impl App {
             }
             _ => {}
         }
+        // Settings narrows as you type.
+        if matches!(purpose, InputPurpose::FindSetting) {
+            self.b.set_settings_filter(buf.trim());
+        }
         self.modal = Modal::Input { purpose, buf };
     }
 
@@ -1752,6 +1815,7 @@ impl App {
                 }
             }
             InputPurpose::ExportRules => self.b.export_smart_to(std::path::Path::new(&text)),
+            InputPurpose::FindSetting => self.b.set_settings_filter(text.trim()),
             InputPurpose::Import => self.b.import_playlist_file(std::path::Path::new(&text)),
             InputPurpose::CastSnapcast => match patina_core::cast::Target::snapcast(&text) {
                 Some(t) => {
@@ -1822,16 +1886,12 @@ impl App {
 
     fn confirm(&mut self, action: ConfirmAction) {
         match action {
-            ConfirmAction::DeleteStation(i) => self.b.delete_station(i),
             ConfirmAction::RemoveFeed(url) => self.b.unsubscribe(&url),
-            ConfirmAction::ClearQueue => self.b.clear_queue(),
             ConfirmAction::DeletePlaylist(id) => self.b.delete_playlist(id),
             ConfirmAction::Setting(key, change) => self.b.change_setting(&key, change),
             ConfirmAction::RemoveFolder(p) => self.b.remove_folder(&p),
             ConfirmAction::RemoveServer(n) => self.b.remove_server(&n),
             ConfirmAction::ClearCache => self.b.list_action(ListAction::ClearCache),
-            ConfirmAction::DeleteMix(id) => self.b.delete_mix(id),
-            ConfirmAction::DeleteSmart(id) => self.b.delete_smart(id),
             ConfirmAction::IpodRemove(row) => self.b.remove_from_ipod(&row),
         }
     }

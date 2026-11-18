@@ -347,6 +347,10 @@ impl Browser {
     }
 
     pub fn delete_mix(&mut self, id: i64) {
+        let was = self
+            .lib
+            .as_ref()
+            .and_then(|l| l.saved_mix(id).ok().flatten());
         if let Some(lib) = &self.lib
             && let Err(e) = lib.delete_mix(id)
         {
@@ -361,8 +365,19 @@ impl Browser {
             // Its offline pin went with it.
             c.resync();
         }
-        self.note("Mix deleted");
         self.mixes_changed();
+        match was {
+            Some(m) => self.offer_undo(
+                format!("Deleted the mix \"{}\"", m.name),
+                super::undo::Undo::Mix {
+                    kind: m.kind,
+                    name: m.name,
+                    seed: m.seed,
+                    similar: m.similar,
+                },
+            ),
+            None => self.note("Mix deleted"),
+        }
     }
 
     fn mixes_changed(&mut self) {

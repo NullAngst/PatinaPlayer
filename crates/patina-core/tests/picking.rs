@@ -234,6 +234,44 @@ fn marked_rows_come_out_of_a_playlist_together_and_drag_reorders() {
     b.edit_playlist(true, 0);
     assert_eq!(titles(&b), ["Bleach Song 1"]);
     assert_eq!(b.marked_count(), 0);
+
+    // Taking songs out can be undone, back in the order they were.
+    b.undo();
+    assert_eq!(
+        titles(&b),
+        ["Bleach Song 3", "Bleach Song 1", "Bleach Song 2"]
+    );
+
+    // Invert picks the rest, and again gives the first pick back.
+    b.toggle_mark(1);
+    b.invert_marks();
+    assert!(b.is_marked(0) && !b.is_marked(1) && b.is_marked(2));
+    b.invert_marks();
+    assert_eq!(b.marked_count(), 1);
+    assert!(b.is_marked(1));
+
+    // Deleting the playlist doesn't ask, and can be undone too.
+    b.pop();
+    let p = index_of(&b, |i| matches!(i, Item::Playlist(p) if p.name == "Mine"));
+    let id = match &items(&b)[p] {
+        Item::Playlist(p) => p.id,
+        _ => unreachable!(),
+    };
+    assert!(b.playlist_undoable(id));
+    b.delete_playlist(id);
+    assert!(
+        !items(&b)
+            .iter()
+            .any(|i| matches!(i, Item::Playlist(p) if p.name == "Mine"))
+    );
+    b.undo();
+    let p = index_of(&b, |i| matches!(i, Item::Playlist(p) if p.name == "Mine"));
+    b.select(p);
+    b.activate();
+    assert_eq!(
+        titles(&b),
+        ["Bleach Song 3", "Bleach Song 1", "Bleach Song 2"]
+    );
 }
 
 #[test]
@@ -376,6 +414,18 @@ fn smart_playlists_follow_the_library() {
             .iter()
             .any(|i| matches!(i, Item::Smart(s) if s.id == row.id))
     );
+
+    // Put back, with its rule, under a new id.
+    assert!(b.undo_offer().is_some());
+    b.undo();
+    let back = items(&b)
+        .iter()
+        .find_map(|i| match i {
+            Item::Smart(s) if s.name == "Five stars" => Some(s.clone()),
+            _ => None,
+        })
+        .expect("put back");
+    assert_eq!(back.items, 1);
 }
 
 /// A song has a row per genre, so "and" between two genres means a song

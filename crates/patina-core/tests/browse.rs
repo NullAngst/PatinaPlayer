@@ -361,6 +361,65 @@ fn stations_save_to_the_config_and_settings_follow() {
             .unwrap()
             .contains("Test FM")
     );
+
+    // Deleting doesn't ask: it offers to put it back, and that saves too.
+    assert_eq!(b.undo_offer(), Some("Deleted the station \"Test FM\""));
+    b.undo();
+    assert_eq!(b.stations.len(), 1);
+    assert_eq!(b.stations[0].name, "Test FM");
+    assert!(
+        std::fs::read_to_string(&fx.config)
+            .unwrap()
+            .contains("Test FM")
+    );
+    assert_eq!(b.undo_offer(), None, "only once");
+}
+
+#[test]
+fn settings_can_be_looked_for_by_words() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.switch(Section::Settings);
+    b.set_settings_filter("podcast speed");
+    let found: Vec<Key> = items(&b)
+        .iter()
+        .filter_map(|i| match i {
+            Item::Setting(s) => Some(s.key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(found.contains(&Key::PodcastSpeed), "{found:?}");
+    assert!(!found.contains(&Key::Theme), "{found:?}");
+    // The groups with a match show open.
+    assert!(
+        items(&b)
+            .iter()
+            .all(|i| !matches!(i, Item::Group { open: false, .. }))
+    );
+
+    b.set_settings_filter("zzqqxx");
+    assert!(
+        matches!(items(&b), [Item::Header(h)] if h.contains("zzqqxx")),
+        "says nothing matched"
+    );
+
+    b.set_settings_filter("");
+    assert!(items(&b).iter().any(|i| matches!(i, Item::Group { .. })));
+}
+
+#[test]
+fn folded_sidebar_groups_are_saved() {
+    let fx = fixture();
+    let mut b = browser(&fx);
+    b.set_sidebar_folded(vec!["Sources".into()]);
+    let cfg = Config::load_from(&fx.config).unwrap();
+    assert_eq!(
+        cfg.appearance.sidebar_folded,
+        Some(vec!["Sources".to_string()])
+    );
+    b.set_sidebar_folded(Vec::new());
+    let cfg = Config::load_from(&fx.config).unwrap();
+    assert_eq!(cfg.appearance.sidebar_folded, Some(Vec::new()));
 }
 
 #[test]

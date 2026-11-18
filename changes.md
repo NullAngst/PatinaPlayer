@@ -1,5 +1,23 @@
 # Changes
 
+2026.11.18 - UX overhaul (touch sheet, panel tabs, undo, Settings search, folding sidebar, terminal palette)
+
+* Touch: a long press opens a sheet from the bottom instead of a desktop menu. The song or album at the top, Play, Play next, Queue and Playlist as big buttons, stars for a song or an album, and the rest of the menu as full rows. Back or a tap outside closes it.
+* Touch or mouse is worked out from the last press, not set once at the start. A finger gets the sheet, the taller rows and the tap-to-move grips; a mouse gets the menu. A touchscreen laptop or a phone with a mouse switches as you switch.
+* Desktop menus are shorter: Go to album and Go to artist in a Go to submenu, and the two cover (or artist picture) choices in a submenu of their own.
+* Lyrics, Info and the Queue share one panel with tabs across its top, instead of up to three panels side by side squeezing the list. Ctrl+L and `q` bring a panel to the front when it's open behind another tab. The window no longer closes panels on its own when it gets narrow, since there's only one.
+* Info: tap or click a line to copy its value.
+* Undo instead of confirm dialogs: deleting a playlist, a smart playlist, a saved mix or a station, clearing the queue, and taking songs out of a playlist or the queue happen at once, with an Undo button on the note for 10 seconds and Ctrl+Z, in the window and the terminal app. Server playlists still ask, since the server deletes them for good.
+* Settings search: the search box finds settings by words in their name, help or group, with matching groups open. `/` does it in the terminal app's Settings.
+* Sources and Play on fold in the sidebar. They start folded once a library folder or a server is set up, and what you fold or open is kept in `sidebar_folded` under `[appearance]`.
+* Cover search: on the desktop, the artist, album and year fields sit at the top of the cover picker, filled in from the tags, with a Search button, instead of a Search for button that asked for each one in turn. Android keeps the button, since its text goes through Android's dialogs.
+* Terminal app: `:` opens a command palette that finds any command by a few letters and shows its key.
+* Radio: Snapcast stations carry a SNAPCAST badge and say what they are, in the window and the terminal app.
+* Selection bar: Pick none and Invert, for the list and the queue.
+* Tests: a deleted station, smart playlist and playlist put back by undo, songs taken out of a playlist put back in their order, Invert both ways, Settings search with and without a match, folded sidebar groups saved and read back, and the palette's matching.
+
+Reasons for changes: asked to do all the UX changes recommended after the last round: a sheet for touch, menus that follow the input in use, one tabbed side panel, copying from Info, undo instead of confirms, Settings search, folding sidebar groups, inline cover search fields, a terminal palette, a Snapcast badge in Radio, and Pick none and Invert.
+
 2026.11.18 - Bug fixes (Android mouse, Android playlist files, selection bar, field list) / Feature addition (Info page, Snapcast listening, smart playlist files, artist pictures, cover search terms, terminal cast menu)
 
 * Android, mouse: the wheel no longer crashes the app, and right-click opens the menu instead of crashing. The crash on the wheel is in Slint's Android backend, which has `todo!()` for scroll events (Slint 1.18 and 1.19 both). It also took a mouse click as a finger touching down on top of the button press, so a right click was a left press and a right press at once. `packaging/slint-android-mouse.patch` makes the wheel scroll (60 px a notch, as on the desktop), and takes a mouse's clicks only from its button events, with moves while a button is held as drags. `packaging/patch-slint-android.sh` fetches the backend at the version `Cargo.lock` has, checks its checksum, patches it and hands it to cargo with `--config` for the APK build only. Nothing pinned, nothing vendored; it follows `cargo update`.

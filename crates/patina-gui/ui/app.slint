@@ -131,8 +131,16 @@ export global P {
 export global Ui {
     // A touch screen (Android): long press stands in for right-click, and
     // controls that drag up and down give way to ones that drag sideways,
-    // which don't fight the view's scrolling.
+    // which don't fight the view's scrolling. Set from Rust at start, then
+    // it follows what's used: each press says whether it's a finger or a
+    // mouse, so a mouse on a phone gets right-click menus, hover and
+    // dragging, and a touch screen on a laptop gets long presses.
     in-out property <bool> touch: false;
+    public function saw(e: PointerEvent) {
+        if e.kind == PointerEventKind.down {
+            self.touch = e.touch-finger-id > 0;
+        }
+    }
     // The window's height, and what the system bars cover of it, for
     // popups that have to fit inside it.
     in-out property <length> win-h: 860px;
@@ -192,6 +200,7 @@ component PeekArea inherits TouchArea {
         }
     }
     pointer-event(e) => {
+        Ui.saw(e);
         if e.kind == PointerEventKind.down {
             root.fired = false;
             root.down();
@@ -294,6 +303,16 @@ export struct SmartRule {
     value: string,
     value2: string,
     unit: int,
+}
+
+// One entry in the touch menu (the sheet that slides up on a long press).
+// `action` is what the row's right-click menu would send: "play",
+// "go-album", "cover-find". `danger` draws it in the warning color.
+export struct SheetItem {
+    action: string,
+    label: string,
+    icon: string,
+    danger: bool,
 }
 
 // One line on the Info page: a label and its value, or a heading (its
@@ -870,6 +889,7 @@ component CoverMenu inherits Rectangle {
                 }
             }
             pointer-event(e) => {
+                Ui.saw(e);
                 if e.kind == PointerEventKind.down {
                     self.held = false;
                     if e.button == PointerEventButton.right {
@@ -924,6 +944,7 @@ component SpeedMenu inherits Rectangle {
             in-out property <bool> held;
             mouse-cursor: pointer;
             pointer-event(e) => {
+                Ui.saw(e);
                 if e.kind == PointerEventKind.down {
                     self.held = false;
                     if e.button == PointerEventButton.right {
@@ -1003,6 +1024,7 @@ component Bar inherits Rectangle {
     ta := TouchArea {
         mouse-cursor: enabled ? pointer : default;
         pointer-event(e) => {
+            Ui.saw(e);
             if !enabled { return; }
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 root.drag = clamp(self.mouse-x / self.width, 0, 1);
@@ -1071,6 +1093,7 @@ component VBar inherits Rectangle {
             return clamp(1 - (my - root.pad) / root.run, 0, 1);
         }
         pointer-event(e) => {
+            Ui.saw(e);
             if !root.enabled { return; }
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 root.drag = self.at(self.mouse-y);
@@ -1273,6 +1296,7 @@ component SmallField inherits Rectangle {
     in property <string> initial;
     in property <string> placeholder;
     callback edited(string);
+    callback accepted;
     height: 32px;
     min-width: 50px;
     border-radius: 6px * P.round;
@@ -1285,6 +1309,7 @@ component SmallField inherits Rectangle {
         text: root.initial;
         font-size: 13px;
         edited => { root.edited(self.text); }
+        accepted => { root.accepted(); }
     }
     if si.text == "": Text {
         x: 8px;
@@ -1482,6 +1507,8 @@ component ListRow inherits Rectangle {
     callback mark(bool);
     // Dragged by this many rows, up (less than 0) or down.
     callback drag-to(int);
+    // A long press with a finger: the touch menu, which Rust fills.
+    callback sheet;
     // A modified click picks rows; it doesn't open one too.
     property <bool> mod-click;
     property <bool> dragging;
@@ -1760,19 +1787,22 @@ component ListRow inherits Rectangle {
                 activated => { root.act("ipod"); }
             }
             // A song: its album, or its artist.
-            if item.kind == 0: MenuSeparator {}
-            if item.kind == 0: MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
-            if item.kind == 0: MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
-            if item.kind == 1: MenuSeparator {}
+            // A song: its album or artist, and its details. Grouped, so the
+            // menu stays short enough to fit a small window.
+            if item.kind <= 3: MenuSeparator {}
+            if item.kind == 0: Menu {
+                title: "Go to";
+                MenuItem { title: "Album"; activated => { root.act("go-album"); } }
+                MenuItem { title: "Artist"; activated => { root.act("go-artist"); } }
+            }
             if item.kind == 0 || item.kind == 1: MenuItem { title: "View info"; activated => { root.act("info"); } }
-            // Cover art: an album's, a folder's, or a song's album's.
-            if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuSeparator {}
-            if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuItem { title: "Find cover art…"; activated => { root.act("cover-find"); } }
-            if item.kind == 0 || item.kind == 1 || item.kind == 3: MenuItem { title: "Cover from an image file…"; activated => { root.act("cover-file"); } }
-            // An artist's picture.
-            if item.kind == 2: MenuSeparator {}
-            if item.kind == 2: MenuItem { title: "Find artist picture…"; activated => { root.act("cover-find"); } }
-            if item.kind == 2: MenuItem { title: "Artist picture from an image file…"; activated => { root.act("cover-file"); } }
+            // Cover art: an album's, a folder's, or a song's album's. An
+            // artist's picture.
+            if item.kind <= 3: Menu {
+                title: item.kind == 2 ? "Artist picture" : "Cover art";
+                MenuItem { title: "Find online…"; activated => { root.act("cover-find"); } }
+                MenuItem { title: "From an image file…"; activated => { root.act("cover-file"); } }
+            }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
             if item.rating >= 0: Menu {
@@ -1853,7 +1883,7 @@ component ListRow inherits Rectangle {
                 self.running = false;
                 if ta.pressed && item.selectable && root.has-menu {
                     root.long-fired = true;
-                    cm.show({ x: ta.mouse-x, y: ta.mouse-y });
+                    if Ui.touch { root.sheet(); } else { cm.show({ x: ta.mouse-x, y: ta.mouse-y }); }
                 } else if ta.pressed && root.title-cut && item.kind != 12 {
                     root.long-fired = true;
                     Peek.show(root.title-full, ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
@@ -1865,6 +1895,7 @@ component ListRow inherits Rectangle {
             // The TouchArea sees the press before the menu area does, so
             // a right press opens the menu from here.
             pointer-event(e) => {
+                Ui.saw(e);
                 // A row with no menu: its cut title in a bubble instead.
                 if e.kind == PointerEventKind.down && !item.selectable && item.kind != 12 && root.title-cut {
                     root.long-fired = false;
@@ -1940,6 +1971,7 @@ component ListRow inherits Rectangle {
         gta := TouchArea {
             mouse-cursor: Ui.touch ? pointer : grab;
             pointer-event(e) => {
+                Ui.saw(e);
                 if Ui.touch {
                     return;
                 }
@@ -2169,6 +2201,8 @@ component AlbumTile inherits Rectangle {
     callback activate;
     callback act(string);
     callback mark(bool);
+    // A long press with a finger: the touch menu, which Rust fills.
+    callback sheet;
     property <bool> long-fired;
     property <bool> mod-click;
     property <length> press-x;
@@ -2257,9 +2291,11 @@ component AlbumTile inherits Rectangle {
             if root.ipod: MenuItem { title: "Send to iPod"; activated => { root.act("ipod"); } }
             if item.can-mix: MenuItem { title: "Artist mix"; activated => { root.act("mix"); } }
             if item.kind == 1: MenuItem { title: "View info"; activated => { root.act("info"); } }
-            MenuSeparator {}
-            MenuItem { title: item.kind == 2 ? "Find artist picture…" : "Find cover art…"; activated => { root.act("cover-find"); } }
-            MenuItem { title: item.kind == 2 ? "Artist picture from an image file…" : "Cover from an image file…"; activated => { root.act("cover-file"); } }
+            Menu {
+                title: item.kind == 2 ? "Artist picture" : "Cover art";
+                MenuItem { title: "Find online…"; activated => { root.act("cover-find"); } }
+                MenuItem { title: "From an image file…"; activated => { root.act("cover-file"); } }
+            }
             // Ratings and favorites.
             if item.rating >= 0 || item.fav >= 0: MenuSeparator {}
             if item.rating >= 0: Menu {
@@ -2288,13 +2324,14 @@ component AlbumTile inherits Rectangle {
                 self.running = false;
                 if ta.pressed {
                     root.long-fired = true;
-                    tcm.show({ x: ta.mouse-x, y: ta.mouse-y });
+                    if Ui.touch { root.sheet(); } else { tcm.show({ x: ta.mouse-x, y: ta.mouse-y }); }
                 }
             }
         }
         ta := TouchArea {
             mouse-cursor: pointer;
             pointer-event(e) => {
+                Ui.saw(e);
                 if e.kind == PointerEventKind.down {
                     root.long-fired = false;
                     root.mod-click = false;
@@ -2343,6 +2380,8 @@ component QueueLine inherits Rectangle {
     callback activate;
     callback act(string);
     callback mark(bool);
+    // A long press with a finger: the touch menu, which Rust fills.
+    callback sheet;
     callback drag-to(int);
     property <bool> long-fired;
     property <bool> mod-click;
@@ -2410,8 +2449,11 @@ component QueueLine inherits Rectangle {
             MenuItem { title: "Move down"; activated => { root.act("down"); } }
             MenuItem { title: "Add to playlist…"; activated => { root.act("playlist"); } }
             MenuSeparator {}
-            MenuItem { title: "Go to album"; activated => { root.act("go-album"); } }
-            MenuItem { title: "Go to artist"; activated => { root.act("go-artist"); } }
+            Menu {
+                title: "Go to";
+                MenuItem { title: "Album"; activated => { root.act("go-album"); } }
+                MenuItem { title: "Artist"; activated => { root.act("go-artist"); } }
+            }
             MenuItem { title: "View info"; activated => { root.act("info"); } }
             MenuSeparator {}
             MenuItem { title: "Remove"; activated => { root.act("remove"); } }
@@ -2423,12 +2465,13 @@ component QueueLine inherits Rectangle {
                 self.running = false;
                 if qta.pressed {
                     root.long-fired = true;
-                    qcm.show({ x: qta.mouse-x, y: qta.mouse-y });
+                    if Ui.touch { root.sheet(); } else { qcm.show({ x: qta.mouse-x, y: qta.mouse-y }); }
                 }
             }
         }
         qta := TouchArea {
             pointer-event(e) => {
+                Ui.saw(e);
                 if e.kind == PointerEventKind.down {
                     root.long-fired = false;
                     root.mod-click = false;
@@ -2482,6 +2525,7 @@ component QueueLine inherits Rectangle {
         qgta := TouchArea {
             mouse-cursor: Ui.touch ? pointer : grab;
             pointer-event(e) => {
+                Ui.saw(e);
                 if Ui.touch {
                     return;
                 }
@@ -2565,6 +2609,8 @@ component SelBar inherits Rectangle {
                 if root.ipod && !root.queue && root.count > 0: Chip { h: 30px; text: "Send to iPod"; icon: Icons.ipod; icon-only: root.narrow; clicked => { root.act("ipod"); } }
                 if (root.in-playlist || root.queue) && root.count > 0: Chip { h: 30px; text: "Remove"; danger: true; clicked => { root.act("remove"); } }
                 Chip { h: 30px; text: "Pick all"; icon: root.narrow ? Icons.check : ""; icon-only: root.narrow; clicked => { root.act("all"); } }
+                if root.count > 0: Chip { h: 30px; text: "Pick none"; peek: "Let go of every pick, still picking"; clicked => { root.act("none"); } }
+                Chip { h: 30px; text: "Invert"; peek: "Pick the rows that aren't, and let go of the ones that are"; clicked => { root.act("invert"); } }
                 Chip { h: 30px; text: "Done"; icon: Icons.close; icon-only: root.narrow; clicked => { root.act("clear"); } }
             }
         }
@@ -3713,6 +3759,7 @@ component Knob inherits Rectangle {
             ta := TouchArea {
                 mouse-cursor: root.k.choice ? pointer : ns-resize;
                 pointer-event(e) => {
+                    Ui.saw(e);
                     if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                         root.grab-pos = root.k.pos;
                         root.grab-y = self.mouse-y;
@@ -4075,6 +4122,7 @@ component EqPanel inherits Rectangle {
                             max(-root.range, min(root.range, (0.5 - (parent.y + my) / graph.height) * 2 * root.range)));
                     }
                     pointer-event(e) => {
+                        Ui.saw(e);
                         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                             self.at(self.mouse-x, self.mouse-y);
                         }
@@ -4139,8 +4187,32 @@ export component AppWindow inherits Window {
     in-out property <bool> drawer-open: false;
     property <length> side-w: drawer ? 0px : (side-folded ? 64px : 228px);
     property <length> bar-h: bar.two-row ? 132px : 84px;
+    // The side panel: lyrics, info and the queue share one place on the
+    // right, as tabs when more than one is open.
     property <length> lyrics-w: tiny ? 0px : clamp(win-w * 0.3, 240px, 340px);
-    property <length> queue-w: tiny ? 0px : clamp(win-w * 0.26, 220px, 300px);
+    property <int> side-count: (lyrics-open ? 1 : 0) + (info-open ? 1 : 0) + (queue-panel ? 1 : 0);
+    // The tab last picked or opened: 0 lyrics, 1 info, 2 queue.
+    in-out property <int> side-tab: 0;
+    // The one showing: the picked tab while it's open, else whichever is.
+    property <int> side-shown: side-tab == 0 && lyrics-open ? 0
+        : (side-tab == 1 && info-open ? 1
+        : (side-tab == 2 && queue-panel ? 2
+        : (info-open ? 1 : (lyrics-open ? 0 : (queue-panel ? 2 : -1)))));
+    property <length> tabs-h: side-count > 1 ? 42px : 0px;
+    changed lyrics-open => { if self.lyrics-open { self.side-tab = 0; } }
+    changed info-open => { if self.info-open { self.side-tab = 1; } }
+    changed queue-panel => { if self.queue-panel { self.side-tab = 2; } }
+    // The panel buttons: open it, or bring it to the front when it's open
+    // behind another tab, or close it when it's the one showing.
+    function lyrics-button() {
+        if self.lyrics-open && self.side-shown != 0 { self.side-tab = 0; } else { self.lyrics-clicked(); }
+    }
+    function queue-button() {
+        if self.queue-panel && self.side-shown != 2 { self.side-tab = 2; } else { self.toggle-queue(); }
+    }
+    function info-button() {
+        if self.info-open && self.side-shown != 1 { self.side-tab = 1; } else { self.np-info(); }
+    }
     property <length> pad: tight ? 16px : 32px;
     // A panel over the list on a phone or narrow window: the whole view
     // scrolls as one page, list and all.
@@ -4150,7 +4222,7 @@ export component AppWindow inherits Window {
     // scrolled out from under it and still be tapped.
     property <length> sel-gap: (layout != 2 && (marked-count > 0 || marking)) || (layout == 2 && (queue-marked-count > 0 || queue-marking)) ? 80px : 0px;
     // Roughly the list's width, for the column header's choices.
-    property <length> list-w: win-w - side-w - (lyrics-open || info-open ? lyrics-w : 0px) - (queue-panel ? queue-w : 0px) - 2 * pad;
+    property <length> list-w: win-w - side-w - (side-count > 0 ? lyrics-w : 0px) - 2 * pad;
     // The sidebar's hover label while it's folded to icons.
     property <string> side-tip;
     property <length> side-tip-y;
@@ -4170,6 +4242,8 @@ export component AppWindow inherits Window {
     in property <bool> can-back;
     in property <bool> can-forward;
     in-out property <string> search-text;
+    // In Settings the search box finds settings.
+    in property <bool> search-settings;
     callback back;
     callback forward;
     callback search-edited(string);
@@ -4294,6 +4368,37 @@ export component AppWindow inherits Window {
     in property <[InfoRow]> info-rows;
     callback info-close;
     callback np-info;
+    // A line on the Info page was copied: its label, for the note.
+    callback info-copied(string);
+    // Put text on the clipboard, through a text box that's never shown:
+    // Slint has no other way to the clipboard from here, and this one
+    // works on Android too.
+    public function copy-text(t: string) {
+        clip.text = t;
+        clip.select-all();
+        clip.copy();
+    }
+    clip := TextInput {
+        x: -10px;
+        y: -10px;
+        width: 1px;
+        height: 1px;
+        visible: false;
+        read-only: true;
+    }
+    // The touch menu: a long press with a finger opens it for a row or a
+    // queue line, filled from Rust; picking an entry sends its action.
+    in-out property <bool> sheet-open;
+    in property <string> sheet-title;
+    in property <string> sheet-sub;
+    // Big buttons across the top (Play, Play next, Queue, Playlist).
+    in property <[SheetItem]> sheet-quick;
+    in property <[SheetItem]> sheet-items;
+    // The stars, for a song or an album; -1 for none.
+    in property <int> sheet-rating: -1;
+    callback sheet-row(int);
+    callback sheet-queue(int);
+    callback sheet-pick(string);
     // The sleep timer: time left ("41:23", "end of song"), empty when off.
     in property <string> sleep-label;
     callback sleep-act(string);
@@ -4318,8 +4423,16 @@ export component AppWindow inherits Window {
     in property <string> covers-note;
     callback cover-pick(int);
     callback cover-file;
-    // Search again for words of your own: artist, album and year.
+    // Search again for words of your own: artist, album and year. Typed
+    // in the dialog on the desktop (cover-search); through Android's own
+    // dialog there (cover-terms).
     callback cover-terms;
+    in property <string> covers-artist;
+    in property <string> covers-album;
+    in property <string> covers-year;
+    // An artist's picture: only the artist to search for.
+    in property <bool> covers-for-artist;
+    callback cover-search(string, string, string);
     in property <string> np-artist;
     in property <string> np-album;
     in property <string> np-format;
@@ -4479,6 +4592,10 @@ export component AppWindow inherits Window {
     // Toast
     in property <string> toast;
     in property <bool> toast-error;
+    // The note is for something just done that can be put back: an Undo
+    // button in it (Ctrl+Z too).
+    in property <bool> toast-undo;
+    callback undo;
 
     // Dialogs: 0 none, 1 text form, 2 pick playlist, 3 confirm, 4 help,
     // 5 cover art found online
@@ -4589,7 +4706,11 @@ export component AppWindow inherits Window {
                 root.volume-open = false;
                 return accept;
             }
-            if (e.text == Key.Back || e.text == Key.Escape) && root.info-open {
+            if (e.text == Key.Back || e.text == Key.Escape) && root.sheet-open {
+                root.sheet-open = false;
+                return accept;
+            }
+            if (e.text == Key.Back || e.text == Key.Escape) && root.side-shown == 1 {
                 root.info-close();
                 return accept;
             }
@@ -4597,7 +4718,7 @@ export component AppWindow inherits Window {
                 root.drawer-open = false;
                 return accept;
             }
-            if e.text == Key.Back && root.tiny && root.queue-panel {
+            if e.text == Key.Back && root.tiny && root.side-shown == 2 {
                 root.toggle-queue();
                 return accept;
             }
@@ -4605,7 +4726,7 @@ export component AppWindow inherits Window {
                 root.np-open = false;
                 return accept;
             }
-            if e.text == Key.Back && root.tiny && root.lyrics-open {
+            if e.text == Key.Back && root.tiny && root.side-shown == 0 {
                 root.lyrics-clicked();
                 return accept;
             }
@@ -4706,7 +4827,7 @@ export component AppWindow inherits Window {
                                             x: 0;
                                             width: parent.width;
                                             overflow: elide;
-                                            text: root.tight ? "Search" : "Search artists, albums, songs";
+                                            text: root.search-settings ? "Find a setting" : (root.tight ? "Search" : "Search artists, albums, songs");
                                             color: P.wave;
                                             vertical-alignment: center;
                                         }
@@ -5038,6 +5159,7 @@ export component AppWindow inherits Window {
                                         act(a) => { root.row-select(i); root.row-act(i, a); }
                                         mark(range) => { root.row-mark(i, range); keys.focus(); }
                                         drag-to(d) => { if d != 0 { root.row-drag(i, i + d); } keys.focus(); }
+                                        sheet => { root.row-select(i); root.sheet-row(i); }
                                     }
                                 }
                                 if root.rows.length == 0 && root.loading: SkeletonRows {
@@ -5170,6 +5292,7 @@ export component AppWindow inherits Window {
                                     activate => { root.row-activate(i); }
                                     act(a) => { root.row-select(i); root.row-act(i, a); }
                                     mark(range) => { root.row-mark(i, range); keys.focus(); }
+                                    sheet => { root.row-select(i); root.sheet-row(i); }
                                 }
                             }
                         }
@@ -5224,6 +5347,7 @@ export component AppWindow inherits Window {
                                     select => { root.queue-select(i); keys.focus(); }
                                     activate => { root.queue-activate(i); }
                                     act(a) => { root.queue-act(i, a); }
+                                    sheet => { root.queue-select(i); root.sheet-queue(i); }
                                     mark(range) => { root.queue-mark(i, range); keys.focus(); }
                                     drag-to(d) => { if d != 0 { root.queue-drag(i, i + d); } keys.focus(); }
                                 }
@@ -5290,16 +5414,15 @@ export component AppWindow inherits Window {
                             close => { root.np-open = false; keys.focus(); }
                             rate(n) => { root.np-rate(n); keys.focus(); }
                             love => { root.love-clicked(); keys.focus(); }
-                            lyrics => { root.lyrics-clicked(); keys.focus(); }
+                            lyrics => { root.lyrics-button(); keys.focus(); }
                             info-open: root.info-open;
-                            info => { root.np-info(); keys.focus(); }
-                            queue => { root.toggle-queue(); keys.focus(); }
+                            info => { root.info-button(); keys.focus(); }
+                            queue => { root.queue-button(); keys.focus(); }
                         }
                     }
                 }
 
-                Rectangle { width: root.lyrics-open || root.info-open ? root.lyrics-w : 0px; }
-                Rectangle { width: root.queue-panel ? root.queue-w : 0px; }
+                Rectangle { width: root.side-count > 0 ? root.lyrics-w : 0px; }
             }
 
             // ----- Bottom bar -----
@@ -5696,14 +5819,14 @@ export component AppWindow inherits Window {
                             icon: Icons.lyrics;
                             tip: "Lyrics (Ctrl+L)";
                             active: root.lyrics-open;
-                            clicked => { root.lyrics-clicked(); keys.focus(); }
+                            clicked => { root.lyrics-button(); keys.focus(); }
                         }
                         IconButton {
                             y: (parent.height - self.height) / 2;
                             icon: Icons.queue-panel;
                             tip: "Queue panel";
                             active: root.queue-panel;
-                            clicked => { root.toggle-queue(); keys.focus(); }
+                            clicked => { root.queue-button(); keys.focus(); }
                         }
                         // Desktop: the button mutes and the slider sits beside
                         // it. Touch: the button opens a tall slider, since a
@@ -5890,8 +6013,9 @@ export component AppWindow inherits Window {
                         for item[i] in root.side: Rectangle {
                             // Kawaii: the open one is a pink pill.
                             property <bool> pill: item.active && P.kawaii && item.kind == 0;
-                            // Favorites sit like sections, with a menu.
-                            property <bool> entry: item.kind <= 1 || item.kind == 4;
+                            // Favorites sit like sections, with a menu. A
+                            // group's heading folds it.
+                            property <bool> entry: item.kind <= 1 || item.kind == 4 || (item.kind == 2 && !sidebar.folded);
                             height: item.kind == 3 ? 12px : (item.kind == 2 ? 28px : 34px);
                             border-radius: 6px * P.round;
                             border-width: 1px;
@@ -5909,7 +6033,7 @@ export component AppWindow inherits Window {
                             if item.kind == 2 && !sidebar.folded: Text {
                                 x: 10px;
                                 y: parent.height - self.height - 4px;
-                                text: item.sub != "" ? item.label + "  ·  " + item.sub : item.label;
+                                text: (item.active ? "▾  " : "▸  ") + (item.sub != "" ? item.label + "  ·  " + item.sub : item.label);
                                 font-size: 11px;
                                 letter-spacing: 0.9px;
                                 color: P.muted;
@@ -6042,6 +6166,7 @@ export component AppWindow inherits Window {
                                     enabled: entry;
                                     mouse-cursor: entry ? pointer : default;
                                     pointer-event(e) => {
+                                        Ui.saw(e);
                                         if e.kind == PointerEventKind.down {
                                             long-fired = false;
                                             // Anything else whose name is cut short: the
@@ -6154,7 +6279,7 @@ export component AppWindow inherits Window {
             sleep-label: root.sleep-label;
             lyrics-open: root.lyrics-open;
             info-open: root.info-open;
-            info => { root.np-info(); keys.focus(); }
+            info => { root.info-button(); keys.focus(); }
             queue-open: root.queue-panel;
             speed-label: root.speed-label;
             speed-tempo: root.speed-tempo;
@@ -6173,19 +6298,44 @@ export component AppWindow inherits Window {
             seek(v) => { root.seek(v); keys.focus(); }
             set-volume(v) => { root.set-volume(v); }
             toggle-mute => { root.toggle-mute(); keys.focus(); }
-            lyrics => { root.lyrics-clicked(); keys.focus(); }
-            queue => { root.toggle-queue(); keys.focus(); }
+            lyrics => { root.lyrics-button(); keys.focus(); }
+            queue => { root.queue-button(); keys.focus(); }
             love => { root.love-clicked(); keys.focus(); }
             rate(n) => { root.np-rate(n); keys.focus(); }
             sleep(a) => { root.sleep-act(a); keys.focus(); }
         }
 
-        // ----- Lyrics panel -----
-        if root.lyrics-open: Rectangle {
-            x: root.tiny ? 0px : keys.width - root.lyrics-w - (root.queue-panel ? root.queue-w : 0px);
+        // ----- Side panel tabs -----
+        // Lyrics, Info and the queue share the side panel. With more than
+        // one open, a tab for each sits above it.
+        if root.side-count > 1: Rectangle {
+            x: root.tiny ? 0px : keys.width - root.lyrics-w;
             y: 0;
             width: root.tiny ? keys.width : root.lyrics-w;
-            height: keys.height - (root.np-phone ? 0px : root.bar-h);
+            height: root.tabs-h;
+            background: root.np-phone ? P.surface : P.panel;
+            TouchArea {}
+            Rectangle { width: 1px; x: 0; background: P.border; }
+            Rectangle { y: parent.height - 1px; height: 1px; background: P.border; }
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 6px;
+                if root.lyrics-open: Chip { h: 30px; text: "Lyrics"; active: root.side-shown == 0; clicked => { root.side-tab = 0; keys.focus(); } }
+                if root.info-open: Chip { h: 30px; text: "Info"; active: root.side-shown == 1; clicked => { root.side-tab = 1; keys.focus(); } }
+                if root.queue-panel: Chip { h: 30px; text: "Queue"; active: root.side-shown == 2; clicked => { root.side-tab = 2; keys.focus(); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+
+        // ----- Lyrics panel -----
+        if root.side-shown == 0: Rectangle {
+            x: root.tiny ? 0px : keys.width - root.lyrics-w;
+            y: root.tabs-h;
+            width: root.tiny ? keys.width : root.lyrics-w;
+            height: keys.height - (root.np-phone ? 0px : root.bar-h) - root.tabs-h;
             background: root.np-phone ? P.surface : P.panel;
             // Nothing inside draws past the panel, however long the song.
             clip: true;
@@ -6244,12 +6394,12 @@ export component AppWindow inherits Window {
 
         // ----- Info panel -----
         // In the lyrics panel's place, over it when both are open.
-        if root.info-open: Rectangle {
-            x: root.tiny ? 0px : keys.width - root.lyrics-w - (root.queue-panel ? root.queue-w : 0px);
-            y: 0;
+        if root.side-shown == 1: Rectangle {
+            x: root.tiny ? 0px : keys.width - root.lyrics-w;
+            y: root.tabs-h;
             width: root.tiny ? keys.width : root.lyrics-w;
-            height: keys.height - (root.np-phone ? 0px : root.bar-h);
-            background: root.np-phone || root.lyrics-open ? P.surface : P.panel;
+            height: keys.height - (root.np-phone ? 0px : root.bar-h) - root.tabs-h;
+            background: root.np-phone ? P.surface : P.panel;
             clip: true;
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
@@ -6264,7 +6414,7 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                     IconButton { icon: Icons.close; tip: "Close"; clicked => { root.info-close(); keys.focus(); } }
                 }
-                Text { text: root.info-kicker; font-size: 11px; letter-spacing: 1.2px; color: P.muted; }
+                Text { text: root.info-kicker + "  ·  TAP A LINE TO COPY IT"; font-size: 11px; letter-spacing: 1.2px; color: P.muted; overflow: elide; }
                 Text { text: root.info-title; wrap: word-wrap; font-weight: 600; font-size: 15px; color: P.text; }
                 Rectangle { height: 4px; }
                 // A Flickable, as for the lyrics: the rows can run far past
@@ -6275,23 +6425,36 @@ export component AppWindow inherits Window {
                         alignment: start;
                         spacing: 7px;
                         padding-bottom: 12px;
-                        for r in root.info-rows: VerticalLayout {
-                            padding-top: r.head ? 12px : 0px;
-                            spacing: 1px;
-                            Text {
-                                text: r.label;
-                                wrap: word-wrap;
-                                font-size: r.head ? 11px : 11.5px;
-                                font-weight: r.head ? 600 : 400;
-                                letter-spacing: r.head ? 1.1px : 0px;
-                                color: r.head ? P.accent-text : P.muted;
+                        for r in root.info-rows: Rectangle {
+                            height: irl.preferred-height;
+                            // A tap copies the value.
+                            TouchArea {
+                                mouse-cursor: r.head ? default : copy;
+                                clicked => {
+                                    if !r.head {
+                                        root.copy-text(r.value);
+                                        root.info-copied(r.label);
+                                    }
+                                }
                             }
-                            if !r.head: Text {
-                                text: r.value;
-                                wrap: r.code ? char-wrap : word-wrap;
-                                font-family: r.code ? P.mono : P.sans;
-                                font-size: r.code ? 12px : 13.5px;
-                                color: P.text;
+                            irl := VerticalLayout {
+                                padding-top: r.head ? 12px : 0px;
+                                spacing: 1px;
+                                Text {
+                                    text: r.label;
+                                    wrap: word-wrap;
+                                    font-size: r.head ? 11px : 11.5px;
+                                    font-weight: r.head ? 600 : 400;
+                                    letter-spacing: r.head ? 1.1px : 0px;
+                                    color: r.head ? P.accent-text : P.muted;
+                                }
+                                if !r.head: Text {
+                                    text: r.value;
+                                    wrap: r.code ? char-wrap : word-wrap;
+                                    font-family: r.code ? P.mono : P.sans;
+                                    font-size: r.code ? 12px : 13.5px;
+                                    color: P.text;
+                                }
                             }
                         }
                     }
@@ -6300,11 +6463,11 @@ export component AppWindow inherits Window {
         }
 
         // ----- Queue panel -----
-        if root.queue-panel: Rectangle {
-            x: root.tiny ? 0px : keys.width - root.queue-w;
-            y: 0;
-            width: root.tiny ? keys.width : root.queue-w;
-            height: keys.height - (root.np-phone ? 0px : root.bar-h);
+        if root.side-shown == 2: Rectangle {
+            x: root.tiny ? 0px : keys.width - root.lyrics-w;
+            y: root.tabs-h;
+            width: root.tiny ? keys.width : root.lyrics-w;
+            height: keys.height - (root.np-phone ? 0px : root.bar-h) - root.tabs-h;
             background: root.np-phone ? P.surface : P.panel;
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
@@ -6317,7 +6480,7 @@ export component AppWindow inherits Window {
                     Text { text: "Queue"; font-family: P.serif; font-weight: P.kawaii ? 900 : 700; font-size: 17px; color: P.text; }
                     Rectangle { horizontal-stretch: 1; }
                     Text { text: root.queue-summary; font-size: 11.5px; color: P.muted; vertical-alignment: center; }
-                    if root.tiny: IconButton { icon: Icons.close; tip: "Close"; clicked => { root.toggle-queue(); keys.focus(); } }
+                    IconButton { icon: Icons.close; tip: "Close"; clicked => { root.toggle-queue(); keys.focus(); } }
                 }
                 // A ListView, so only the rows in view exist, however
                 // long the queue gets.
@@ -6433,10 +6596,11 @@ export component AppWindow inherits Window {
 
         // ----- Toast -----
         if root.toast != "": Rectangle {
+            property <length> undo-w: root.toast-undo ? 76px : 0px;
             x: parent.width - self.width - 24px;
             y: parent.height - root.bar-h - self.height - 16px;
-            width: min(tt.preferred-width + 36px, 520px, keys.width - 48px);
-            height: tt.preferred-height + 20px;
+            width: min(tt.preferred-width + 36px + self.undo-w, 560px, keys.width - 48px);
+            height: max(tt.preferred-height + 20px, root.toast-undo ? 44px : 0px);
             border-radius: 8px * P.round;
             border-width: 1px;
             border-color: root.toast-error ? P.copper-dim : P.verdigris-dim;
@@ -6445,11 +6609,19 @@ export component AppWindow inherits Window {
             drop-shadow-color: P.shadow;
             tt := Text {
                 x: 18px;
-                width: parent.width - 36px;
+                width: parent.width - 36px - parent.undo-w;
                 text: root.toast;
                 wrap: word-wrap;
                 vertical-alignment: center;
                 color: root.toast-error ? P.copper : P.text;
+            }
+            if root.toast-undo: Chip {
+                x: parent.width - self.width - 10px;
+                y: (parent.height - self.height) / 2;
+                h: 30px;
+                text: "Undo";
+                primary: true;
+                clicked => { root.undo(); keys.focus(); }
             }
         }
 
@@ -6755,6 +6927,40 @@ export component AppWindow inherits Window {
                         color: P.muted;
                     }
 
+                    // What to search for, typed here on the desktop.
+                    if root.dialog == 5 && !root.native-text: HorizontalLayout {
+                        property <string> artist: root.covers-artist;
+                        property <string> album: root.covers-album;
+                        property <string> year: root.covers-year;
+                        spacing: 6px;
+                        SmallField {
+                            horizontal-stretch: 2;
+                            initial: root.covers-artist;
+                            placeholder: "Artist";
+                            edited(t) => { parent.artist = t; }
+                            accepted => { root.cover-search(parent.artist, parent.album, parent.year); }
+                        }
+                        if !root.covers-for-artist: SmallField {
+                            horizontal-stretch: 2;
+                            initial: root.covers-album;
+                            placeholder: "Album";
+                            edited(t) => { parent.album = t; }
+                            accepted => { root.cover-search(parent.artist, parent.album, parent.year); }
+                        }
+                        if !root.covers-for-artist: SmallField {
+                            width: 64px;
+                            initial: root.covers-year;
+                            placeholder: "Year";
+                            edited(t) => { parent.year = t; }
+                            accepted => { root.cover-search(parent.artist, parent.album, parent.year); }
+                        }
+                        Chip {
+                            h: 32px;
+                            text: "Search";
+                            primary: true;
+                            clicked => { root.cover-search(parent.artist, parent.album, parent.year); }
+                        }
+                    }
                     // Covers found online: tap one to use it.
                     if root.dialog == 5: Text {
                         text: root.covers-note;
@@ -6818,7 +7024,7 @@ export component AppWindow inherits Window {
                             h: 36px;
                             clicked => { root.dlg-cancel(); }
                         }
-                        if root.dialog == 5: Chip {
+                        if root.dialog == 5 && root.native-text: Chip {
                             text: "Search for…";
                             h: 36px;
                             clicked => { root.cover-terms(); }
@@ -6862,6 +7068,135 @@ export component AppWindow inherits Window {
             }
         }
 
+        // ----- The touch menu -----
+        // A long press with a finger opens this instead of a popup menu: a
+        // sheet from the bottom that's never taller than the window, with
+        // the common actions as big buttons, the stars, then the rest as a
+        // list that scrolls. A tap outside, Back or Escape closes it.
+        if root.sheet-open: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: P.scrim;
+            TouchArea {
+                clicked => { root.sheet-open = false; keys.focus(); }
+            }
+            sheet := Rectangle {
+                property <length> w: min(parent.width, 560px);
+                x: (parent.width - self.w) / 2;
+                width: self.w;
+                height: min(sl.preferred-height, parent.height * 0.85);
+                y: parent.height - self.height;
+                background: P.surface;
+                border-top-left-radius: 16px * P.round;
+                border-top-right-radius: 16px * P.round;
+                drop-shadow-blur: 18px;
+                drop-shadow-color: P.shadow;
+                clip: true;
+                // Takes the presses, so none fall through to the scrim.
+                TouchArea {}
+                sl := VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 10px;
+                    padding-bottom: 12px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        alignment: center;
+                        Rectangle { width: 36px; height: 4px; border-radius: 2px; background: P.border; }
+                    }
+                    Text {
+                        text: root.sheet-title;
+                        wrap: word-wrap;
+                        font-size: 16px;
+                        font-weight: 700;
+                        color: P.text;
+                    }
+                    if root.sheet-sub != "": Text {
+                        text: root.sheet-sub;
+                        wrap: word-wrap;
+                        font-size: 12.5px;
+                        color: P.muted;
+                    }
+                    if root.sheet-quick.length > 0: HorizontalLayout {
+                        padding-top: 4px;
+                        spacing: 6px;
+                        for q in root.sheet-quick: Rectangle {
+                            horizontal-stretch: 1;
+                            height: 64px;
+                            border-radius: 12px * P.round;
+                            background: qa.pressed ? P.chip-hover : P.raised;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 4px;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Icon { d: q.icon; size: 22px; stroke: P.accent-text; }
+                                }
+                                Text {
+                                    text: q.label;
+                                    horizontal-alignment: center;
+                                    font-size: 12px;
+                                    color: P.text;
+                                    overflow: elide;
+                                }
+                            }
+                            qa := TouchArea {
+                                clicked => { root.sheet-open = false; root.sheet-pick(q.action); keys.focus(); }
+                            }
+                        }
+                    }
+                    if root.sheet-rating >= 0: HorizontalLayout {
+                        spacing: 0px;
+                        alignment: start;
+                        for n in [1, 2, 3, 4, 5]: Rectangle {
+                            width: 44px;
+                            height: 44px;
+                            Text {
+                                text: n <= root.sheet-rating ? "★" : "☆";
+                                font-size: 26px;
+                                color: n <= root.sheet-rating ? P.copper : P.wave;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                clicked => {
+                                    root.sheet-open = false;
+                                    root.sheet-pick("rate-" + (n == root.sheet-rating ? 0 : n));
+                                    keys.focus();
+                                }
+                            }
+                        }
+                    }
+                    if root.sheet-items.length > 0: Rectangle { height: 1px; background: P.border; }
+                    Flickable {
+                        vertical-stretch: 1;
+                        min-height: min(root.sheet-items.length, 2) * 46px;
+                        preferred-height: root.sheet-items.length * 46px;
+                        content-height: root.sheet-items.length * 46px;
+                        for it[i] in root.sheet-items: Rectangle {
+                            y: i * 46px;
+                            height: 46px;
+                            border-radius: 8px * P.round;
+                            background: ia.pressed ? P.chip-hover : transparent;
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                text: it.label;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                font-size: 14.5px;
+                                color: it.danger ? P.copper : P.text;
+                            }
+                            ia := TouchArea {
+                                clicked => { root.sheet-open = false; root.sheet-pick(it.action); keys.focus(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ----- A cut-short text, shown whole -----
         // Above everything, dialogs included. Any press outside the bubble
         // closes it and goes no further; a press on it closes it too.
@@ -6870,6 +7205,7 @@ export component AppWindow inherits Window {
             height: parent.height;
             TouchArea {
                 pointer-event(e) => {
+                    Ui.saw(e);
                     if e.kind == PointerEventKind.down { Peek.open = false; }
                 }
                 scroll-event(e) => {

@@ -2,6 +2,7 @@
 
 mod app;
 mod art;
+mod palette;
 mod theme;
 mod ui;
 

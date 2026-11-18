@@ -142,6 +142,23 @@ impl Browser {
         l.marked.extend(keys);
     }
 
+    /// Pick the rows that aren't picked, and let go of the ones that are.
+    pub fn invert_marks(&mut self) {
+        let Some(l) = self.level_sel() else { return };
+        let keys: Vec<String> = l
+            .items
+            .iter()
+            .filter(|i| markable(i))
+            .map(Item::key)
+            .collect();
+        for k in keys {
+            if !l.marked.remove(&k) {
+                l.marked.insert(k);
+            }
+        }
+        l.anchor = None;
+    }
+
     pub fn clear_marks(&mut self) -> bool {
         let Some(l) = self.level_sel() else {
             return false;
@@ -248,6 +265,19 @@ impl Browser {
         self.touch();
     }
 
+    /// Pick every song in the queue that isn't picked, and let go of the
+    /// ones that are.
+    pub fn invert_queue_marks(&mut self) {
+        let ids: Vec<u64> = {
+            let q = self.player.queue();
+            (0..q.len()).filter_map(|i| q.at(i).map(|e| e.id)).collect()
+        };
+        let was = std::mem::take(&mut self.queue_marks);
+        self.queue_marks = ids.into_iter().filter(|id| !was.contains(id)).collect();
+        self.queue_anchor = None;
+        self.touch();
+    }
+
     pub fn clear_queue_marks(&mut self) -> bool {
         let had = !self.queue_marks.is_empty();
         self.queue_marks.clear();
@@ -283,11 +313,16 @@ impl Browser {
             .map(|(id, _)| id)
             .collect();
         let n = ids.len();
+        let infos = self.queue_infos(&ids);
         for id in ids {
             self.player.send(Command::RemoveEntry(id));
         }
-        if self.clear_queue_marks() {
-            self.note(format!("Took {} out of the queue", count(n)));
+        self.clear_queue_marks();
+        if n > 0 {
+            self.offer_undo(
+                format!("Took {} out of the queue", count(n)),
+                super::undo::Undo::Queue(infos),
+            );
         }
     }
 
@@ -438,6 +473,7 @@ impl Browser {
 
     pub fn delete_smart(&mut self, id: i64) {
         let Some(lib) = &self.lib else { return };
+        let was = lib.smart_playlist(id).ok().flatten();
         if let Err(e) = lib.delete_smart(id) {
             return self.error(e.to_string());
         }
@@ -445,7 +481,17 @@ impl Browser {
             stack.retain(|l| !matches!(l.source, Source::Smart { id: x, .. } if x == id));
         }
         self.refresh_section(Section::Playlists);
-        self.note("Deleted the smart playlist. The songs are still in the library.");
+        match was {
+            Some(s) => self.offer_undo(
+                format!("Deleted the smart playlist \"{}\"", s.name),
+                super::undo::Undo::Smart {
+                    name: s.name,
+                    query: s.query,
+                    exclude: s.exclude,
+                },
+            ),
+            None => self.note("Deleted the smart playlist. The songs are still in the library."),
+        }
     }
 
     /// The smart playlist open or selected, for Edit.

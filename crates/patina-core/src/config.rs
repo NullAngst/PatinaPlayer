@@ -378,6 +378,10 @@ pub struct AppearanceConfig {
     /// Minimal UX on its own while the phone is in car mode (Android Auto
     /// or a driving mode).
     pub minimal_driving: bool,
+    /// The sidebar's groups folded to their heading ("Sources", "Play
+    /// on"), in the window. None until one is folded or opened: then the
+    /// window folds them once the library has somewhere to play from.
+    pub sidebar_folded: Option<Vec<String>>,
 }
 
 impl Default for AppearanceConfig {
@@ -392,6 +396,7 @@ impl Default for AppearanceConfig {
             minimal: false,
             visualizer: Visualizer::Off,
             minimal_driving: true,
+            sidebar_folded: None,
         }
     }
 }
@@ -903,6 +908,7 @@ struct RawAppearance {
     minimal: Option<bool>,
     visualizer: Option<String>,
     minimal_driving: Option<bool>,
+    sidebar_folded: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1321,6 +1327,7 @@ impl Config {
                 minimal: look.minimal.unwrap_or(false),
                 visualizer,
                 minimal_driving: look.minimal_driving.unwrap_or(true),
+                sidebar_folded: look.sidebar_folded,
             },
             servers,
             cache,
@@ -1526,6 +1533,10 @@ visualizer = "off"
 # Android: Minimal UX on its own while the phone is in car mode (Android
 # Auto, or a driving mode that turns car mode on).
 minimal_driving = true
+# The sidebar's groups folded to their heading, in the window: clicking a
+# heading folds or opens it, and that's kept here. Left out, Sources and
+# Play on start folded once the library has somewhere to play from.
+# sidebar_folded = ["Sources", "Play on"]
 
 [playback]
 # Starting volume, 0 to 100.
