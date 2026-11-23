@@ -228,13 +228,22 @@ jobs:
             -e AMPACHE_ADMIN_USER=admin -e AMPACHE_ADMIN_EMAIL=admin@example.com \
             -e AMPACHE_ADMIN_PASSWORD=patina-pw \
             ampache/ampache:latest
+          # The install runs on a MariaDB of its own, which it shuts down
+          # again before the image starts its services for good. So wait
+          # for the config, then for the database to answer after that.
           for i in $(seq 120); do
-            docker exec ampache test -f /var/www/config/ampache.cfg.php \
+            docker exec ampache test -f /var/www/config/ampache.cfg.php && break
+            sleep 2
+          done
+          docker exec ampache test -f /var/www/config/ampache.cfg.php
+          sleep 10
+          for i in $(seq 120); do
+            docker exec ampache mysqladmin -uroot status >/dev/null 2>&1 \
               && curl -fs "http://localhost:8080/server/json.server.php?action=ping" >/dev/null \
               && break
             sleep 2
           done
-          docker exec ampache test -f /var/www/config/ampache.cfg.php
+          docker exec ampache mysqladmin -uroot status
           docker exec -u www-data ampache php /var/www/bin/cli run:addCatalog Music /media
           docker exec -u www-data ampache php /var/www/bin/cli run:updateCatalog -a -t -s
           curl -fsS "http://localhost:8080/server/json.server.php?action=ping"
