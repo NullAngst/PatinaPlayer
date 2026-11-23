@@ -1,6 +1,7 @@
 name: Release
 
-# Builds the AppImage and the Android APK from a tag and attaches them to
+# Builds the AppImage, the Android APK and the FreeBSD tarball from a tag
+# and attaches them to
 # that tag's release, which has to exist already. Nothing here runs on a
 # push: make the release and its tag on the Releases page first, then run
 # this from Actions, Run workflow, with that tag picked under "Use workflow
@@ -186,14 +187,57 @@ jobs:
           name: PatinaPlayer-Android
           path: target/apk/PatinaPlayer-*.apk
 
-  # Attaches both builds to the tag's existing release, once both are done,
-  # so the two jobs never race. If one build fails, the other still ships.
+  # FreeBSD has no GitHub runner of its own: this builds in a FreeBSD VM on
+  # the Linux runner (vmactions/freebsd-vm, its default FreeBSD release),
+  # and the tarball comes back out with the checkout.
+  freebsd:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        env:
+          VERSION: ${{ github.ref_name }}
+          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
+          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
+        with:
+          envs: "VERSION PATINA_LASTFM_KEY PATINA_LASTFM_SECRET"
+          usesh: true
+          prepare: |
+            pkg install -y bash curl git gmake pkgconf nasm gnutls llvm \
+              pipewire alsa-lib libxkbcommon wayland fontconfig freetype2 \
+              libX11 libXcursor libXrandr libXi mesa-libs
+            # Latest stable Rust, as the other builds use, rather than
+            # whichever the package tree has.
+            curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            . "$HOME/.cargo/env"
+            # No pinned versions: newest compatible crates on every run.
+            cargo update
+            bash packaging/build-freebsd.sh
+            ./target/freebsd-build/release/patinaplayer --version
+            ./target/freebsd-build/release/patinaplayer-tui --version
+            # Only the tarball has to come back out of the VM.
+            rm -rf target/freebsd-build target/ffmpeg-src target/ffmpeg-static
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PatinaPlayer-FreeBSD
+          path: target/freebsd/PatinaPlayer-*.tar.gz
+
+  # Attaches the builds to the tag's existing release, once all are done,
+  # so the jobs never race. If one build fails, the others still ship.
   # --clobber lets a rerun on the same tag replace the files.
   publish:
-    needs: [appimage, android]
+    needs: [appimage, android, freebsd]
     if: >-
       !cancelled() &&
-      (needs.appimage.result == 'success' || needs.android.result == 'success')
+      (needs.appimage.result == 'success' || needs.android.result == 'success' ||
+       needs.freebsd.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
