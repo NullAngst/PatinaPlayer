@@ -5133,7 +5133,16 @@ export component AppWindow inherits Window {
                         width: parent.width;
                         height: parent.height;
                         property <length> pulled: self.swiping ? max(0px, self.current-position.y - self.pressed-position.y) : 0px;
-                        handle-swipe-down: Ui.touch && root.can-refresh && !root.np-open && root.at-top;
+                        // Decided when the finger goes down: only a touch that
+                        // starts with the list already at the top can pull.
+                        // Checked on every move instead, a scroll up the list
+                        // that reached the top was taken over partway through,
+                        // and the list stopped scrolling until the finger let go.
+                        property <bool> armed;
+                        property <bool> top: root.at-top;
+                        changed pressed-position => { self.armed = root.at-top; }
+                        changed top => { if !self.top { self.armed = false; } }
+                        handle-swipe-down: Ui.touch && root.can-refresh && !root.np-open && root.at-top && self.armed;
                         swiped => {
                             if self.current-position.y - self.pressed-position.y > 90px {
                                 root.pull-refresh();

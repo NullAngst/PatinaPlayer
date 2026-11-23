@@ -1,5 +1,11 @@
 # Changes
 
+2026.11.23 - Bug fix (pull to refresh taking over a scroll)
+
+* Scrolling up a list and reaching the top no longer turns into a pull to refresh partway through the same touch, which stopped the list from scrolling until the finger let go. Whether a touch can pull is decided when the finger goes down: only one that starts with the list already at the top. A pull, once started, still holds the touch until it's let go: Slint's swipe handling can't hand a gesture back to the list.
+
+Reasons for changes: bug report: a scroll up the list got grabbed by the refresh gesture at the top and wouldn't scroll again without letting go.
+
 2026.11.23 - Build and CI fixes (FreeBSD build, CI, Servers, workflows)
 
 * FreeBSD: FFmpeg's configure looked for gcc, which FreeBSD doesn't have. build-ffmpeg.sh takes CC now, and build-freebsd.sh sets it to cc (clang).
