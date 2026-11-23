@@ -181,13 +181,19 @@ pub struct State {
     /// The Plex sign-in as last shown.
     plex_shown: u64,
     /// Android's system bars as last set, in pixels.
+    /// The system bars as last sent to the window, and the scale they were
+    /// worked out at.
     insets: [i32; 4],
+    insets_scale: f32,
     /// A backup or an export on its way through the save dialog: a note,
     /// or an error.
     backup: Option<crossbeam_channel::Receiver<Result<Option<String>, String>>>,
     /// The Back being handled came from a swipe in from the left.
     back_from_left: Rc<std::cell::Cell<bool>>,
     toast_until: Option<Instant>,
+    /// The screen an Undo note was shown on: leaving it takes the note
+    /// down (Ctrl+Z still works while the offer stands).
+    toast_screen: Option<(Section, usize)>,
     /// Art each row and queue entry would show. Only the rows on screen,
     /// plus a margin, actually get theirs, so a 5000-track queue or a
     /// 2000-album grid doesn't load (and keep reloading) every cover.
@@ -474,9 +480,11 @@ impl State {
             dlg: Dlg::None,
             plex_shown: 0,
             insets: [0; 4],
+            insets_scale: 0.0,
             backup: None,
             back_from_left: Rc::default(),
             toast_until: None,
+            toast_screen: None,
             row_art: Vec::new(),
             queue_art: Vec::new(),
             row_shown: Vec::new(),
@@ -1966,6 +1974,7 @@ impl State {
             ui.set_toast(ss(msg));
             ui.set_toast_error(err);
             ui.set_toast_undo(undo);
+            self.toast_screen = undo.then(|| (self.b.section, self.b.depth()));
             self.toast_until = Some(
                 Instant::now()
                     + if undo {
@@ -1977,11 +1986,21 @@ impl State {
                     },
             );
         }
-        if self.toast_until.is_some_and(|t| Instant::now() > t) {
-            self.toast_until = None;
-            ui.set_toast(SharedString::new());
-            ui.set_toast_undo(false);
+        let left = self
+            .toast_screen
+            .is_some_and(|at| at != (self.b.section, self.b.depth()));
+        if left || self.toast_until.is_some_and(|t| Instant::now() > t) {
+            self.dismiss_toast(ui);
         }
+    }
+
+    /// Takes the note down now: a tap on it, or the screen it was about
+    /// left behind.
+    fn dismiss_toast(&mut self, ui: &AppWindow) {
+        self.toast_until = None;
+        self.toast_screen = None;
+        ui.set_toast(SharedString::new());
+        ui.set_toast_undo(false);
     }
 
     fn tick(&mut self, ui: &AppWindow) {
@@ -2724,14 +2743,19 @@ impl State {
         }
     }
 
-    /// Android's system bars, in the window's own units.
+    /// Android's system bars, in the window's own units. Worked out again
+    /// when the scale changes too: Android can send the bars before the
+    /// window has its real scale, and bars turned into window units at a
+    /// scale of 1 came out two to three times too tall, leaving a gap
+    /// under the status bar and over the navigation bar.
     fn sync_insets(&mut self, ui: &AppWindow) {
         let px = platform::insets();
-        if px == self.insets {
+        let scale = ui.window().scale_factor().max(0.1);
+        if px == self.insets && scale == self.insets_scale {
             return;
         }
         self.insets = px;
-        let scale = ui.window().scale_factor().max(0.1);
+        self.insets_scale = scale;
         let l = |v: i32| v as f32 / scale;
         ui.set_sys_left(l(px[0]));
         ui.set_sys_top(l(px[1]));
@@ -6029,6 +6053,7 @@ pub fn install(
     on!(on_hero_fav, |s, _u| s.b.toggle_favorite_level());
     on!(on_lyrics_clicked, |s, _u| s.toggle_lyrics());
     on!(on_info_close, |s, u| s.close_info(&u));
+    on!(on_toast_dismiss, |s, u| s.dismiss_toast(&u));
     on!(on_undo, |s, u| {
         u.set_toast_undo(false);
         s.b.undo();

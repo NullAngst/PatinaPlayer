@@ -813,6 +813,34 @@ component Wash inherits Rectangle {
     }
 }
 
+// The ground of a side panel that covers the view (a phone, a narrow
+// window). Beside the list on a wide window a panel can let the backdrop
+// through, but over the list that let the rows show through too, under
+// the lyrics. This is solid: the theme's ground, the cover backdrop drawn
+// again lined up with the window's own, then the panel's tint, so it
+// matches the rest of the screen without the list showing.
+component PanelGround inherits Rectangle {
+    in property <bool> wash;
+    in property <image> art;
+    in property <float> strength;
+    // The window's top left corner, from this panel's, and its size.
+    in property <length> win-x;
+    in property <length> win-y;
+    in property <length> win-w;
+    in property <length> win-h;
+    background: P.bg;
+    clip: true;
+    if root.wash: Wash {
+        x: root.win-x;
+        y: root.win-y;
+        width: root.win-w;
+        height: root.win-h;
+        art: root.art;
+        strength: root.strength;
+    }
+    Rectangle { background: P.panel; }
+}
+
 // What's playing, drawn over Now Playing's cover: 1 bars, 2 mirrored
 // bars, 3 oscilloscope, 4 a ring of rays. A dark veil under it keeps it
 // readable over any cover. The wave and the ring are path commands in a
@@ -1511,7 +1539,8 @@ component ListRow inherits Rectangle {
     callback sheet;
     // A modified click picks rows; it doesn't open one too.
     property <bool> mod-click;
-    property <bool> dragging;
+    // Read by the list, which lifts the dragged row over the others.
+    out property <bool> dragging;
     property <length> drag-dy;
     property <length> grip-y;
     // Held long enough to open the menu; the release then doesn't open
@@ -2385,7 +2414,8 @@ component QueueLine inherits Rectangle {
     callback drag-to(int);
     property <bool> long-fired;
     property <bool> mod-click;
-    property <bool> dragging;
+    // Read by the list, which lifts the dragged row over the others.
+    out property <bool> dragging;
     property <length> drag-dy;
     property <length> grip-y;
     property <length> press-x;
@@ -4218,8 +4248,9 @@ export component AppWindow inherits Window {
     // scrolls as one page, list and all.
     property <bool> page-scroll: (amp-panel || eq-panel) && (Ui.touch || tight);
     // The selection bar floats over the foot of the view. While it's up,
-    // the lists end two rows short of the bottom, so the last ones can be
-    // scrolled out from under it and still be tapped.
+    // the lists still run to the bottom, under it, but their last row (or
+    // the grid's end) carries this much room below it, so the last ones
+    // can be scrolled out from under the bar and still be tapped.
     property <length> sel-gap: (layout != 2 && (marked-count > 0 || marking)) || (layout == 2 && (queue-marked-count > 0 || queue-marking)) ? 80px : 0px;
     // Roughly the list's width, for the column header's choices.
     property <length> list-w: win-w - side-w - (side-count > 0 ? lyrics-w : 0px) - 2 * pad;
@@ -4596,6 +4627,8 @@ export component AppWindow inherits Window {
     // button in it (Ctrl+Z too).
     in property <bool> toast-undo;
     callback undo;
+    // A tap on the note takes it down.
+    callback toast-dismiss;
 
     // Dialogs: 0 none, 1 text form, 2 pick playlist, 3 confirm, 4 help,
     // 5 cover art found online
@@ -4882,7 +4915,6 @@ export component AppWindow inherits Window {
                             padding-left: root.pad;
                             padding-right: root.pad;
                             padding-top: root.hero.show ? (root.short ? 16px : 28px) : (root.short ? 12px : 20px);
-                            padding-bottom: root.sel-gap;
                             spacing: 0px;
 
                             if root.hero.show: Rectangle {
@@ -5143,7 +5175,15 @@ export component AppWindow inherits Window {
                                 // the top and they stayed gone.
                                 min-height: root.page-scroll ? max(180px, root.rows-height + 8px) : (root.short ? 80px : 180px);
                                 list := ListView {
-                                    for r[i] in root.layout == 0 ? root.rows : []: ListRow {
+                                    // Each row sits in a holder: the last one is
+                                    // taller by the selection bar's room, so the
+                                    // list runs under the bar to the bottom and
+                                    // its last row still scrolls clear of it.
+                                    for r[i] in root.layout == 0 ? root.rows : []: Rectangle {
+                                    height: lrow.height + (i == root.rows.length - 1 ? root.sel-gap : 0px);
+                                    z: lrow.dragging ? 10 : 0;
+                                    lrow := ListRow {
+                                        y: 0px;
                                         item: r;
                                         selected: i == root.selected;
                                         focused: keys.has-focus;
@@ -5160,6 +5200,7 @@ export component AppWindow inherits Window {
                                         mark(range) => { root.row-mark(i, range); keys.focus(); }
                                         drag-to(d) => { if d != 0 { root.row-drag(i, i + d); } keys.focus(); }
                                         sheet => { root.row-select(i); root.sheet-row(i); }
+                                    }
                                     }
                                 }
                                 if root.rows.length == 0 && root.loading: SkeletonRows {
@@ -5305,7 +5346,6 @@ export component AppWindow inherits Window {
                             padding-left: root.pad;
                             padding-right: root.pad;
                             padding-top: root.short ? 12px : 20px;
-                            padding-bottom: root.sel-gap;
                             HorizontalLayout {
                                 padding-bottom: root.tight ? 10px : 18px;
                                 spacing: 8px;
@@ -5337,7 +5377,13 @@ export component AppWindow inherits Window {
                             }
                             qlist := ListView {
                                 vertical-stretch: 1;
-                                for q[i] in root.queue: QueueLine {
+                                // In a holder, as the list's rows are: the
+                                // last one leaves room for the selection bar.
+                                for q[i] in root.queue: Rectangle {
+                                    height: qrow.height + (i == root.queue.length - 1 ? root.sel-gap : 0px);
+                                    z: qrow.dragging ? 10 : 0;
+                                qrow := QueueLine {
+                                    y: 0px;
                                     q: q;
                                     n: i + 1;
                                     selected: i == root.queue-sel;
@@ -5350,6 +5396,7 @@ export component AppWindow inherits Window {
                                     sheet => { root.queue-select(i); root.sheet-queue(i); }
                                     mark(range) => { root.queue-mark(i, range); keys.focus(); }
                                     drag-to(d) => { if d != 0 { root.queue-drag(i, i + d); } keys.focus(); }
+                                }
                                 }
                             }
                             if root.queue.length == 0: Text {
@@ -6336,7 +6383,16 @@ export component AppWindow inherits Window {
             y: 0;
             width: root.tiny ? keys.width : root.lyrics-w;
             height: root.tabs-h;
-            background: root.np-phone ? P.surface : P.panel;
+            background: root.np-phone ? P.surface : (root.tiny ? transparent : P.panel);
+            if root.tiny && !root.np-phone: PanelGround {
+                wash: root.wash-all;
+                art: root.np-blur;
+                strength: root.backdrop-strength;
+                win-x: -root.inset-left - parent.x;
+                win-y: -root.inset-top - parent.y;
+                win-w: root.width;
+                win-h: root.height;
+            }
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
             Rectangle { y: parent.height - 1px; height: 1px; background: P.border; }
@@ -6359,9 +6415,18 @@ export component AppWindow inherits Window {
             y: root.tabs-h;
             width: root.tiny ? keys.width : root.lyrics-w;
             height: keys.height - (root.np-phone ? 0px : root.bar-h) - root.tabs-h;
-            background: root.np-phone ? P.surface : P.panel;
+            background: root.np-phone ? P.surface : (root.tiny ? transparent : P.panel);
             // Nothing inside draws past the panel, however long the song.
             clip: true;
+            if root.tiny && !root.np-phone: PanelGround {
+                wash: root.wash-all;
+                art: root.np-blur;
+                strength: root.backdrop-strength;
+                win-x: -root.inset-left - parent.x;
+                win-y: -root.inset-top - parent.y;
+                win-w: root.width;
+                win-h: root.height;
+            }
             // Takes the clicks, so none reach the view under it.
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
@@ -6422,8 +6487,17 @@ export component AppWindow inherits Window {
             y: root.tabs-h;
             width: root.tiny ? keys.width : root.lyrics-w;
             height: keys.height - (root.np-phone ? 0px : root.bar-h) - root.tabs-h;
-            background: root.np-phone ? P.surface : P.panel;
+            background: root.np-phone ? P.surface : (root.tiny ? transparent : P.panel);
             clip: true;
+            if root.tiny && !root.np-phone: PanelGround {
+                wash: root.wash-all;
+                art: root.np-blur;
+                strength: root.backdrop-strength;
+                win-x: -root.inset-left - parent.x;
+                win-y: -root.inset-top - parent.y;
+                win-w: root.width;
+                win-h: root.height;
+            }
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
             VerticalLayout {
@@ -6491,7 +6565,17 @@ export component AppWindow inherits Window {
             y: root.tabs-h;
             width: root.tiny ? keys.width : root.lyrics-w;
             height: keys.height - (root.np-phone ? 0px : root.bar-h) - root.tabs-h;
-            background: root.np-phone ? P.surface : P.panel;
+            background: root.np-phone ? P.surface : (root.tiny ? transparent : P.panel);
+            clip: true;
+            if root.tiny && !root.np-phone: PanelGround {
+                wash: root.wash-all;
+                art: root.np-blur;
+                strength: root.backdrop-strength;
+                win-x: -root.inset-left - parent.x;
+                win-y: -root.inset-top - parent.y;
+                win-w: root.width;
+                win-h: root.height;
+            }
             TouchArea {}
             Rectangle { width: 1px; x: 0; background: P.border; }
             VerticalLayout {
@@ -6630,6 +6714,9 @@ export component AppWindow inherits Window {
             background: P.raised;
             drop-shadow-blur: 12px;
             drop-shadow-color: P.shadow;
+            // A tap anywhere on it but the button takes it down, so it
+            // doesn't sit over the foot of the list until it runs out.
+            TouchArea { clicked => { root.toast-dismiss(); keys.focus(); } }
             tt := Text {
                 x: 18px;
                 width: parent.width - 36px - parent.undo-w;
@@ -6639,6 +6726,9 @@ export component AppWindow inherits Window {
                 color: root.toast-error ? P.copper : P.text;
             }
             if root.toast-undo: Chip {
+                // Its own width: left unset, it took the note's whole
+                // width and sat 10px out past its left edge, over the text.
+                width: self.preferred-width;
                 x: parent.width - self.width - 10px;
                 y: (parent.height - self.height) / 2;
                 h: 30px;

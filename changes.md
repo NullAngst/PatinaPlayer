@@ -1,5 +1,14 @@
 # Changes
 
+2026.11.23 - Bug fixes (Android gap at the top, see-through lyrics, selection bar band, Undo note)
+
+* Android: no more gap under the status bar (or over the navigation bar). The bars' sizes from Android were turned into the window's units once and kept, and they can arrive before the window has its real scale, which made them two to three times too tall. They're worked out again whenever the scale changes.
+* Lyrics, Info and the Queue on a phone or a narrow window no longer let the list under them show through. With the cover backdrop on, the panel let both the backdrop and the list's rows through, so the lyrics sat on top of song titles. On a phone the panel is now solid, with the backdrop drawn into it lined up with the rest of the screen, so it still matches. Beside the list on a wide window it's as it was.
+* The selection bar floats over the list again instead of sitting on an empty band. The list used to stop two rows above the bottom while the bar was up, which left a strip of plain ground around the bar and cut the rows off at a hard line when scrolling. The list (and the queue) now runs to the bottom under the bar, and only its last row carries the extra room, so the last song still scrolls clear of the bar to be tapped.
+* The Undo note: the Undo button took the note's whole width and sat 10px out past its left edge, covering the note's text. It's its own size now, at the right. The note also goes away when you leave the screen it was about (Ctrl+Z still works until the offer runs out), and a tap on it takes it down at once.
+
+Reasons for changes: from a video of the Android app: a gap at the top of the screen, lyrics unreadable over the list with the cover backdrop on, the selection bar's band covering the list, and the Undo button hanging outside its note and staying over the bottom of the list on every screen.
+
 2026.11.18 - Bug fix (phone drawer closing on group headings)
 
 * On a phone, tapping a sidebar group heading (Listening, Sources, Play on) folded or opened the group and also closed the drawer. A heading now leaves the drawer open. Tapping a page in it still closes it, as before.
