@@ -190,7 +190,7 @@ impl ChannelRt {
             return;
         }
         let a = self.lp_a;
-        for f in buf.chunks_exact_mut(2) {
+        for f in buf.as_chunks_mut::<2>().0 {
             for (c, g) in self.cur.iter_mut().zip(self.goal) {
                 if *c < g {
                     *c = (*c + self.step).min(g);
@@ -240,7 +240,9 @@ mod tests {
 
     fn peak(b: &[f64], c: usize) -> f64 {
         b[b.len() / 2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .fold(0.0f64, |m, f| m.max(f[c].abs()))
     }
 
@@ -334,7 +336,9 @@ mod tests {
         rt.process(&mut b);
         // The left side fades over 15 ms rather than vanishing at once.
         let early = b[..40]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .fold(0.0f64, |m, f| m.max(f[0].abs()));
         assert!(early > 0.0);
         assert!(peak(&b, 0) < 1e-9);

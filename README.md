@@ -324,6 +324,8 @@ The Release workflow builds the AppImage, the APK and the FreeBSD tarball from a
 
 If it was run on a branch, or there's no release for the tag yet, it stops in the first few seconds and says which. Running it again on the same tag replaces the files on the release.
 
+To try the builds before making a release, run the Test build workflow instead: Actions, Test build, Run workflow, on whichever branch. It runs the same three builds with no release needed and publishes nothing; the files are on the run's page under Artifacts. Once it's green, make the release and its tag as above.
+
 THE APK HAS TO BE SIGNED WITH THE SAME KEY EVERY RELEASE, or Android refuses to install it over the old one and the app's data is lost to a reinstall. Put the keystore and its passwords in the repository's secrets once (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`). Until they're there, the APK build fails on purpose and the AppImage still ships.
 
 Every APK on a release has a signed SLSA build provenance attestation: a record, signed through Sigstore, that this workflow built it from that commit. They're listed on the repository's Attestations page, under the Actions tab's sidebar. This works as is for a public repository; a private one needs GitHub Enterprise Cloud for it.

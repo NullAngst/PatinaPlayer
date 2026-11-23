@@ -1,5 +1,16 @@
 # Changes
 
+2026.11.23 - Build and CI fixes (FreeBSD build, CI, Servers, workflows)
+
+* FreeBSD: FFmpeg's configure looked for gcc, which FreeBSD doesn't have. build-ffmpeg.sh takes CC now, and build-freebsd.sh sets it to cc (clang).
+* The FreeBSD job's setup and build steps stop at the first command that fails and print each command first, so the log shows which. A failed package install used to go unnoticed until the next step, which only said "ssh exited with code 1". rustup's installer is downloaded to a file before it runs, pkg updates its catalog first, and the setup prints the FreeBSD version, free disk and memory. The VM gets 12 GB of memory, and cargo builds two crates at a time, for the link with LTO. Dropped `usesh`, which vmactions no longer has.
+* CI: Rust 1.100's clippy flags `chunks_exact` with a constant size (use `as_chunks`) and two index loops. Fixed in the amp's oversampler, the channel tools, the limiter, the EQ and the tests.
+* Servers: the newest Gonic image won't start without its playlists, podcasts and cache folders; they're mounted now. Ampache's image installs itself from environment variables (its database and the admin account) instead of the command-line installer, which now wants a config file before it runs; the catalog is added and scanned once it's up.
+* Every GitHub action moved to its newest major, all on Node 24: checkout v7, cache v6, upload-artifact v7, download-artifact v8, setup-java v6. That ends the Node 20 deprecation warnings.
+* The three builds moved to build.yml, a reusable workflow. Release runs it on a tag and attaches the files, as before. Test build (new) runs it on any branch with no release, so a change can be built and checked before a release and tag are made. The release still ships whatever built if one of the three fails.
+
+Reasons for changes: the first FreeBSD release run failed, CI and Servers had been failing on main, every run warned about Node 20, and a broken build meant deleting and remaking the release to try again.
+
 2026.11.23 - UX overhaul, bug fixes, FreeBSD build
 
 * Letter scrubber down the right edge of long A to Z lists, on every platform: press or drag for a letter, the list jumps there, the letter shows big beside the finger. It works out from the rows which column the list is sorted by, and stays away from lists in other orders.

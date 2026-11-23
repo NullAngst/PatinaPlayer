@@ -105,8 +105,8 @@ impl EqRt {
         for b in 0..n {
             self.goal[b] = Coeffs::design(&p.bands[b], self.rate);
         }
-        for b in n..MAX_BANDS {
-            self.goal[b] = Coeffs::IDENTITY;
+        for g in &mut self.goal[n..MAX_BANDS] {
+            *g = Coeffs::IDENTITY;
         }
         // Bands joining start flat and glide in, from clean memory.
         for b in self.n..n {
@@ -349,8 +349,10 @@ mod tests {
         // Largest sample-to-sample jump. A 100 Hz sine at up to 4x
         // amplitude moves at most about 0.013 per sample at 48 kHz.
         let jump = b
-            .chunks_exact(2)
-            .zip(b.chunks_exact(2).skip(1))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<2>().0.iter().skip(1))
             .map(|(a, c)| (c[0] - a[0]).abs())
             .fold(0.0f64, f64::max);
         assert!(jump < 0.03, "step of {jump}");

@@ -1,11 +1,12 @@
 name: Release
 
 # Builds the AppImage, the Android APK and the FreeBSD tarball from a tag
-# and attaches them to
-# that tag's release, which has to exist already. Nothing here runs on a
-# push: make the release and its tag on the Releases page first, then run
-# this from Actions, Run workflow, with that tag picked under "Use workflow
-# from". Pushes to main and pull requests only run CI and Servers.
+# and attaches them to that tag's release, which has to exist already.
+# Nothing here runs on a push: make the release and its tag on the Releases
+# page first, then run this from Actions, Run workflow, with that tag picked
+# under "Use workflow from". Pushes to main and pull requests only run CI
+# and Servers. To try the builds without a release, run Test build instead,
+# on any branch.
 on:
   workflow_dispatch:
 
@@ -23,7 +24,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$GITHUB_REF_TYPE" != "tag" ]; then
-            echo "::error::This was run on the branch '$GITHUB_REF_NAME', not a tag. Make the release and its tag on the Releases page, then run this workflow again and pick that tag under 'Use workflow from'."
+            echo "::error::This was run on the branch '$GITHUB_REF_NAME', not a tag. Make the release and its tag on the Releases page, then run this workflow again and pick that tag under 'Use workflow from'. To try the builds without a release, run Test build."
             exit 1
           fi
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -32,229 +33,46 @@ jobs:
           fi
           echo "Building $GITHUB_REF_NAME for its release."
 
-  appimage:
+  build:
     needs: preflight
-    # The AppImage needs a glibc at least as new as the runner's (2.39):
-    # Ubuntu 24.04, Fedora 40, Debian 13 or newer.
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # git describe needs the tags
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ github.ref_name }}
+      release: true
+    secrets: inherit
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config clang nasm file desktop-file-utils \
-            libgnutls28-dev zlib1g-dev \
-            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev \
-            libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype-dev \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
-
-      - name: Install Rust (latest stable)
-        run: |
-          rustup update stable
-          rustup default stable
-
-      # No pinned versions: newest compatible crates on every run.
-      - name: Refresh lockfile
-        run: cargo update
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target/appimage-build"
-
-      # The static FFmpeg only rebuilds when its branch moves or the build
-      # script changes.
-      - name: FFmpeg cache key
-        id: ffkey
-        run: |
-          branch="release/$(awk '/^name = "ffmpeg-sys-next"/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock | cut -d. -f1,2)"
-          head="$(git ls-remote https://github.com/FFmpeg/FFmpeg "refs/heads/$branch" | cut -c1-12)"
-          echo "key=ffmpeg-${head:-latest}-${{ hashFiles('packaging/build-ffmpeg.sh') }}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@v4
-        id: ffcache
-        with:
-          path: target/ffmpeg-static
-          key: ${{ steps.ffkey.outputs.key }}
-
-      - name: Build AppImage
-        env:
-          SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
-          VERSION: ${{ github.ref_name }}
-          UPDATE_INFORMATION: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|PatinaPlayer-*x86_64.AppImage.zsync
-          # The built-in Last.fm key and secret, from the repository's
-          # secrets (Settings, Secrets and variables, Actions). Without
-          # them the AppImage builds fine and people set their own.
-          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
-          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
-        run: bash packaging/build-appimage.sh
-
-      - name: Smoke test
-        run: |
-          app="$(ls target/appimage/PatinaPlayer-*-x86_64.AppImage)"
-          chmod +x "$app"
-          APPIMAGE_EXTRACT_AND_RUN=1 "$app" --version
-          APPIMAGE_EXTRACT_AND_RUN=1 "$app" --tui --version
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PatinaPlayer-AppImage
-          path: |
-            target/appimage/PatinaPlayer-*.AppImage
-            target/appimage/PatinaPlayer-*.AppImage.zsync
-
-  android:
-    needs: preflight
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # The runner has the Android SDK (build-tools, platforms) and NDK
-      # already; build-apk.sh takes the newest of each it finds.
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Install Rust (latest stable) and the Android target
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup target add aarch64-linux-android
-
-      - name: Refresh lockfile
-        run: cargo update
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: android
-
-      # FFmpeg and Mbed TLS only rebuild when one of them, the NDK or the
-      # build script changes.
-      - name: FFmpeg cache key
-        id: ffkey
-        run: |
-          branch="release/$(awk '/^name = "ffmpeg-sys-next"/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock | cut -d. -f1,2)"
-          head="$(git ls-remote https://github.com/FFmpeg/FFmpeg "refs/heads/$branch" | cut -c1-12)"
-          tls="$(git ls-remote --tags --refs https://github.com/Mbed-TLS/mbedtls 'mbedtls-3.*' | sed 's#.*refs/tags/##' | grep -E '^mbedtls-3\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
-          ndk="$(basename "$ANDROID_NDK_LATEST_HOME")"
-          echo "key=ffmpeg-android-${head:-latest}-${tls}-ndk${ndk}-${{ hashFiles('packaging/build-ffmpeg-android.sh') }}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@v4
-        id: ffcache
-        with:
-          path: target/ffmpeg-android
-          key: ${{ steps.ffkey.outputs.key }}
-
-      # The release key, from the repository's secrets. See the signing
-      # guide for making it. The build fails without it, so a release never
-      # ships an APK that can't update the last one.
-      - name: Release key
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-            echo "ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
-          else
-            echo "::warning::ANDROID_KEYSTORE_BASE64 isn't set; this build gets a throwaway debug key"
-          fi
-
-      - name: Build APK
-        env:
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_LATEST_HOME }}
-          SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
-          VERSION: ${{ github.ref_name }}
-          REQUIRE_RELEASE_KEY: "1"
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
-          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
-        run: bash packaging/build-apk.sh
-
-      - name: Remove the keystore
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PatinaPlayer-Android
-          path: target/apk/PatinaPlayer-*.apk
-
-  # FreeBSD has no GitHub runner of its own: this builds in a FreeBSD VM on
-  # the Linux runner (vmactions/freebsd-vm, its default FreeBSD release),
-  # and the tarball comes back out with the checkout.
-  freebsd:
-    needs: preflight
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Build in FreeBSD
-        uses: vmactions/freebsd-vm@v1
-        env:
-          VERSION: ${{ github.ref_name }}
-          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
-          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
-        with:
-          envs: "VERSION PATINA_LASTFM_KEY PATINA_LASTFM_SECRET"
-          usesh: true
-          prepare: |
-            pkg install -y bash curl git gmake pkgconf nasm gnutls llvm \
-              pipewire alsa-lib libxkbcommon wayland fontconfig freetype2 \
-              libX11 libXcursor libXrandr libXi mesa-libs
-            # Latest stable Rust, as the other builds use, rather than
-            # whichever the package tree has.
-            curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          run: |
-            . "$HOME/.cargo/env"
-            # No pinned versions: newest compatible crates on every run.
-            cargo update
-            bash packaging/build-freebsd.sh
-            ./target/freebsd-build/release/patinaplayer --version
-            ./target/freebsd-build/release/patinaplayer-tui --version
-            # Only the tarball has to come back out of the VM.
-            rm -rf target/freebsd-build target/ffmpeg-src target/ffmpeg-static
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PatinaPlayer-FreeBSD
-          path: target/freebsd/PatinaPlayer-*.tar.gz
-
-  # Attaches the builds to the tag's existing release, once all are done,
-  # so the jobs never race. If one build fails, the others still ship.
-  # --clobber lets a rerun on the same tag replace the files.
+  # Attaches what was built to the tag's existing release, once every build
+  # is done, so they never race. If one build fails, the others still ship
+  # (and the run shows red for the one that didn't). --clobber lets a rerun
+  # on the same tag replace the files.
   publish:
-    needs: [appimage, android, freebsd]
-    if: >-
-      !cancelled() &&
-      (needs.appimage.result == 'success' || needs.android.result == 'success' ||
-       needs.freebsd.result == 'success')
+    needs: [preflight, build]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: PatinaPlayer-*
           path: dist
           merge-multiple: true
 
+      - name: See what was built
+        id: built
+        run: |
+          ls -l dist || true
+          if ls dist/PatinaPlayer-*.apk >/dev/null 2>&1; then
+            echo "apk=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Signed SLSA build provenance for the APK: who built it, from which
       # commit and workflow. Signed through Sigstore with this run's OIDC
       # identity and listed on the repository's Attestations page.
       - name: Attest the APK
-        if: needs.android.result == 'success'
+        if: steps.built.outputs.apk == 'true'
         uses: actions/attest@v4
         with:
           subject-path: dist/PatinaPlayer-*.apk

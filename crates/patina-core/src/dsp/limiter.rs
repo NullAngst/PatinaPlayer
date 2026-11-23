@@ -152,8 +152,7 @@ impl Limiter {
         let cap = &mut self.cap[..frames];
         cap.fill(1.0);
         if any {
-            for j in 0..scan {
-                let g = self.need[j];
+            for (j, &g) in self.need.iter().enumerate().take(scan) {
                 if g >= 1.0 {
                     continue;
                 }

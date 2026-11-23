@@ -491,7 +491,9 @@ fn peak_ch(buf: &[f64], c: usize, from_s: f64, to_s: f64) -> f64 {
     let a = (from_s * RATE as f64) as usize;
     let b = ((to_s * RATE as f64) as usize).min(buf.len() / 2);
     buf[a * 2..b * 2]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .fold(0.0f64, |m, f| m.max(f[c].abs()))
 }
 

@@ -20,7 +20,7 @@ jobs:
   servers:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -67,8 +67,14 @@ jobs:
           docker run -d --name navidrome -p 4533:4533 \
             -v "$PWD/music:/music:ro" -e ND_LOGLEVEL=info \
             deluan/navidrome:latest
+          # Gonic won't start without its playlists, podcasts and cache
+          # folders there to write to.
+          mkdir -p gonic/playlists gonic/podcasts gonic/cache gonic/data
           docker run -d --name gonic -p 4747:80 \
-            -v "$PWD/music:/music:ro" -e GONIC_SCAN_AT_START_ENABLED=true \
+            -v "$PWD/music:/music:ro" \
+            -v "$PWD/gonic/playlists:/playlists" -v "$PWD/gonic/podcasts:/podcasts" \
+            -v "$PWD/gonic/cache:/cache" -v "$PWD/gonic/data:/data" \
+            -e GONIC_SCAN_AT_START_ENABLED=true \
             sentriz/gonic:latest
 
       - name: Set up Navidrome
@@ -175,7 +181,7 @@ jobs:
     runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -213,16 +219,25 @@ jobs:
 
       - name: Start and set up Ampache
         run: |
-          docker run -d --name ampache -p 8080:80 -v "$PWD/music:/media:ro" ampache/ampache:latest
-          for i in $(seq 90); do curl -fs http://localhost:8080/ >/dev/null && break; sleep 2; done
-          # The image's own database, then Ampache's command-line installer.
-          docker exec ampache sh -c 'php /var/www/bin/installer install \
-            --dbhost localhost --dbname ampache --dbuser root --dbpassword "" \
-            --webpath "" --force --createconfig --createdb' || true
-          docker exec ampache sh -c 'php /var/www/bin/cli admin:addUser admin -p patina-pw -l 100' || true
-          docker exec ampache sh -c 'php /var/www/bin/cli run:addCatalog Music /media' || true
-          docker exec ampache sh -c 'php /var/www/bin/cli run:updateCatalog -a' || true
-          curl -fsS "http://localhost:8080/server/json.server.php?action=ping" || true
+          # The image installs itself from these on its first start: its
+          # own MariaDB, the database, and the admin account the test logs
+          # in as. Its old command-line installer needs a config file first.
+          docker run -d --name ampache -p 8080:80 -v "$PWD/music:/media:ro" \
+            -e DB_NAME=ampache -e DB_HOST=localhost \
+            -e MYSQL_USER=admin -e MYSQL_PASS=patina-db \
+            -e AMPACHE_ADMIN_USER=admin -e AMPACHE_ADMIN_EMAIL=admin@example.com \
+            -e AMPACHE_ADMIN_PASSWORD=patina-pw \
+            ampache/ampache:latest
+          for i in $(seq 120); do
+            docker exec ampache test -f /var/www/config/ampache.cfg.php \
+              && curl -fs "http://localhost:8080/server/json.server.php?action=ping" >/dev/null \
+              && break
+            sleep 2
+          done
+          docker exec ampache test -f /var/www/config/ampache.cfg.php
+          docker exec -u www-data ampache php /var/www/bin/cli run:addCatalog Music /media
+          docker exec -u www-data ampache php /var/www/bin/cli run:updateCatalog -a -t -s
+          curl -fsS "http://localhost:8080/server/json.server.php?action=ping"
 
       - name: Ampache
         env:

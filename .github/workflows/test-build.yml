@@ -1,0 +1,20 @@
+name: Test build
+
+# The same three builds as Release (the AppImage, the APK and the FreeBSD
+# tarball), from any branch or tag, with no release needed and nothing
+# published. The files land on the run's summary page as artifacts. Run it
+# from Actions, Run workflow, on the branch to try, before making a release.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      # A branch name can hold a "/", which a file name can't.
+      version: test-${{ github.run_number }}
+      release: false
+    secrets: inherit

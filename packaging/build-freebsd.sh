@@ -48,7 +48,8 @@ OUT="$ROOT/target/freebsd"
 
 # 1. FFmpeg. FreeBSD's make isn't GNU make, which FFmpeg needs.
 if [ "${SKIP_FFMPEG:-}" != 1 ] || [ ! -f "$FFMPEG/lib/libavcodec.a" ]; then
-    MAKE=gmake JOBS="${JOBS:-$(sysctl -n hw.ncpu)}" bash "$ROOT/packaging/build-ffmpeg.sh" "$FFMPEG"
+    # And its compiler is cc (clang), not the gcc FFmpeg looks for.
+    CC="${CC:-cc}" MAKE=gmake JOBS="${JOBS:-$(sysctl -n hw.ncpu)}" bash "$ROOT/packaging/build-ffmpeg.sh" "$FFMPEG"
 fi
 
 # 2. pipewire-sys, patched, as a [patch] for this build only. While it

@@ -639,8 +639,10 @@ mod tests {
         // No sample-to-sample step bigger than the tone and the devices'
         // own harmonics make.
         let jump = x
-            .chunks_exact(2)
-            .zip(x.chunks_exact(2).skip(1))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(x.as_chunks::<2>().0.iter().skip(1))
             .skip(rate as usize / 20)
             .map(|(p, q)| (q[0] - p[0]).abs())
             .fold(0.0f64, f64::max);
@@ -654,8 +656,10 @@ mod tests {
 
     fn first_jump(x: &[f64], units: &[Unit], rate: u32) -> f64 {
         let y = run(&stack(units), x, rate);
-        y.chunks_exact(2)
-            .zip(y.chunks_exact(2).skip(1))
+        y.as_chunks::<2>()
+            .0
+            .iter()
+            .zip(y.as_chunks::<2>().0.iter().skip(1))
             .skip(rate as usize / 20)
             .map(|(p, q)| (q[0] - p[0]).abs())
             .fold(0.0f64, f64::max)

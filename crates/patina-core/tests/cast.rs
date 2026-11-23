@@ -85,7 +85,9 @@ fn a_song_plays_on_a_snapserver_at_48k_and_comes_back_after() {
     // A 440 Hz tone at 48 kHz crosses zero about 880 times a second; at
     // 44.1 kHz read as 48 kHz it would be about 958.
     let left: Vec<i16> = got
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|f| i16::from_le_bytes([f[0], f[1]]))
         .collect();
     let loud = left.iter().filter(|s| s.unsigned_abs() > 1000).count();

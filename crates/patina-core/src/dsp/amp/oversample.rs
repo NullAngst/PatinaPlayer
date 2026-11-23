@@ -38,10 +38,9 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
     let mut s = [0.0f64; 4];
-    let ca = a.chunks_exact(4);
-    let cb = b.chunks_exact(4);
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    let (ca, ra) = a.as_chunks::<4>();
+    let (cb, rb) = b.as_chunks::<4>();
+    for (x, y) in ca.iter().zip(cb) {
         s[0] += x[0] * y[0];
         s[1] += x[1] * y[1];
         s[2] += x[2] * y[2];

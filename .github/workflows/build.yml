@@ -1,0 +1,237 @@
+name: Build
+
+# The three builds: the AppImage, the Android APK and the FreeBSD tarball,
+# each uploaded as an artifact of the run. Nothing here publishes anything.
+# Release (appimage.yml) runs this on a tag and attaches the files to that
+# tag's release; Test build (test-build.yml) runs it on any branch, to see
+# that everything builds before a release is made.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version in the file names"
+        type: string
+        required: true
+      release:
+        description: "A release build: the APK must be signed with the release key"
+        type: boolean
+        default: false
+
+jobs:
+  appimage:
+    # The AppImage needs a glibc at least as new as the runner's (2.39):
+    # Ubuntu 24.04, Fedora 40, Debian 13 or newer.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # git describe needs the tags
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang nasm file desktop-file-utils \
+            libgnutls28-dev zlib1g-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libasound2-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      - name: Install Rust (latest stable)
+        run: |
+          rustup update stable
+          rustup default stable
+
+      # No pinned versions: newest compatible crates on every run.
+      - name: Refresh lockfile
+        run: cargo update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/appimage-build"
+
+      # The static FFmpeg only rebuilds when its branch moves or the build
+      # script changes.
+      - name: FFmpeg cache key
+        id: ffkey
+        run: |
+          branch="release/$(awk '/^name = "ffmpeg-sys-next"/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock | cut -d. -f1,2)"
+          head="$(git ls-remote https://github.com/FFmpeg/FFmpeg "refs/heads/$branch" | cut -c1-12)"
+          echo "key=ffmpeg-${head:-latest}-${{ hashFiles('packaging/build-ffmpeg.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        id: ffcache
+        with:
+          path: target/ffmpeg-static
+          key: ${{ steps.ffkey.outputs.key }}
+
+      - name: Build AppImage
+        env:
+          SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
+          VERSION: ${{ inputs.version }}
+          UPDATE_INFORMATION: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|PatinaPlayer-*x86_64.AppImage.zsync
+          # The built-in Last.fm key and secret, from the repository's
+          # secrets (Settings, Secrets and variables, Actions). Without
+          # them the AppImage builds fine and people set their own.
+          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
+          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
+        run: bash packaging/build-appimage.sh
+
+      - name: Smoke test
+        run: |
+          app="$(ls target/appimage/PatinaPlayer-*-x86_64.AppImage)"
+          chmod +x "$app"
+          APPIMAGE_EXTRACT_AND_RUN=1 "$app" --version
+          APPIMAGE_EXTRACT_AND_RUN=1 "$app" --tui --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: PatinaPlayer-AppImage
+          path: |
+            target/appimage/PatinaPlayer-*.AppImage
+            target/appimage/PatinaPlayer-*.AppImage.zsync
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The runner has the Android SDK (build-tools, platforms) and NDK
+      # already; build-apk.sh takes the newest of each it finds.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Rust (latest stable) and the Android target
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-linux-android
+
+      - name: Refresh lockfile
+        run: cargo update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      # FFmpeg and Mbed TLS only rebuild when one of them, the NDK or the
+      # build script changes.
+      - name: FFmpeg cache key
+        id: ffkey
+        run: |
+          branch="release/$(awk '/^name = "ffmpeg-sys-next"/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock | cut -d. -f1,2)"
+          head="$(git ls-remote https://github.com/FFmpeg/FFmpeg "refs/heads/$branch" | cut -c1-12)"
+          tls="$(git ls-remote --tags --refs https://github.com/Mbed-TLS/mbedtls 'mbedtls-3.*' | sed 's#.*refs/tags/##' | grep -E '^mbedtls-3\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          ndk="$(basename "$ANDROID_NDK_LATEST_HOME")"
+          echo "key=ffmpeg-android-${head:-latest}-${tls}-ndk${ndk}-${{ hashFiles('packaging/build-ffmpeg-android.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        id: ffcache
+        with:
+          path: target/ffmpeg-android
+          key: ${{ steps.ffkey.outputs.key }}
+
+      # The release key, from the repository's secrets. See the signing
+      # guide for making it. The build fails without it, so a release never
+      # ships an APK that can't update the last one.
+      - name: Release key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 isn't set; this build gets a throwaway debug key"
+          fi
+
+      - name: Build APK
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          SKIP_FFMPEG: ${{ steps.ffcache.outputs.cache-hit == 'true' && '1' || '' }}
+          VERSION: ${{ inputs.version }}
+          REQUIRE_RELEASE_KEY: ${{ inputs.release && '1' || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
+          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
+        run: bash packaging/build-apk.sh
+
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: PatinaPlayer-Android
+          path: target/apk/PatinaPlayer-*.apk
+
+  # FreeBSD has no GitHub runner of its own: this builds in a FreeBSD VM on
+  # the Linux runner (vmactions/freebsd-vm, its default FreeBSD release),
+  # and the tarball comes back out with the checkout. prepare and run go
+  # through sh in the VM, in the same folder as the checkout.
+  freebsd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        env:
+          VERSION: ${{ inputs.version }}
+          PATINA_LASTFM_KEY: ${{ secrets.LASTFM_KEY }}
+          PATINA_LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
+          # Two at a time: the release link with LTO needs several GB each.
+          CARGO_BUILD_JOBS: "2"
+        with:
+          envs: "VERSION PATINA_LASTFM_KEY PATINA_LASTFM_SECRET CARGO_BUILD_JOBS"
+          # The runner has 16 GB; the VM's default of 6 GB is short for
+          # linking the window with LTO.
+          mem: 12288
+          # set -ex: stop at the first command that fails, and print each
+          # one first, so the log shows which. Without it a failed pkg
+          # install went unnoticed (curl never arrived, so rustup's
+          # installer piped nothing into sh, which counts as success) and
+          # the job only failed later, at Rust not being there.
+          prepare: |
+            set -ex
+            freebsd-version
+            df -h .
+            sysctl hw.ncpu hw.physmem
+            # Answer pkg's own questions (bootstrapping it, if the image
+            # didn't) without a prompt.
+            export ASSUME_ALWAYS_YES=yes
+            pkg update -f
+            pkg install -y bash curl git gmake pkgconf nasm gnutls llvm \
+              pipewire alsa-lib libxkbcommon wayland fontconfig freetype2 \
+              libX11 libXcursor libXrandr libXi mesa-libs
+            # Latest stable Rust, as the other builds use, rather than
+            # whichever the package tree has. Downloaded first, so a failed
+            # download stops here instead of running an empty script.
+            curl --proto '=https' -sSf -o /tmp/rustup.sh https://sh.rustup.rs
+            sh /tmp/rustup.sh -y --profile minimal
+            . "$HOME/.cargo/env"
+            rustc --version
+          run: |
+            set -ex
+            . "$HOME/.cargo/env"
+            # No pinned versions: newest compatible crates on every run.
+            cargo update
+            bash packaging/build-freebsd.sh
+            ./target/freebsd-build/release/patinaplayer --version
+            ./target/freebsd-build/release/patinaplayer-tui --version
+            # Only the tarball has to come back out of the VM.
+            rm -rf target/freebsd-build target/ffmpeg-src target/ffmpeg-static
+            df -h .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: PatinaPlayer-FreeBSD
+          path: target/freebsd/PatinaPlayer-*.tar.gz

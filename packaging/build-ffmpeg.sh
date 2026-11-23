@@ -21,6 +21,12 @@ SRC="${FFMPEG_SRC:-$ROOT/target/ffmpeg-src}"
 JOBS="${JOBS:-$(nproc)}"
 # FFmpeg needs GNU make: gmake on FreeBSD.
 MAKE="${MAKE:-make}"
+# FFmpeg's configure asks for gcc unless told otherwise. FreeBSD's compiler
+# is cc (clang), and there's no gcc: CC=cc picks it.
+cc_args=()
+if [ -n "${CC:-}" ]; then
+    cc_args=(--cc="$CC")
+fi
 
 # release/MAJOR.MINOR of the bindings, if FFmpeg has that branch; otherwise
 # the newest release branch there is.
@@ -55,6 +61,7 @@ fi
 
 ./configure \
     --prefix="$PREFIX" \
+    "${cc_args[@]}" \
     --enable-static --disable-shared --enable-pic \
     --disable-programs --disable-doc --disable-debug \
     --disable-autodetect --enable-zlib --enable-gnutls \
