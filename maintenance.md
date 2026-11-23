@@ -29,7 +29,7 @@ Actions, Servers, Run workflow. It runs the clients against real Navidrome, Goni
 
 You don't need to release to check it. The parts that drift are the actions it uses:
 
-- `actions/checkout`, `actions/cache`, `actions/upload-artifact`, `actions/download-artifact`, `actions/setup-java`, `actions/attest` and `Swatinem/rust-cache` are all on major-version tags, so they get fixes on their own. When GitHub announces a new major (a deprecation warning shows on the run's summary page), bump the number in `.github/workflows/*.yml`.
+- `actions/checkout`, `actions/cache`, `actions/upload-artifact`, `actions/download-artifact`, `actions/setup-java`, `actions/attest`, `vmactions/freebsd-vm` and `Swatinem/rust-cache` are all on major-version tags, so they get fixes on their own. When GitHub announces a new major (a deprecation warning shows on the run's summary page), bump the number in `.github/workflows/*.yml`.
 - The APK attestation needs `id-token: write` and `attestations: write` on the publish job. If GitHub changes what it asks for, the Attest the APK step says so.
 - Check the release key secrets are still there (Settings, Secrets and variables, Actions): `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. KEEP A COPY OF THE KEYSTORE OUTSIDE GITHUB. Lose it and every phone has to uninstall to get the next version.
 
@@ -61,7 +61,7 @@ The Java code is built without Gradle by `packaging/build-apk.sh`, against the n
 ## 5.7. Looks
 
 1. Turn on the cover backdrop, Everywhere, and play an album with a near-white cover on a dark theme, then one with a near-black cover on Light. Muted text (the search placeholder, artist names in lists) should stay readable on both. The veil is `wash_veil` in `crates/patina-gui/src/bridge.rs`; its thresholds are the two numbers to nudge.
-2. Click the cover on Now Playing through every visualizer style while a song plays, then pause: the bars should fall away. A Slint update that changes how `Path` takes its `commands` would show up here first.
+2. Click the cover on Now Playing through every visualizer style while a song plays, then pause: the bars should fall away. A Slint update that changes how `Path` takes its `commands` would show up here first. Then set `buffer_ms` to 500 (Settings, Output) and watch it again: it should move as smoothly as at 50. If it jumps a few times a second, the renderer's blocks aren't being spread out: check `Scope::clock` and `Analyzer::heard` (`crates/patina-core/src/audio/scope.rs`, `visual.rs`), and that `scope::LEN` still holds two of the biggest blocks.
 3. Turn on Minimal UX and check the bottom bar and Now Playing have no badges, format or sound chain, and that the output button still opens the device list.
 
 ## 5.8. Smart playlist editor and Snapcast setup
@@ -125,6 +125,23 @@ Slint's Android backend panics on a mouse wheel (`MotionAction::Scroll => todo!(
 4. The terminal app's palette is `crates/patina-tui/src/palette.rs`. A new key binding should get a line there too, or the palette falls behind the keys. `cargo test -p patina-tui palette` checks the matching.
 5. Settings search matches the label, the help line and the group name (`model.rs`, the `filter` words). A setting nobody can find usually needs a better help line.
 6. Sidebar folding: with a fresh config and a library folder set, Sources and Play on should start folded; click them open, restart, and they should stay open.
+
+## 5.15. Phone controls, lists and the scrubber
+
+1. Android volume: with a song playing, press the phone's volume buttons. The slider on Now Playing should follow within a quarter of a second, and moving the slider should move the phone's own volume panel's level. The app's own volume should stay at 100% (`volume` in the session). It's `system_volume` and `set_volume` in `bridge.rs`, and `musicVolume`, `setMusicVolume` in `Native.java`. Casting and bit-perfect keep the app's own volume, on purpose.
+2. Haptics: long press a row, pick rows, drag on the scrubber. Each should buzz lightly, and nothing at all with Android's touch feedback turned off (the buzz goes through `View.performHapticFeedback`, which follows that setting). If a newer Android drops one of the `HapticFeedbackConstants`, change it in `Native.haptic`.
+3. Bluetooth: play a song, connect and disconnect a Bluetooth headset. The song should pause where it was each time, and Play should carry on from there. That's `output_lost` in `crates/patina-core/src/player.rs`; `cargo test -p patina-core --test player a_lost_output` checks it with a failing output.
+4. The letter scrubber shows on Artists, Albums and Songs with more than 40 rows, sorted A to Z. Sort Albums by year: it should go away. It reads the column the list is sorted by from the rows themselves (`scrub_index` in `bridge.rs`), assuming SQLite's NOCASE order: digits and marks first, then a to z, then everything past ASCII. If the library ever sorts by another collation (one that ignores "The", say), `scrub_bucket` has to follow it.
+5. Glyphs: Android has no fallback fonts for Slint, so a character none of the bundled fonts has comes out as an empty box there, though the desktop finds it in a system font. After adding one to `app.slint`, check it's in the fonts the text uses (`pip install fonttools`, then `TTFont(path).getBestCmap()` has its code point), or draw it as an icon path, as the row glyphs for Hearted songs and smart playlists are now.
+6. Going back to a view should land where it was scrolled to (`scroll_mem` in `bridge.rs`, keyed by the level). After a Slint update, check the ListView still takes `content-y` set from code when its rows have just changed.
+7. Synced lyrics, centered: the playing line should sit in the middle of the panel and the view slide smoothly from line to line. The panel finds the line by its `y` (`lyr-mid` in `app.slint`); if a Slint update stops `changed y` firing for a line in a layout, the lyrics stop scrolling.
+
+## 5.16. The FreeBSD build
+
+1. On each release, check the FreeBSD job's log. `vmactions/freebsd-vm@v1` runs whichever FreeBSD release it defaults to, so a new FreeBSD comes in by itself. If a package was renamed (`pkg install` fails), fix its name in `.github/workflows/appimage.yml`, in `packaging/build-freebsd.sh` and in the README.
+2. The `pipewire-sys` patch: the log says "Patched pipewire-sys <version> for FreeBSD". If it says the patch no longer applies, redo it: download the crate (`curl -LO https://static.crates.io/crates/pipewire-sys/pipewire-sys-<version>.crate`, then `tar xzf` it), copy `build.rs` and `src/lib.rs` to `a/` and `b/`, make the same two changes in `b/` (allowlist `pipewire_init` and `pipewire_deinit` in `build.rs`, and the `#[cfg(target_os = "freebsd")] pub use` aliasing them to `pw_init` and `pw_deinit` in `lib.rs`), and write the patch with `diff -U2`, both files into `packaging/pipewire-sys-freebsd.patch`, with the dates taken off the `---` and `+++` lines.
+3. If the log says pipewire-sys handles FreeBSD itself, the fix went upstream: delete `packaging/pipewire-sys-freebsd.patch`, `packaging/patch-pipewire-freebsd.sh` and the block in `build-freebsd.sh` that calls it, and the paragraph about it in the README. The same goes if FreeBSD's PipeWire port stops renaming `pw_init` (check `multimedia/pipewire/files/` in the ports tree for the `patch-src_pipewire_pipewire_init` file).
+4. Every couple of months, see whether anything else in the build has gone Linux-only: `cargo check` in the FreeBSD job fails first. The usual suspects are new dependencies with `/proc` or `inotify` assumptions.
 
 ## 6. ListenBrainz and Last.fm
 

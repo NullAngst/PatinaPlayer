@@ -5,12 +5,20 @@
 //! Both are leveled for looks, not measured: the bars on a fixed dB range,
 //! the wave by its recent peak, so a quiet passage at low volume still
 //! moves.
+//!
+//! Each frame reads the samples being heard at that moment, worked out
+//! from when the renderer's blocks came, rather than the newest ones: the
+//! renderer writes a whole output buffer at once, and with a big
+//! `buffer_ms` the newest samples only changed a few times a second, which
+//! made the picture jump. How fast the bars fall goes by time too, so it
+//! looks the same at any frame rate.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use realfft::{RealFftPlanner, RealToComplex};
 
-use crate::audio::scope::Scope;
+use crate::audio::scope::{self, Scope};
 
 /// FFT size: about 43 ms at 48 kHz, fine enough for the low bars.
 const N: usize = 2048;
@@ -41,7 +49,16 @@ pub struct Analyzer {
     bars: Vec<f32>,
     /// The wave's recent peak, falling slowly.
     peak: f32,
+    /// The sample being heard as of the last frame, and when that was.
+    head: Option<(f64, Instant)>,
+    /// When the last frame was drawn, and how long ago that was in 30ths
+    /// of a second: the falls are tuned per 30th.
+    last: Option<Instant>,
+    frames: f32,
 }
+
+/// The frame rate the bars' and peak's falls are tuned for.
+const TUNED_FPS: f32 = 30.0;
 
 impl Analyzer {
     pub fn new(bars: usize) -> Self {
@@ -58,19 +75,60 @@ impl Analyzer {
             samples: vec![0.0; N],
             bars: vec![0.0; bars.max(1)],
             peak: 0.05,
+            head: None,
+            last: None,
+            frames: 1.0,
         }
     }
 
     /// Read the scope and work out the next frame. `playing` false lets
     /// the bars fall away.
     pub fn frame(&mut self, scope: &Scope, playing: bool) -> Frame {
-        let rate = scope.latest(&mut self.samples);
+        let now = Instant::now();
+        self.frames = self
+            .last
+            .map(|t| (now.duration_since(t).as_secs_f32() * TUNED_FPS).clamp(0.1, 10.0))
+            .unwrap_or(1.0);
+        self.last = Some(now);
+        let c = scope.clock();
+        let rate = c.rate;
         if !playing || rate == 0 {
             self.samples.iter_mut().for_each(|s| *s = 0.0);
+            self.head = None;
+        } else {
+            let head = self.heard(c, now);
+            self.head = Some((head, now));
+            scope.read_to(head as usize, &mut self.samples);
         }
         // No rate yet: the renderer hasn't sent anything since the scope
         // came on (it's all silence then anyway).
         self.analyze(if rate == 0 { 48_000 } else { rate })
+    }
+
+    /// The sample being heard now. A block written at `at` starts playing
+    /// about a block later, once the one before it is out, so what's heard
+    /// trails the newest sample by two blocks, less the time since. The
+    /// frame-to-frame estimate runs on its own clock and leans toward that,
+    /// so it glides between blocks; it jumps only when far off (a seek, a
+    /// new song, a pause).
+    fn heard(&self, c: scope::Clock, now: Instant) -> f64 {
+        let rate = f64::from(c.rate);
+        let pos = c.pos as f64;
+        let since = scope::now_nanos().saturating_sub(c.at) as f64 / 1e9;
+        let target = (pos - 2.0 * c.block as f64 + since * rate).min(pos);
+        let head = match self.head {
+            Some((h, t)) => {
+                let moved = h + now.duration_since(t).as_secs_f64() * rate;
+                if (moved - target).abs() > rate * 0.15 {
+                    target
+                } else {
+                    moved + (target - moved) * 0.1
+                }
+            }
+            None => target,
+        };
+        // Never past what's written, nor further back than is kept.
+        head.min(pos).max(pos - (scope::LEN - N) as f64).max(0.0)
     }
 
     /// The frame for whatever's in `samples`, at `rate`.
@@ -105,8 +163,14 @@ impl Analyzer {
             let tilt = 3.0 * (b as f32 / n as f32);
             let db = 20.0 * mag.max(1e-9).log10() + tilt;
             let v = ((db + FLOOR_DB) / FLOOR_DB).clamp(0.0, 1.0);
-            // Up at once, down gently.
-            *bar = if v > *bar { v } else { *bar * 0.82 + v * 0.18 };
+            // Up at once, down gently: by the same amount each 30th of a
+            // second, whatever the frame rate.
+            let keep = 0.82f32.powf(self.frames);
+            *bar = if v > *bar {
+                v
+            } else {
+                *bar * keep + v * (1.0 - keep)
+            };
         }
 
         // The wave: the newest stretch, leveled by its recent peak.
@@ -116,7 +180,7 @@ impl Analyzer {
         self.peak = if peak > self.peak {
             peak
         } else {
-            (self.peak * 0.97).max(peak).max(0.05)
+            (self.peak * 0.97f32.powf(self.frames)).max(peak).max(0.05)
         };
         let step = span as f32 / WAVE_POINTS as f32;
         let wave = (0..WAVE_POINTS)

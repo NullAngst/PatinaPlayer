@@ -43,6 +43,9 @@ pub struct Prompt {
     pub live: bool,
     /// The app is in a light theme.
     pub light: bool,
+    /// Search: recent searches, offered under the box while it's empty. A
+    /// tap fills the box with one, which reports it like typing would.
+    pub suggestions: Vec<String>,
 }
 
 /// What a prompt reports back.
@@ -98,6 +101,54 @@ pub trait Hooks: Send + Sync {
     /// puts the system in it. Asked every couple of seconds.
     fn driving(&self) -> bool {
         false
+    }
+    /// The system's own media volume, 0 to 1, where the app's volume should
+    /// be that one (a phone, whose volume buttons set it). None where the
+    /// app keeps a volume of its own. Asked a few times a second.
+    fn system_volume(&self) -> Option<f32> {
+        None
+    }
+    /// Set the system's media volume, 0 to 1.
+    fn set_system_volume(&self, _v: f32) {}
+    /// A short buzz under the finger, where the system has one.
+    fn haptic(&self, _kind: Haptic) {}
+}
+
+/// Which buzz [`Hooks::haptic`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Haptic {
+    /// A long press that opened a menu.
+    LongPress,
+    /// A row picked or unpicked, a toggle.
+    Tick,
+    /// Passing a letter on the scrubber: the lightest one.
+    Clock,
+}
+
+impl Haptic {
+    pub fn code(self) -> i32 {
+        match self {
+            Haptic::LongPress => 0,
+            Haptic::Tick => 1,
+            Haptic::Clock => 2,
+        }
+    }
+}
+
+/// Buzz, where there's a way to. Nothing on the desktop.
+pub(crate) fn haptic(kind: Haptic) {
+    if let Some(h) = hooks() {
+        h.haptic(kind);
+    }
+}
+
+pub(crate) fn system_volume() -> Option<f32> {
+    hooks().and_then(|h| h.system_volume())
+}
+
+pub(crate) fn set_system_volume(v: f32) {
+    if let Some(h) = hooks() {
+        h.set_system_volume(v.clamp(0.0, 1.0));
     }
 }
 

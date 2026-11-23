@@ -2319,6 +2319,10 @@ impl Browser {
                     w(config::set_value(&path, "lyrics", "online", *on))?;
                     self.config.lyrics.online = *on;
                 }
+                (Key::LyricsCenter, Control::Toggle(on)) => {
+                    w(config::set_value(&path, "lyrics", "center", *on))?;
+                    self.config.lyrics.center = *on;
+                }
                 (Key::PodcastSpeed, Control::Number { value, scale, .. }) => {
                     let t = *value as f64 / *scale as f64;
                     self.set_podcast_playback(t, self.podcast_trim);
@@ -2361,6 +2365,12 @@ impl Browser {
                 (Key::CloseToTray, Control::Toggle(on)) => {
                     w(config::set_value(&path, "desktop", "close_to_tray", *on))?;
                     self.config.desktop.close_to_tray = *on;
+                }
+                (Key::Display, Control::Choice { options, index }) => {
+                    let v = &options[*index].0;
+                    w(config::set_value(&path, "desktop", "display", v.as_str()))?;
+                    self.config.desktop.x11 = v == "x11";
+                    self.note("The window opens this way from the next time the app starts");
                 }
                 (
                     Key::LevelMode

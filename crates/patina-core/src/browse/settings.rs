@@ -88,6 +88,8 @@ pub enum Key {
     GenreMatch,
     /// Ask LRCLIB for lyrics.
     LyricsOnline,
+    /// Synced lyrics keep the playing line in the middle.
+    LyricsCenter,
     LastFmKey,
     /// Link to Last.fm, or unlink.
     LastFmLink,
@@ -131,6 +133,8 @@ pub enum Key {
     // The desktop app's tray icon.
     Tray,
     CloseToTray,
+    /// Wayland or X11 for the window, from the next start.
+    Display,
     // The EQ view's rows.
     EqOn,
     EqMode,
@@ -1369,6 +1373,22 @@ pub fn rows(
             control: Control::Toggle(cfg.desktop.close_to_tray),
         },
     );
+    push(
+        "Desktop",
+        Setting {
+            disabled: None,
+            key: Key::Display,
+            label: "Display server".into(),
+            help: "How the window reaches the screen. Automatic uses Wayland when the desktop has it, X11 otherwise. X11 goes through XWayland on a Wayland desktop, for when something works better there (a window position remembered, a screen recorder). Takes effect the next time the app starts.",
+            control: Control::Choice {
+                options: vec![
+                    ("auto".into(), "Automatic (Wayland)".into()),
+                    ("x11".into(), "X11".into()),
+                ],
+                index: usize::from(cfg.desktop.x11),
+            },
+        },
+    );
 
     // Playback
     push(
@@ -1830,6 +1850,16 @@ pub fn rows(
             control: Control::Toggle(cfg.lyrics.online),
         },
     );
+    push(
+        "Lyrics",
+        Setting {
+            disabled: None,
+            key: Key::LyricsCenter,
+            label: "Keep the playing line in the middle".into(),
+            help: "Synced lyrics scroll so the line playing stays in the middle, larger, with the others dimmed. Off shows them from a couple of lines before it, at the top.",
+            control: Control::Toggle(cfg.lyrics.center),
+        },
+    );
 
     // Podcasts
     push(
@@ -2039,6 +2069,7 @@ mod tests {
         for k in [
             Key::Tray,
             Key::CloseToTray,
+            Key::Display,
             Key::IpodFormat,
             Key::OutFormat,
             Key::Dither,

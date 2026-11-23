@@ -244,9 +244,10 @@ final class Native {
 
     /** Show a text dialog; the answer comes to promptDone. */
     static void prompt(long id, String title, String message, String[] labels, String[] values,
-                       boolean[] secret, String ok, boolean live, boolean light) {
+                       boolean[] secret, String ok, boolean live, boolean light,
+                       String[] suggestions) {
         main.post(() -> Prompts.show(activity.get(), id, title, message, labels, values,
-            secret, ok, live, light));
+            secret, ok, live, light, suggestions));
     }
 
     /** Android's Material You palettes, in the order Rust reads them. */
@@ -267,6 +268,75 @@ final class Native {
      * runs, and so do driving modes built on it. The window switches to
      * Minimal UX then, if that's turned on.
      */
+    /**
+     * The media volume, 0 to 1, or -1 if there's no AudioManager. The app's
+     * volume slider shows and sets this one, so the phone's volume buttons
+     * and the slider are the same volume.
+     */
+    static float musicVolume() {
+        if (app == null) {
+            return -1f;
+        }
+        AudioManager am = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) {
+            return -1f;
+        }
+        int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        if (max <= 0) {
+            return -1f;
+        }
+        return am.getStreamVolume(AudioManager.STREAM_MUSIC) / (float) max;
+    }
+
+    /** Set the media volume, 0 to 1, to the nearest step. No system panel: the app shows its own. */
+    static void setMusicVolume(float v) {
+        if (app == null) {
+            return;
+        }
+        AudioManager am = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) {
+            return;
+        }
+        int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        int step = Math.round(Math.max(0f, Math.min(1f, v)) * max);
+        try {
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, step, 0);
+        } catch (SecurityException e) {
+            // Do Not Disturb can refuse a change; the slider follows the
+            // real volume on its next read.
+        }
+    }
+
+    /**
+     * A short buzz under the finger: 0 a long press, 1 a tick (a row
+     * picked), 2 the lightest (passing a letter on the scrubber). Through
+     * the window's view, so it follows the system's touch feedback setting.
+     */
+    static void haptic(int kind) {
+        main.post(() -> {
+            Activity a = activity.get();
+            if (a == null) {
+                return;
+            }
+            android.view.View v = a.getWindow().getDecorView();
+            int c;
+            switch (kind) {
+                case 0:
+                    c = android.view.HapticFeedbackConstants.LONG_PRESS;
+                    break;
+                case 2:
+                    c = android.view.HapticFeedbackConstants.CLOCK_TICK;
+                    break;
+                default:
+                    c = android.os.Build.VERSION.SDK_INT >= 27
+                        ? android.view.HapticFeedbackConstants.KEYBOARD_PRESS
+                        : android.view.HapticFeedbackConstants.VIRTUAL_KEY;
+                    break;
+            }
+            v.performHapticFeedback(c);
+        });
+    }
+
     static boolean isDriving() {
         if (app == null) {
             return false;

@@ -1,0 +1,26 @@
+--- a/build.rs
++++ b/build.rs
+@@ -24,4 +24,10 @@
+         .size_t_is_usize(true)
+         .allowlist_function("pw_.*")
++        // FreeBSD's libutil has a pw_init of its own, so the FreeBSD port
++        // renames PipeWire's to pipewire_init (and pw_deinit to
++        // pipewire_deinit), with pw_init left as a macro bindgen can't
++        // see. Pick the real names up; lib.rs aliases them back.
++        .allowlist_function("pipewire_init")
++        .allowlist_function("pipewire_deinit")
+         .allowlist_type("pw_.*")
+         .allowlist_var("pw_.*")
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -13,4 +13,10 @@
+ pub use bindings::*;
+ 
++// On FreeBSD PipeWire's init and deinit are exported as pipewire_init and
++// pipewire_deinit (see build.rs). Give them their usual names, so the
++// pipewire crate and everything else calling pw_init builds unchanged.
++#[cfg(target_os = "freebsd")]
++pub use bindings::{pipewire_deinit as pw_deinit, pipewire_init as pw_init};
++
+ #[cfg(test)]
+ mod tests {

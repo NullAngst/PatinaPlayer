@@ -166,6 +166,13 @@ pub struct State {
     columns: Rc<VecModel<SharedString>>,
     actions: Rc<VecModel<SharedString>>,
     action_labels: Rc<VecModel<SharedString>>,
+    /// On a phone: the view's first two actions stay as buttons, the rest
+    /// go in a "…" menu. These are the rest.
+    more_actions: Rc<VecModel<SharedString>>,
+    more_labels: Rc<VecModel<SharedString>>,
+    /// The letter scrubber: its letters, and the row each starts at.
+    scrub_letters: Rc<VecModel<SharedString>>,
+    scrub_rows: Rc<VecModel<i32>>,
     dlg_items: Rc<VecModel<SharedString>>,
     queue_servers: Rc<VecModel<SharedString>>,
     last_gen: u64,
@@ -194,6 +201,24 @@ pub struct State {
     /// The screen an Undo note was shown on: leaving it takes the note
     /// down (Ctrl+Z still works while the offer stands).
     toast_screen: Option<(Section, usize)>,
+    /// On a phone the volume is the system's media volume (its volume
+    /// buttons set it): the last read of it, and when.
+    sys_volume: Option<f32>,
+    sys_volume_at: Option<Instant>,
+    /// The app's own volume has been moved into the system's, once.
+    sys_volume_moved: bool,
+    /// Recent searches, newest first, kept in recent-searches.txt in the
+    /// data folder. Offered under the search box while it's empty.
+    recent: Vec<String>,
+    recent_model: Rc<VecModel<SharedString>>,
+    /// The search open in the view, while one is: kept as a recent search
+    /// when the view moves on from it.
+    search_q: Option<String>,
+    /// Where each view was scrolled to (the list, the grid, the page), by
+    /// level key, so going back lands where you were.
+    scroll_mem: std::collections::HashMap<String, [f32; 3]>,
+    /// The next view opened came from the sidebar: it starts at the top.
+    fresh_view: bool,
     /// Art each row and queue entry would show. Only the rows on screen,
     /// plus a margin, actually get theirs, so a 5000-track queue or a
     /// 2000-album grid doesn't load (and keep reloading) every cover.
@@ -469,6 +494,10 @@ impl State {
             columns: Rc::new(VecModel::default()),
             actions: Rc::new(VecModel::default()),
             action_labels: Rc::new(VecModel::default()),
+            more_actions: Rc::new(VecModel::default()),
+            more_labels: Rc::new(VecModel::default()),
+            scrub_letters: Rc::new(VecModel::default()),
+            scrub_rows: Rc::new(VecModel::default()),
             dlg_items: Rc::new(VecModel::default()),
             queue_servers: Rc::new(VecModel::default()),
             last_gen: u64::MAX,
@@ -485,6 +514,14 @@ impl State {
             back_from_left: Rc::default(),
             toast_until: None,
             toast_screen: None,
+            sys_volume: None,
+            sys_volume_at: None,
+            sys_volume_moved: false,
+            recent: load_recent(),
+            recent_model: Rc::new(VecModel::default()),
+            search_q: None,
+            scroll_mem: std::collections::HashMap::new(),
+            fresh_view: false,
             row_art: Vec::new(),
             queue_art: Vec::new(),
             row_shown: Vec::new(),
@@ -1058,15 +1095,27 @@ impl State {
         }
     }
 
-    fn empty_text(&self) -> String {
+    /// What an empty view says: why it's empty, and what fills it.
+    /// `touch` words it for a finger: a long press, not a right-click.
+    fn empty_text(&self, touch: bool) -> String {
         if let Some(e) = &self.b.view_error {
             return e.clone();
         }
+        let menu = if touch { "Long-press" } else { "Right-click" };
         match self.b.level().map(|l| &l.source) {
+            Some(Source::Playlist { id, .. }) if *id == HEARTED => {
+                "No hearted songs yet. While a song plays, tap the heart in the bar at the bottom or on Now Playing.".into()
+            }
             Some(Source::Search(q)) if q.is_empty() => "Type to search the library.".into(),
             Some(Source::Search(_)) => "No matches.".into(),
             Some(Source::Section(Section::Playlists)) => "No playlists yet. Make one with New playlist.".into(),
-            Some(Source::Playlist { .. }) => "Empty. Right-click anything and choose Add to playlist.".into(),
+            Some(Source::Playlist { .. }) => {
+                format!("This playlist is empty. {menu} a song, album or folder and choose Add to playlist.")
+            }
+            Some(Source::Section(Section::Downloads)) => {
+                format!("Nothing kept offline. {menu} a song, album, folder or playlist and choose Keep offline.")
+            }
+
             Some(Source::Section(Section::Radio)) => "No stations yet. Add one with New station: a name, then its stream or playlist URL.".into(),
             Some(Source::Section(Section::Podcasts)) => "No podcasts yet. Subscribe with a feed URL.".into(),
             Some(Source::Section(Section::History)) => {
@@ -1106,15 +1155,35 @@ impl State {
         set_strings(&self.columns, cols.iter().map(ss));
         set_strings(&self.actions, acts.iter().map(|(a, _)| ss(a)));
         set_strings(&self.action_labels, acts.iter().map(|(_, l)| ss(l)));
+        // Three fit on a phone; past that, two and the "…" menu.
+        let more = if acts.len() > 3 {
+            &acts[2..]
+        } else {
+            &acts[acts.len()..]
+        };
+        set_strings(&self.more_actions, more.iter().map(|(a, _)| ss(a)));
+        set_strings(&self.more_labels, more.iter().map(|(_, l)| ss(l)));
         set_strings(&self.crumbs, self.b.crumbs().iter().map(ss));
         ui.set_can_back(self.b.depth() > 1);
         ui.set_can_forward(self.b.can_go_forward());
-        let mut empty = self.empty_text();
+        let mut empty = self.empty_text(is_touch(ui));
         if self.b.config.appearance.theme.is_kawaii() {
             empty.push_str("  (´・ω・`)");
         }
         ui.set_empty_text(ss(empty));
         ui.set_album_tracks(self.b.in_playlist().is_none());
+        ui.set_can_refresh(matches!(
+            self.b.section,
+            Section::Folders
+                | Section::Artists
+                | Section::Albums
+                | Section::Songs
+                | Section::Genres
+                | Section::Playlists
+                | Section::Plex
+                | Section::MusicServers
+                | Section::Podcasts
+        ));
         ui.set_hearted_open(self.b.in_playlist() == Some(HEARTED));
         self.sync_eq_panel(ui);
         self.sync_amp_panel(ui);
@@ -1132,7 +1201,31 @@ impl State {
             self.b.level().map(|l| &l.source)
         );
         let level_changed = key != self.level_key;
+        // Leaving a view: keep where it was scrolled to. Not a search's,
+        // whose key changes with every letter typed.
+        if level_changed && !self.level_key.is_empty() && self.search_q.is_none() {
+            if self.scroll_mem.len() >= 64 {
+                self.scroll_mem.clear();
+            }
+            self.scroll_mem.insert(
+                self.level_key.clone(),
+                [ui.get_list_y(), ui.get_grid_y(), ui.get_body_y()],
+            );
+        }
         self.level_key = key;
+        // Leaving a search (for one of its results, or back out of it)
+        // keeps it as a recent search.
+        let now_q = match self.b.level().map(|l| &l.source) {
+            Some(Source::Search(q)) => Some(q.clone()),
+            _ => None,
+        };
+        if level_changed
+            && now_q.is_none()
+            && let Some(q) = self.search_q.take()
+        {
+            self.remember_search(&q);
+        }
+        self.search_q = now_q;
 
         let empty = Vec::new();
         let (items, selected, title) = match self.b.level() {
@@ -1314,6 +1407,57 @@ impl State {
             Some(Source::Section(s)) => s.label().to_string(),
             _ => title.split(" · ").next().unwrap_or(&title).to_string(),
         }));
+        // A column every row leaves empty, or where every row says the
+        // same thing (one artist's songs in a playlist, a folder of one
+        // album), gives its width to the title. A shared value moves up
+        // under the view's title instead.
+        // The letter scrubber, for a long list in A to Z order (by its
+        // title, artist or album column, whichever it's sorted by).
+        let (letters, starts) = if rows.len() >= SCRUB_MIN_ROWS {
+            scrub_index(&rows)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        set_strings(&self.scrub_letters, letters.into_iter().map(ss));
+        if self.scrub_rows.iter().ne(starts.iter().copied()) {
+            self.scrub_rows.set_vec(starts);
+        }
+        let sub_col = column_use(&rows, |r| &r.sub);
+        let meta_col = column_use(&rows, |r| &r.meta);
+        ui.set_drop_sub(!matches!(sub_col, ColumnUse::Varies));
+        ui.set_drop_meta(!matches!(meta_col, ColumnUse::Varies));
+        {
+            let mut heads: Vec<SharedString> = cols.iter().map(ss).collect();
+            if heads.len() == 5 {
+                if !matches!(sub_col, ColumnUse::Varies) {
+                    heads[2] = SharedString::new();
+                }
+                if !matches!(meta_col, ColumnUse::Varies) {
+                    heads[3] = SharedString::new();
+                }
+                let timed = rows
+                    .iter()
+                    .any(|r| counts_for_columns(r) && !r.right.is_empty());
+                if !timed && !rows.is_empty() {
+                    heads[4] = SharedString::new();
+                }
+            }
+            set_strings(&self.columns, heads.into_iter());
+        }
+        let shared: Vec<String> = [&sub_col, &meta_col]
+            .into_iter()
+            .filter_map(|c| match c {
+                ColumnUse::Same(v) => Some(v.clone()),
+                _ => None,
+            })
+            .collect();
+        let with_shared = |base: String| -> String {
+            if shared.is_empty() || base.is_empty() {
+                base
+            } else {
+                format!("{base}  ·  {}", shared.join("  ·  "))
+            }
+        };
         ui.set_view_sub(ss(match self.b.level().map(|l| &l.source) {
             Some(Source::Section(Section::Settings)) => {
                 "Changes are saved to config.toml as you make them".to_string()
@@ -1334,7 +1478,7 @@ impl State {
                 "Which rooms hear PatinaPlayer, and how loud. Its streams can play here too.".to_string()
             }
             _ if items.is_empty() => String::new(),
-            _ => count_label(items),
+            _ => with_shared(count_label(items)),
         }));
         ui.set_covers(items.iter().any(|i| {
             matches!(
@@ -1414,7 +1558,16 @@ impl State {
         };
         ui.set_hero(hero.unwrap_or_default());
         if level_changed {
-            ui.invoke_scroll_top();
+            // Back to a view seen before: where it was. Opened from the
+            // sidebar, or new: the top.
+            let fresh = std::mem::take(&mut self.fresh_view);
+            match self.scroll_mem.get(&self.level_key) {
+                Some(&[l, g, b]) if !fresh => ui.invoke_set_scroll(l, g, b),
+                _ => {
+                    self.scroll_mem.remove(&self.level_key);
+                    ui.invoke_scroll_top();
+                }
+            }
             // Browsing somewhere (search, back, Go to album, a link in a
             // menu) shows where it went, rather than leaving Now Playing
             // over it.
@@ -1915,7 +2068,9 @@ impl State {
             Repeat::All => 1,
             Repeat::One => 2,
         });
-        ui.set_volume(s.volume as f32);
+        let shown = self.system_volume().unwrap_or(self.snap.volume as f32);
+        let s = &self.snap;
+        ui.set_volume(shown);
         ui.set_volume_locked(s.volume_locked);
         ui.set_muted(s.muted);
         ui.set_output_label(ss(s.output.clone().unwrap_or_default()));
@@ -1992,6 +2147,128 @@ impl State {
         if left || self.toast_until.is_some_and(|t| Instant::now() > t) {
             self.dismiss_toast(ui);
         }
+    }
+
+    /// The system's media volume, where the app's volume is that one (a
+    /// phone): read a few times a second, so the volume buttons show on
+    /// the slider. None on the desktop, while casting (the slider is the
+    /// other device's), and with bit-perfect's fixed volume.
+    fn system_volume(&mut self) -> Option<f32> {
+        if self.snap.volume_locked || self.snap.cast.is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        if self
+            .sys_volume_at
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250))
+        {
+            self.sys_volume_at = Some(now);
+            self.sys_volume = platform::system_volume();
+        }
+        let v = self.sys_volume?;
+        // The app's own volume steps aside, at 100%. Its old setting goes
+        // into the system's once, so nothing gets louder for it. Only once
+        // the player has its output, so its volume is the saved one.
+        if !self.sys_volume_moved && self.snap.output.is_some() {
+            self.sys_volume_moved = true;
+            if self.snap.volume < 0.999 {
+                let moved = v * self.snap.volume as f32;
+                platform::set_system_volume(moved);
+                self.sys_volume = Some(moved);
+                self.b.player.send(Command::SetVolume(1.0));
+            }
+        }
+        Some(self.sys_volume.unwrap_or(v))
+    }
+
+    /// The volume the slider shows.
+    fn volume_now(&mut self) -> f64 {
+        self.system_volume()
+            .map(f64::from)
+            .unwrap_or(self.snap.volume)
+    }
+
+    /// The slider moved (or + and -): the system's media volume on a
+    /// phone, the app's own elsewhere.
+    fn set_volume(&mut self, v: f64) {
+        if self.system_volume().is_some() {
+            platform::set_system_volume(v as f32);
+            self.sys_volume = Some(v as f32);
+            self.sys_volume_at = Some(Instant::now());
+            if self.snap.volume < 0.999 {
+                self.sys_volume_moved = true;
+                self.b.player.send(Command::SetVolume(1.0));
+            }
+        } else {
+            self.b.player.send(Command::SetVolume(v));
+        }
+    }
+
+    /// Keep a search among the recent ones: newest first, no repeats, at
+    /// most [`RECENT_MAX`].
+    fn remember_search(&mut self, q: &str) {
+        let q = q.trim();
+        if q.chars().count() < 2 {
+            return;
+        }
+        self.recent.retain(|r| !r.eq_ignore_ascii_case(q));
+        self.recent.insert(0, q.to_string());
+        self.recent.truncate(RECENT_MAX);
+        save_recent(&self.recent);
+        set_strings(&self.recent_model, self.recent.iter().map(ss));
+    }
+
+    /// A pull down at the top of a list: look again. Server views and
+    /// playlists sync the server (the one picked in the sidebar, or all of
+    /// them), library views check the local folders too, and Podcasts
+    /// fetches the feeds.
+    fn pull_refresh(&mut self, _ui: &AppWindow) {
+        use patina_core::library::scope::Pick;
+        let server = match &self.b.config.library.scope {
+            Pick::Server(n) => Some(n.clone()),
+            _ => None,
+        };
+        let servers = !self.b.config.servers.is_empty();
+        let local = !matches!(self.b.config.library.scope, Pick::Server(_));
+        match self.b.section {
+            Section::Podcasts => {
+                if let Some(p) = &self.b.pod {
+                    p.refresh();
+                }
+                self.b.note("Checking the feeds for new episodes");
+            }
+            Section::Plex | Section::MusicServers | Section::Playlists => {
+                if servers {
+                    self.b.sync_server(server.as_deref());
+                }
+            }
+            _ => {
+                if local && let Some(svc) = &self.b.service {
+                    svc.rescan();
+                }
+                if servers && self.b.remote.is_some() {
+                    // Says which servers it's syncing.
+                    self.b.sync_server(server.as_deref());
+                } else if local {
+                    self.b.note("Checking your folders for changes");
+                }
+            }
+        }
+        self.b.refresh_current();
+    }
+
+    /// A recent search picked under the search box: search for it again.
+    fn recent_search(&mut self, ui: &AppWindow, q: &str) {
+        if !self.b.in_search() {
+            self.b.start_search();
+        }
+        self.search_typed(ui, q);
+    }
+
+    fn clear_recent(&mut self) {
+        self.recent.clear();
+        save_recent(&self.recent);
+        set_strings(&self.recent_model, std::iter::empty());
     }
 
     /// Takes the note down now: a tap on it, or the screen it was about
@@ -2348,6 +2625,7 @@ impl State {
             ok: "Done".into(),
             live: true,
             light: ui.global::<P>().get_light(),
+            suggestions: self.recent.clone(),
             ..Default::default()
         };
         if h.prompt(id, &p) {
@@ -2458,6 +2736,7 @@ impl State {
             ok: ui.get_dlg_ok().to_string(),
             live: false,
             light: ui.global::<P>().get_light(),
+            suggestions: Vec::new(),
         };
         if h.prompt(id, &p) {
             self.prompt_open = Some(id);
@@ -3520,8 +3799,9 @@ impl State {
         ui.set_eq_info(ss(info));
     }
 
-    /// The lyrics panel. Synced lyrics show from a couple of lines before
-    /// the one playing, so it stays in view without scrolling.
+    /// The lyrics panel. Synced lyrics either keep the playing line in the
+    /// middle (all lines sent, the panel scrolls to it) or show from a
+    /// couple of lines before it, so it stays in view without scrolling.
     fn sync_lyrics(&mut self, ui: &AppWindow) {
         use patina_core::browse::marks::LyricsStatus;
         let stale = self.b.lyrics_stale();
@@ -3541,7 +3821,10 @@ impl State {
             LyricsStatus::Found(l) => {
                 let all: Vec<String> = l.lines.iter().map(|x| x.1.clone()).collect();
                 let now = if stale { None } else { l.line_at(pos) };
-                if l.synced {
+                if l.synced && self.b.config.lyrics.center {
+                    let cur = now.map(|c| c as i32).unwrap_or(-1);
+                    (l.origin.label().into(), false, all, cur, true)
+                } else if l.synced {
                     let first = now.map(|c| c.saturating_sub(2)).unwrap_or(0);
                     let cur = now.map(|c| (c - first) as i32).unwrap_or(-1);
                     (
@@ -3564,6 +3847,7 @@ impl State {
         ui.set_lyrics_note(ss(note));
         ui.set_lyrics_warn(warn || stale);
         ui.set_lyrics_synced(synced);
+        ui.set_lyrics_center(synced && self.b.config.lyrics.center);
         if self.lyrics_shown.0 != lines || self.lyrics_shown.1 != cur {
             ui.set_lyrics_lines(ModelRc::from(Rc::new(VecModel::from(
                 lines.iter().map(ss).collect::<Vec<_>>(),
@@ -5541,8 +5825,14 @@ impl State {
                 " " => p.send(Command::TogglePause),
                 "n" => p.send(Command::Next),
                 "b" => p.send(Command::Back),
-                "+" | "=" => p.send(Command::SetVolume((self.snap.volume + 0.05).min(1.0))),
-                "-" | "_" => p.send(Command::SetVolume((self.snap.volume - 0.05).max(0.0))),
+                "+" | "=" => {
+                    let v = self.volume_now();
+                    self.set_volume((v + 0.05).min(1.0));
+                }
+                "-" | "_" => {
+                    let v = self.volume_now();
+                    self.set_volume((v - 0.05).max(0.0));
+                }
                 "m" => p.send(Command::ToggleMute),
                 "s" => p.send(Command::ToggleShuffle),
                 "r" => p.send(Command::CycleRepeat),
@@ -5977,6 +6267,12 @@ pub fn install(
         ui.set_columns(ModelRc::from(s.columns.clone()));
         ui.set_actions(ModelRc::from(s.actions.clone()));
         ui.set_action_labels(ModelRc::from(s.action_labels.clone()));
+        ui.set_more_actions(ModelRc::from(s.more_actions.clone()));
+        ui.set_more_labels(ModelRc::from(s.more_labels.clone()));
+        ui.set_scrub_letters(ModelRc::from(s.scrub_letters.clone()));
+        ui.set_scrub_rows(ModelRc::from(s.scrub_rows.clone()));
+        set_strings(&s.recent_model, s.recent.iter().map(ss));
+        ui.set_recent_searches(ModelRc::from(s.recent_model.clone()));
         ui.set_dlg_items(ModelRc::from(s.dlg_items.clone()));
         ui.set_queue_servers(ModelRc::from(s.queue_servers.clone()));
         ui.set_np_chain(ModelRc::from(s.np_chain.clone()));
@@ -6012,6 +6308,7 @@ pub fn install(
                 // Somewhere else: Now Playing gets out of the way, even
                 // when it's the view already open underneath.
                 u.set_np_open(false);
+                s.fresh_view = true;
                 s.b.activate_sidebar(j);
                 u.invoke_scroll_top();
             }
@@ -6054,6 +6351,12 @@ pub fn install(
     on!(on_lyrics_clicked, |s, _u| s.toggle_lyrics());
     on!(on_info_close, |s, u| s.close_info(&u));
     on!(on_toast_dismiss, |s, u| s.dismiss_toast(&u));
+    on!(on_recent_search, |s, u, q| s.recent_search(&u, q.as_str()));
+    // Passing a letter on the scrubber: the lightest buzz. Nothing else to
+    // do, so not through on! and its tick.
+    ui.on_scrub_tick(|| platform::haptic(platform::Haptic::Clock));
+    on!(on_pull_refresh, |s, u| s.pull_refresh(&u));
+    on!(on_clear_recent, |s, _u| s.clear_recent());
     on!(on_undo, |s, u| {
         u.set_toast_undo(false);
         s.b.undo();
@@ -6130,18 +6433,27 @@ pub fn install(
         s.select_row(&u, i as usize);
         s.row_act(&u, a.as_str());
     });
-    on!(on_sheet_row, |s, u, i| s
-        .open_row_sheet(&u, i.max(0) as usize));
-    on!(on_sheet_queue, |s, u, i| s
-        .open_queue_sheet(&u, i.max(0) as usize));
+    // A long press that opened a row's menu, and picking rows: a buzz
+    // under the finger, on a phone.
+    on!(on_sheet_row, |s, u, i| {
+        platform::haptic(platform::Haptic::LongPress);
+        s.open_row_sheet(&u, i.max(0) as usize)
+    });
+    on!(on_sheet_queue, |s, u, i| {
+        platform::haptic(platform::Haptic::LongPress);
+        s.open_queue_sheet(&u, i.max(0) as usize)
+    });
     on!(on_sheet_pick, |s, u, a| s.sheet_pick(&u, a.as_str()));
     on!(on_view_action, |s, u, a| s.view_action(&u, a.as_str()));
-    on!(on_row_mark, |s, u, i, range| s
-        .row_mark(&u, i as usize, range));
+    on!(on_row_mark, |s, u, i, range| {
+        platform::haptic(platform::Haptic::Tick);
+        s.row_mark(&u, i as usize, range)
+    });
     on!(on_row_drag, |s, _u, from, to| s
         .row_drag(from as usize, to.max(0) as usize));
     on!(on_sel_action, |s, u, a| s.sel_action(&u, a.as_str()));
     on!(on_queue_mark, |s, _u, i, range| {
+        platform::haptic(platform::Haptic::Tick);
         if range {
             s.b.mark_queue_range(i as usize);
         } else {
@@ -6222,9 +6534,7 @@ pub fn install(
         }
     });
     on!(on_set_volume, |s, u, f| s
-        .b
-        .player
-        .send(Command::SetVolume(f.clamp(0.0, 1.0) as f64)));
+        .set_volume(f.clamp(0.0, 1.0) as f64));
     on!(on_toggle_mute, |s, u| s.b.player.send(Command::ToggleMute));
     on!(on_toggle_queue, |s, u| s.toggle_queue_panel(&u));
     on!(on_speed_clicked, |s, u| {
@@ -6423,13 +6733,15 @@ pub fn install(
             }
         });
     }
-    // The visualizer, smoother than the main tick. Does nothing unless
-    // Now Playing shows one.
+    // The visualizer, smoother than the main tick: about 60 frames a
+    // second, each showing what's heard at that moment (see
+    // patina_core::visual), whatever the output's buffer. Does nothing
+    // unless Now Playing shows one.
     let vis_timer = Timer::default();
     {
         let st = st.clone();
         let weak = ui.as_weak();
-        vis_timer.start(TimerMode::Repeated, Duration::from_millis(33), move || {
+        vis_timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
             if let Some(u) = weak.upgrade()
                 && let Ok(mut s) = st.try_borrow_mut()
             {
@@ -6487,6 +6799,141 @@ fn ring_path(bars: &[f32]) -> String {
         p.push_str("M 50 50");
     }
     p
+}
+
+/// Lists shorter than this get no letter scrubber: a fling covers them.
+const SCRUB_MIN_ROWS: usize = 40;
+
+/// Where a title files under on the scrubber, as SQLite's NOCASE sorts:
+/// 0 for "#" (digits and marks, before the letters), 1 to 26 for a to z,
+/// 27 for "…" (letters past ASCII, which sort after z).
+fn scrub_bucket(s: &str) -> u8 {
+    match s.trim_start().chars().next() {
+        None => 0,
+        Some(c) if c.is_ascii_alphabetic() => (c.to_ascii_lowercase() as u8) - b'a' + 1,
+        Some(c) if c.is_ascii() && (c as u8) < b'a' => 0,
+        Some(_) => 27,
+    }
+}
+
+const SCRUB_LABELS: [&str; 28] = [
+    "#", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+    "S", "T", "U", "V", "W", "X", "Y", "Z", "…",
+];
+
+/// The scrubber's letters and the row each one starts at, for a list in
+/// A to Z order by one of its columns. Empty when no column is in that
+/// order (sorted by year, a playlist's own order) or it has under three
+/// letters. A few rows out of order (a server sorting "The" apart, say)
+/// are let through: each letter starts where it first comes in order.
+fn scrub_index(rows: &[Row]) -> (Vec<String>, Vec<i32>) {
+    let cols: [fn(&Row) -> &SharedString; 3] = [|r| &r.title, |r| &r.sub, |r| &r.meta];
+    for col in cols {
+        let mut letters = Vec::new();
+        let mut starts = Vec::new();
+        let mut top: Option<u8> = None;
+        let mut prev: Option<u8> = None;
+        let mut out_of_order = 0usize;
+        let mut counted = 0usize;
+        for (i, r) in rows.iter().enumerate() {
+            if !counts_for_columns(r) {
+                continue;
+            }
+            counted += 1;
+            let b = scrub_bucket(col(r).as_str());
+            if prev.is_some_and(|p| b < p) {
+                out_of_order += 1;
+            }
+            prev = Some(b);
+            if top.is_none_or(|t| b > t) {
+                top = Some(b);
+                letters.push(SCRUB_LABELS[b as usize].to_string());
+                starts.push(i as i32);
+            }
+        }
+        if letters.len() >= 3 && out_of_order <= (counted / 50).max(2) {
+            return (letters, starts);
+        }
+    }
+    (Vec::new(), Vec::new())
+}
+
+/// How many recent searches are kept.
+const RECENT_MAX: usize = 8;
+
+fn recent_path() -> std::path::PathBuf {
+    patina_core::config::data_dir().join("recent-searches.txt")
+}
+
+/// The recent searches, newest first: one a line.
+fn load_recent() -> Vec<String> {
+    std::fs::read_to_string(recent_path())
+        .map(|t| {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .take(RECENT_MAX)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_recent(v: &[String]) {
+    let p = recent_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let mut t = v.join("\n");
+    t.push('\n');
+    if let Err(e) = std::fs::write(&p, t) {
+        log::warn!("couldn't save recent searches to {}: {e}", p.display());
+    }
+}
+
+/// How a list column is used across its rows.
+enum ColumnUse {
+    /// No row has anything in it.
+    Empty,
+    /// Two or more rows, all saying this.
+    Same(String),
+    Varies,
+}
+
+/// Rows that have the list's columns: not headings, settings or groups.
+fn counts_for_columns(r: &Row) -> bool {
+    !matches!(r.kind, 9 | 12 | 19)
+}
+
+fn column_use(rows: &[Row], col: impl Fn(&Row) -> &SharedString) -> ColumnUse {
+    let mut seen: Option<&str> = None;
+    let mut filled = 0;
+    let mut counted = 0;
+    for r in rows.iter().filter(|r| counts_for_columns(r)) {
+        counted += 1;
+        let v = col(r).as_str();
+        if v.is_empty() {
+            // Some rows with it and some without: keep the column.
+            if filled > 0 {
+                return ColumnUse::Varies;
+            }
+            continue;
+        }
+        if filled < counted - 1 {
+            return ColumnUse::Varies;
+        }
+        filled += 1;
+        match seen {
+            None => seen = Some(v),
+            Some(s) if s == v => {}
+            Some(_) => return ColumnUse::Varies,
+        }
+    }
+    match seen {
+        None => ColumnUse::Empty,
+        Some(v) if filled >= 2 => ColumnUse::Same(v.to_string()),
+        Some(_) => ColumnUse::Varies,
+    }
 }
 
 /// "12 tracks", "3 stations", or "4 artists, 2 albums, 9 tracks" for a mix.

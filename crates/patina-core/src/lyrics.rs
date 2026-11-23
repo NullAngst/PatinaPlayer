@@ -75,15 +75,57 @@ impl Lyrics {
                 origin,
             });
         }
+        // Plain lyrics can still carry LRC's header tags ([ti:...],
+        // [ar:...], [by:...]) with no times under them. Those aren't words
+        // of the song.
+        let mut lines: Vec<(Option<Duration>, String)> = text
+            .lines()
+            .filter(|l| !is_tag_line(l))
+            .map(|l| (None, l.trim_end().to_string()))
+            .collect();
+        while lines.first().is_some_and(|(_, l)| l.trim().is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|(_, l)| l.trim().is_empty()) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            return None;
+        }
         Some(Lyrics {
-            lines: text
-                .lines()
-                .map(|l| (None, l.trim_end().to_string()))
-                .collect(),
+            lines,
             synced: false,
             origin,
         })
     }
+}
+
+/// A line that is only LRC tags (`[ti: A Song]`, `[ar:x][al:y]`), no words.
+fn is_tag_line(line: &str) -> bool {
+    let mut rest = line.trim();
+    if !rest.starts_with('[') {
+        return false;
+    }
+    while let Some(inner) = rest.strip_prefix('[') {
+        let Some(end) = inner.find(']') else {
+            return false;
+        };
+        let tag = &inner[..end];
+        let Some((key, _)) = tag.split_once(':') else {
+            return false;
+        };
+        let key = key.trim();
+        let named = !key.is_empty()
+            && key.len() <= 12
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == '#' || c == '_');
+        if !named {
+            return false;
+        }
+        rest = inner[end + 1..].trim_start();
+    }
+    rest.is_empty()
 }
 
 /// LRC text to timed lines, sorted. None if it isn't LRC. Takes several
@@ -322,6 +364,26 @@ mod tests {
         assert_eq!(t, vec![1500, 3750, 13000, 62623]);
         assert_eq!(l[1].1, "chorus");
         assert!(parse_lrc("just\nwords").is_none());
+    }
+
+    #[test]
+    fn plain_lyrics_drop_header_tags() {
+        let l = Lyrics::from_text(
+            "[ti:Forever Alone]\n[ar:Apoc]\n[by:someone (source: x)]\n\nIt's turning into a sleepless night\n[chorus: not a tag line]x\nLast line",
+            Origin::Tags,
+        )
+        .unwrap();
+        assert!(!l.synced);
+        let words: Vec<&str> = l.lines.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(
+            words,
+            [
+                "It's turning into a sleepless night",
+                "[chorus: not a tag line]x",
+                "Last line"
+            ]
+        );
+        assert!(Lyrics::from_text("[ti:x]\n[ar:y]", Origin::Tags).is_none());
     }
 
     #[test]

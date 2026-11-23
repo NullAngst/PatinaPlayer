@@ -9,6 +9,7 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.ContextThemeWrapper;
 import android.view.Gravity;
+import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
@@ -32,7 +33,8 @@ final class Prompts {
     private Prompts() {}
 
     static void show(Activity a, long id, String title, String message, String[] labels,
-                     String[] values, boolean[] secret, String ok, boolean live, boolean light) {
+                     String[] values, boolean[] secret, String ok, boolean live, boolean light,
+                     String[] suggestions) {
         if (a == null || a.isFinishing()) {
             Native.promptDone(id, null);
             return;
@@ -88,6 +90,51 @@ final class Prompts {
             box.addView(e, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             edits[i] = e;
+        }
+        // Search: recent searches under the box while it's empty. A tap
+        // puts one in the box, which searches for it as typing would.
+        if (live && suggestions != null && suggestions.length > 0 && edits.length == 1) {
+            final LinearLayout recent = new LinearLayout(ctx);
+            recent.setOrientation(LinearLayout.VERTICAL);
+            recent.setPadding(0, Math.round(10 * dp), 0, Math.round(4 * dp));
+            TextView head = new TextView(ctx);
+            head.setText("Recent searches");
+            head.setTextSize(12);
+            head.setAlpha(0.7f);
+            recent.addView(head);
+            final EditText field = edits[0];
+            for (String q : suggestions) {
+                TextView t = new TextView(ctx);
+                t.setText(q);
+                t.setTextSize(16);
+                t.setSingleLine(true);
+                t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                int pad = Math.round(10 * dp);
+                t.setPadding(0, pad, 0, pad);
+                android.util.TypedValue tv = new android.util.TypedValue();
+                if (ctx.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, tv, true)) {
+                    t.setBackgroundResource(tv.resourceId);
+                }
+                t.setOnClickListener(v -> {
+                    field.setText(q);
+                    field.setSelection(field.getText().length());
+                });
+                recent.addView(t);
+            }
+            recent.setVisibility(field.getText().length() == 0 ? View.VISIBLE : View.GONE);
+            field.addTextChangedListener(new TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+                @Override
+                public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+                @Override
+                public void afterTextChanged(Editable s) {
+                    recent.setVisibility(s.length() == 0 ? View.VISIBLE : View.GONE);
+                }
+            });
+            box.addView(recent);
         }
         ScrollView scroll = new ScrollView(ctx);
         scroll.addView(box);

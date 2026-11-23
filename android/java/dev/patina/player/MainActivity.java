@@ -36,6 +36,9 @@ public class MainActivity extends NativeActivity {
     protected void onCreate(Bundle state) {
         Native.init(this);
         super.onCreate(state);
+        // The volume buttons set the media volume whenever the app is in
+        // front, playing or not, which is the volume the app's slider shows.
+        setVolumeControlStream(android.media.AudioManager.STREAM_MUSIC);
         askPermissions();
         catchBack();
         reportInsets();

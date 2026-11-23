@@ -196,6 +196,9 @@ pub struct DesktopConfig {
     pub tray: bool,
     /// Closing the window hides it to the tray and keeps playing.
     pub close_to_tray: bool,
+    /// Open the window through X11 (XWayland, on a Wayland desktop)
+    /// instead of Wayland. Read when the app starts.
+    pub x11: bool,
 }
 
 impl Default for DesktopConfig {
@@ -203,16 +206,30 @@ impl Default for DesktopConfig {
         Self {
             tray: true,
             close_to_tray: true,
+            x11: false,
         }
     }
 }
 
-/// Where lyrics may be looked up.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// Where lyrics may be looked up, and how they're shown.
+#[derive(Debug, Clone, PartialEq)]
 pub struct LyricsConfig {
     /// Ask LRCLIB, online, when the song, its folder and its server have
     /// none. Off until you turn it on.
     pub online: bool,
+    /// Synced lyrics keep the playing line in the middle of the panel and
+    /// dim the rest. Off: the old way, from a couple of lines before the
+    /// playing one, at the top.
+    pub center: bool,
+}
+
+impl Default for LyricsConfig {
+    fn default() -> Self {
+        LyricsConfig {
+            online: false,
+            center: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -816,12 +833,15 @@ struct RawChannel {
 struct RawDesktop {
     tray: Option<bool>,
     close_to_tray: Option<bool>,
+    /// "auto" (Wayland when there is one) or "x11".
+    display: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawLyrics {
     online: Option<bool>,
+    center: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1167,6 +1187,10 @@ impl Config {
         let desktop = DesktopConfig {
             tray: rdesk.tray.unwrap_or(true),
             close_to_tray: rdesk.close_to_tray.unwrap_or(true),
+            x11: rdesk
+                .display
+                .as_deref()
+                .is_some_and(|d| d.trim().eq_ignore_ascii_case("x11")),
         };
         let rlim = raw.limiter.unwrap_or_default();
         let limiter = LimiterConfig {
@@ -1338,8 +1362,12 @@ impl Config {
             eq,
             amp,
             limiter,
-            lyrics: LyricsConfig {
-                online: raw.lyrics.unwrap_or_default().online.unwrap_or(false),
+            lyrics: {
+                let l = raw.lyrics.unwrap_or_default();
+                LyricsConfig {
+                    online: l.online.unwrap_or(false),
+                    center: l.center.unwrap_or(true),
+                }
             },
             channel,
             desktop,
@@ -1496,11 +1524,18 @@ tray = true
 # Closing the window hides it to the tray and keeps playing. Quit from the
 # tray menu, or with Ctrl+Q.
 close_to_tray = true
+# How the window reaches the screen: auto (Wayland when the desktop has it,
+# X11 otherwise) or x11 (through XWayland on a Wayland desktop). Read when
+# the app starts.
+display = "auto"
 
 [lyrics]
 # Ask LRCLIB (lrclib.net) for lyrics the song, its folder and its server
 # don't have. Nothing is looked up until you press Lyrics.
 online = false
+# Synced lyrics keep the playing line in the middle and dim the others.
+# false shows them from a couple of lines before the playing one instead.
+center = true
 
 [appearance]
 # How the app looks: runout (dark verdigris and copper), light or dark

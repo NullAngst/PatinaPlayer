@@ -19,6 +19,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PREFIX="${1:-$ROOT/target/ffmpeg-static}"
 SRC="${FFMPEG_SRC:-$ROOT/target/ffmpeg-src}"
 JOBS="${JOBS:-$(nproc)}"
+# FFmpeg needs GNU make: gmake on FreeBSD.
+MAKE="${MAKE:-make}"
 
 # release/MAJOR.MINOR of the bindings, if FFmpeg has that branch; otherwise
 # the newest release branch there is.
@@ -63,6 +65,6 @@ fi
     --enable-filter=abuffer,abuffersink,aformat,aresample,anull,atempo,silenceremove \
     --enable-swresample
 
-make -j"$JOBS"
-make install
+"$MAKE" -j"$JOBS"
+"$MAKE" install
 echo "Static FFmpeg installed in $PREFIX"

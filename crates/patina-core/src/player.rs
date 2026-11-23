@@ -635,6 +635,34 @@ impl Core {
         }
     }
 
+    /// The output stopped under us. Most often the device changed: a
+    /// Bluetooth headset connected or went away, and Android (or ALSA)
+    /// closed the stream. The song stays where it was, paused, on a fresh
+    /// output that opens on whatever device is the default now; Play goes
+    /// on from there. Stopping, as this used to, sent the song back to its
+    /// start. A live stream, or playing on another device, still stops.
+    fn output_lost(&mut self, e: String) {
+        let keep = self.current.filter(|_| {
+            self.state != PlayState::Stopped
+                && !self.current_is_live()
+                && self.cfg.output.cast.is_none()
+        });
+        let Some(cur) = keep else {
+            self.report(format!("output failed: {e}"));
+            self.drop_cast();
+            self.stop();
+            return;
+        };
+        log::info!("output went away ({e}): pausing where it was");
+        let pos = self.position();
+        self.shared.playing.store(false, Ordering::Relaxed);
+        // A new ring, so the decoder opens a new output for it.
+        self.send_feed(FeedCmd::NewRing);
+        self.start_entry(cur, pos);
+        self.resume_on_segment = false;
+        self.set_state(PlayState::Paused);
+    }
+
     fn restart_here(&mut self) {
         let Some(cur) = self.current else { return };
         if self.state == PlayState::Stopped || self.current_is_live() {
@@ -1363,9 +1391,7 @@ impl Core {
 
         if let Some(e) = self.output.as_ref().and_then(|o| o.error()) {
             self.output = None;
-            self.report(format!("output failed: {e}"));
-            self.drop_cast();
-            self.stop();
+            self.output_lost(e);
         }
 
         let buffering =

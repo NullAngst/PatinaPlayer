@@ -64,8 +64,31 @@ struct Args {
     log: Option<PathBuf>,
 }
 
+/// Settings, Desktop, Display server set to X11: hide the Wayland display
+/// from winit, which then opens the window through X11 (XWayland on a
+/// Wayland desktop). Done first thing, before any thread starts, since
+/// changing the environment later isn't safe. A WAYLAND_DISPLAY set to
+/// nothing on the command line does the same without the setting.
+fn force_x11_if_asked(config: Option<&std::path::Path>) {
+    let path = config
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(patina_core::config::config_path);
+    let Ok(cfg) = patina_core::config::Config::load_from(&path) else {
+        return;
+    };
+    if cfg.desktop.x11 && std::env::var_os("DISPLAY").is_some() {
+        // SAFETY: nothing else runs yet: this is the first thing main does,
+        // before the logger, the session or the window start threads.
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("WAYLAND_SOCKET");
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    force_x11_if_asked(args.config.as_deref());
 
     if args.add_folder.is_some() || args.remove_folder.is_some() {
         let lines = session::edit_folders(

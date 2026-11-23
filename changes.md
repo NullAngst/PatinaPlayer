@@ -1,5 +1,28 @@
 # Changes
 
+2026.11.23 - UX overhaul, bug fixes, FreeBSD build
+
+* Letter scrubber down the right edge of long A to Z lists, on every platform: press or drag for a letter, the list jumps there, the letter shows big beside the finger. It works out from the rows which column the list is sorted by, and stays away from lists in other orders.
+* Going back to a view lands where it was scrolled to. A view opened from the sidebar still starts at the top.
+* Pull down at the top of a library view, Playlists or a server page (touch) to sync the server picked in the sidebar (or all of them) and check the local folders. Podcasts fetches the feeds.
+* Recent searches: the last eight, under the empty search box on the desktop and inside Android's search box. A tap searches again; Clear empties them.
+* Synced lyrics keep the playing line in the middle of the panel, larger, the rest dimmed, sliding from line to line. On by default; Settings, Lyrics, "Keep the playing line in the middle" turns it off.
+* Plain lyrics no longer show LRC header tags ([ti:...], [ar:...], [by:...]) as lines.
+* Lists drop a column that every row leaves empty or has the same thing in (a folder of folders has no Artist or Time column, one artist's playlist no Artist column); a shared artist or album goes under the view's title. The title gets the room.
+* Empty pages say what fills them: Hearted songs points at the heart, playlists and Downloads say what to long-press (or right-click).
+* A row of buttons that scrolls sideways has an arrow at the edge with more past it, which scrolls it. On a phone a view's buttons are the first two (Play and Shuffle, mostly) and a "…" menu with the rest, so nothing is cut off.
+* Phone bar at the bottom: no sleep timer or volume (both are on Now Playing), so the song's title has about twice the room.
+* Android volume is the phone's media volume: the volume buttons and the slider are one volume, and the slider follows the buttons. The app's own volume goes into the phone's once, so nothing gets louder, and stays at 100%. Casting and bit-perfect keep the app's own.
+* Android haptics: a buzz on a long press, on picking rows and on each scrubber letter, following the system's touch feedback setting.
+* Android: the heart on Hearted songs and the gear on smart playlists showed as empty boxes. They're drawn now; JetBrains Mono has neither and Android has no fallback font. The same for the caret on choice buttons (missing from Inter), and two kawaii-theme marks no bundled font had.
+* The sound moving to another device on its own (a Bluetooth headset connecting or going away, an ALSA device going missing) pauses the song where it was, on a fresh output for the new device. It used to stop, which sent the song back to its start.
+* The visualizer no longer jumps with a big buffer_ms. Each frame reads the samples being heard at that moment, worked out from when the renderer's blocks came, instead of the newest ones, which changed only once a block. It runs at about 60 frames a second, and the bars fall at the same speed at any frame rate.
+* Settings rows keep their highlight with the pointer over their text; the text's own touch area used to take the hover from the row.
+* Settings, Desktop, Display server: Automatic (Wayland when there is one) or X11 (XWayland), from the next start.
+* FreeBSD build: a tarball made in a FreeBSD VM on every release (packaging/build-freebsd.sh). pipewire-sys gets patched for FreeBSD's renamed pw_init (pipewire_init) during that build only, the way the Slint Android patch works: fetched at Cargo.lock's version, checked, patched, handed to cargo with --config. Linux builds are untouched. build-ffmpeg.sh takes MAKE=gmake for it.
+
+Reasons for changes: UI and UX ideas picked from a review of the phone app; bug reports (missing icons on Android, the volume buttons and the slider being two volumes, a Bluetooth switch restarting the song, a choppy visualizer with PipeWire and a big buffer, settings rows losing their hover); a request to force X11; and a friend building on FreeBSD with a hand-patched pipewire crate.
+
 2026.11.23 - Bug fixes (Android gap at the top, see-through lyrics, selection bar band, Undo note)
 
 * Android: no more gap under the status bar (or over the navigation bar). The bars' sizes from Android were turned into the window's units once and kept, and they can arrive before the window has its real scale, which made them two to three times too tall. They're worked out again whenever the scale changes.

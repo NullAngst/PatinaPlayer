@@ -334,3 +334,89 @@ fn a_run_of_songs_on_a_server_thats_away_stops_playback() {
     assert_eq!(errors.len(), 1, "one message, not one a song: {errors:?}");
     p.send(Command::Quit);
 }
+
+/// An output that fails, the way a stream does when Android moves the sound
+/// to a Bluetooth headset, once `fail` is set.
+struct Failing {
+    _inner: patina_core::audio::output::null::NullOutput,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl patina_core::audio::output::Output for Failing {
+    fn describe(&self) -> String {
+        "failing".into()
+    }
+    fn error(&self) -> Option<String> {
+        self.fail
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(|| "disconnected".to_string())
+    }
+}
+
+#[test]
+fn a_lost_output_pauses_where_it_was() {
+    let dir = std::env::temp_dir().join(format!("patina-lost-out-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let song = tone(&dir, "long.wav", 20.0);
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (f2, o2) = (fail.clone(), opened.clone());
+    let factory: patina_core::player::OutputFactory = Box::new(move |_, renderer| {
+        o2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Only the first output fails; the one after it is the new device.
+        let first = o2.load(std::sync::atomic::Ordering::Relaxed) == 1;
+        Ok(Box::new(Failing {
+            _inner: patina_core::audio::output::null::NullOutput::start(renderer, None),
+            fail: if first {
+                f2.clone()
+            } else {
+                Arc::new(std::sync::atomic::AtomicBool::new(false))
+            },
+        }))
+    });
+    let p = Player::spawn_with(
+        PlayerConfig {
+            fade_ms: 0,
+            ..Default::default()
+        },
+        Hooks {
+            output: Some(factory),
+            ..Default::default()
+        },
+    );
+    p.send(Command::SetQueue {
+        paths: vec![song],
+        start: 0,
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while p.snapshot().position < Duration::from_millis(1500) {
+        assert!(Instant::now() < deadline, "it never got going");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let s = p.snapshot();
+        if s.state == patina_core::PlayState::Paused
+            && opened.load(std::sync::atomic::Ordering::Relaxed) >= 2
+        {
+            assert!(
+                s.position >= Duration::from_millis(1200),
+                "it went back to {:?}, not where it was",
+                s.position
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "it never paused: {:?}", s.state);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Play goes on from there, on the new output.
+    let at = p.snapshot().position;
+    p.send(Command::Play);
+    std::thread::sleep(Duration::from_millis(800));
+    let s = p.snapshot();
+    assert_eq!(s.state, patina_core::PlayState::Playing);
+    assert!(s.position > at, "{:?} should be past {at:?}", s.position);
+    p.send(Command::Quit);
+    let _ = std::fs::remove_dir_all(&dir);
+}

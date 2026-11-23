@@ -569,20 +569,126 @@ component IconButton inherits Rectangle {
 // A row of buttons that scrolls sideways when it doesn't fit, instead of
 // making everything around it wider. A row that won't fit used to push
 // the whole view (header and all) past the right edge of a phone.
-component HScroll inherits Flickable {
+// The arrow at the edge of a row that scrolls sideways.
+component EdgeArrow inherits Rectangle {
+    in property <string> icon;
+    callback clicked;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    background: P.raised;
+    border-width: 1px;
+    border-color: P.border;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: P.shadow;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        d: root.icon;
+        size: 14px;
+        stroke: P.text;
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component HScroll inherits Rectangle {
     in property <length> spacing: 8px;
     in property <LayoutAlignment> align: start;
     min-width: 0px;
     preferred-width: row.preferred-width;
     height: row.preferred-height;
-    content-width: max(self.width, row.preferred-width);
-    content-height: self.height;
-    row := HorizontalLayout {
-        width: root.content-width;
+    // More past either edge: a small arrow there says so, and a tap on it
+    // scrolls that way. Without it, a cut-off chip looked like the end.
+    property <bool> more-right: fl.content-width > fl.width + 1px && fl.content-x > fl.width - fl.content-width + 1px;
+    property <bool> more-left: fl.content-x < -1px;
+    fl := Flickable {
+        width: root.width;
         height: root.height;
-        spacing: root.spacing;
-        alignment: root.align;
-        @children
+        content-width: max(self.width, row.preferred-width);
+        content-height: self.height;
+        animate content-x { duration: 220ms; easing: ease-out; }
+        row := HorizontalLayout {
+            width: fl.content-width;
+            height: root.height;
+            spacing: root.spacing;
+            alignment: root.align;
+            @children
+        }
+    }
+    if root.more-right: EdgeArrow {
+        x: root.width - self.width;
+        y: (root.height - self.height) / 2;
+        icon: Icons.forward;
+        clicked => { fl.content-x = max(fl.width - fl.content-width, fl.content-x - fl.width * 0.7); }
+    }
+    if root.more-left: EdgeArrow {
+        x: 0px;
+        y: (root.height - self.height) / 2;
+        icon: Icons.back;
+        clicked => { fl.content-x = min(0px, fl.content-x + fl.width * 0.7); }
+    }
+}
+
+// The letter scrubber down the right edge of a long A to Z list: press or
+// drag on it and the list jumps to that letter. The letters are the ones
+// the list has, from the app.
+component Scrubber inherits Rectangle {
+    in property <[string]> letters;
+    // The letter's index, when it's pressed or dragged onto.
+    callback jump(int);
+    // A new letter under the finger: the app buzzes.
+    callback tick;
+    property <int> at: -1;
+    property <length> step: self.height / max(1, root.letters.length);
+    width: 22px;
+    border-radius: 11px;
+    background: ta.pressed ? P.raised : transparent;
+    function pick(y: length) {
+        if root.letters.length == 0 { return; }
+        if clamp(floor(y / root.step), 0, root.letters.length - 1) != root.at {
+            root.at = clamp(floor(y / root.step), 0, root.letters.length - 1);
+            root.jump(root.at);
+            root.tick();
+        }
+    }
+    for l[i] in root.letters: Text {
+        x: 0px;
+        y: i * root.step;
+        width: root.width;
+        height: root.step;
+        text: l;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: clamp(root.step * 0.75, 7px, 11px);
+        font-weight: i == root.at && ta.pressed ? 800 : 600;
+        color: i == root.at && ta.pressed ? P.accent-text : P.muted;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        changed pressed => {
+            if self.pressed { root.pick(self.mouse-y); } else { root.at = -1; }
+        }
+        moved => { if self.pressed { root.pick(self.mouse-y); } }
+    }
+    // The letter, big, beside the finger while it's held.
+    if ta.pressed && root.at >= 0: Rectangle {
+        x: -60px;
+        y: clamp(root.at * root.step + root.step / 2 - 24px, 0px, root.height - 48px);
+        width: 48px;
+        height: 48px;
+        border-radius: 24px;
+        background: P.verdigris;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: P.shadow;
+        Text {
+            text: root.at < root.letters.length ? root.letters[root.at] : "";
+            font-size: 22px;
+            font-weight: 700;
+            color: P.on-accent;
+        }
     }
 }
 
@@ -597,8 +703,11 @@ component Chip inherits Rectangle {
     // Narrow windows: the icon alone, for chips that have one.
     in property <bool> icon-only: false;
     // What a right-click or long press shows when the label is cut short
-    // (or hidden, on an icon-only chip). The label without its "▾".
+    // (or hidden, on an icon-only chip).
     in property <string> peek: text;
+    // A caret after the label: a choice that opens a list. Drawn, since
+    // "▾" isn't in Inter and Android has no fallback font for it.
+    in property <bool> drop: false;
     height: h;
     border-radius: 6px * P.round;
     border-width: 1px;
@@ -636,6 +745,15 @@ component Chip inherits Rectangle {
             font-weight: primary || P.kawaii ? 700 : 400;
             color: primary ? P.on-accent : (danger ? P.copper : (active ? P.accent-text : P.text));
         }
+        if root.drop: Rectangle {
+            width: 11px;
+            Icon {
+                y: (parent.height - self.height) / 2;
+                d: Icons.chevron-down;
+                size: 11px;
+                stroke: P.muted;
+            }
+        }
     }
     // The label at its full width, unseen, to tell whether it fits.
     measure := Text {
@@ -650,11 +768,37 @@ component Chip inherits Rectangle {
         mouse-cursor: pointer;
         full: root.peek;
         cut: (root.icon-only && root.icon != "")
-            || measure.preferred-width > root.width - 24px - (root.icon != "" ? 22px : 0px) + 0.5px;
+            || measure.preferred-width > root.width - 24px - (root.icon != "" ? 22px : 0px) - (root.drop ? 18px : 0px) + 0.5px;
         tapped => { root.clicked(); }
     }
     if root.icon-only && root.icon != "" && !Ui.touch: Tooltip {
         Tip { text: root.peek; }
+    }
+}
+
+// "…": the actions that don't fit on a phone, as a menu.
+component MoreChip inherits Rectangle {
+    in property <[string]> actions;
+    in property <[string]> labels;
+    in property <length> h: 32px;
+    callback picked(string);
+    width: self.h + 4px;
+    height: self.h;
+    mcm := ContextMenuArea {
+        Menu {
+            for a[i] in root.actions: MenuItem {
+                title: root.labels[i];
+                activated => { root.picked(a); }
+            }
+        }
+        Chip {
+            width: parent.width;
+            h: root.h;
+            text: "More";
+            icon: Icons.more;
+            icon-only: true;
+            clicked => { mcm.show({ x: 0px, y: root.h + 4px }); }
+        }
     }
 }
 
@@ -1260,7 +1404,10 @@ component Pick inherits Rectangle {
             color: P.text;
             vertical-alignment: center;
         }
-        Text { text: "▾"; font-size: 11px; color: P.muted; vertical-alignment: center; }
+        Rectangle {
+            width: 11px;
+            Icon { y: (parent.height - self.height) / 2; d: Icons.chevron-down; size: 11px; stroke: P.muted; }
+        }
     }
     ta := TouchArea {
         mouse-cursor: pointer;
@@ -1516,6 +1663,12 @@ component ListRow inherits Rectangle {
     in property <bool> selected;
     in property <bool> focused;
     in property <bool> album-tracks;
+    // The list's artist and album columns are left out: every row has the
+    // same in it, or nothing. The title takes their width.
+    in property <bool> drop-sub;
+    in property <bool> drop-meta;
+    // The letter scrubber is down the right edge: room for it.
+    in property <bool> scrub-room;
     // The open list is Hearted songs: removing a song unhearts it.
     in property <bool> hearted;
     // Picking rows: a tap picks instead of opening (on a phone, once
@@ -1576,12 +1729,21 @@ component ListRow inherits Rectangle {
     property <bool> has-grip: root.draggable && (item.kind == 0 || item.kind == 11);
     height: item.kind == 9 ? 34px : (item.kind == 12 ? 54px : (item.kind == 19 ? 50px : 40px));
     z: root.dragging ? 10 : 0;
+    // The pointer is over the row. Text in a settings row has a touch area
+    // of its own (for its full text when cut short), which takes the hover
+    // from the row's: those count too, or the row lost its highlight
+    // whenever the pointer crossed its label.
+    property <bool> label-hover;
+    property <bool> note-hover;
+    property <bool> value-hover;
+    property <bool> other-hover;
+    property <bool> hovered: ta.has-hover || root.label-hover || root.note-hover || root.value-hover || root.other-hover;
     // Inside an open Settings group the ground is already the idle
     // selection color, so hover and selection go a step up from it.
     property <bool> nested: item.nest > 0;
     property <color> state-bg: root.nested
-        ? (selected || (ta.has-hover && item.selectable) ? P.raised : transparent)
-        : (root.dragging ? transparent : (item.playing ? P.playing-bg : (item.marked || root.lifted ? P.raised : (selected ? (focused ? P.raised : P.sel-idle) : (ta.has-hover && item.selectable ? P.hover : transparent)))));
+        ? (selected || (root.hovered && item.selectable) ? P.raised : transparent)
+        : (root.dragging ? transparent : (item.playing ? P.playing-bg : (item.marked || root.lifted ? P.raised : (selected ? (focused ? P.raised : P.sel-idle) : (root.hovered && item.selectable ? P.hover : transparent)))));
     background: root.nested ? transparent : root.state-bg;
     border-radius: 6px * P.round;
     border-width: item.playing && P.kawaii ? 2px : 0px;
@@ -1682,10 +1844,10 @@ component ListRow inherits Rectangle {
         y: root.dragging ? root.drag-dy : 0px;
         height: root.height;
         padding-left: 8px;
-        padding-right: root.has-grip ? 40px : 12px;
+        padding-right: root.has-grip ? 40px : (root.scrub-room ? 30px : 12px);
         spacing: 12px;
         // Number, play marker or kind glyph, with a dot for pinned.
-        Rectangle {
+        glyph := Rectangle {
             width: 32px;
             if item.pinned && !item.playing: Text {
                 x: 0px;
@@ -1696,10 +1858,22 @@ component ListRow inherits Rectangle {
                 font-weight: 700;
                 color: P.verdigris;
             }
+            // The heart (Hearted songs) and the gear (a smart playlist) are
+            // drawn: neither is in JetBrains Mono, and Android has no
+            // fallback font, so they came out as empty boxes there.
+            property <bool> drawn: !item.marked && !item.playing && (item.kind == 17 || (item.kind == 5 && item.fixed));
+            if glyph.drawn: Icon {
+                x: parent.width - self.width;
+                y: (parent.height - self.height) / 2;
+                d: item.kind == 17 ? Icons.settings : Icons.heart;
+                size: 14px;
+                stroke: item.kind == 17 ? (P.kawaii ? P.muted : P.wave) : P.accent-text;
+                fill: item.kind == 17 ? transparent : P.accent-text;
+            }
             Text {
                 width: parent.width;
                 height: parent.height;
-                text: item.marked ? "✓" : (item.playing ? (P.kawaii ? "♪" : "▶") : (item.kind == 4 && item.on ? "✓" : (item.kind == 16 ? "∞" : (item.kind == 17 ? "⚙" : (item.kind == 5 && item.fixed ? "♥" : item.num)))));
+                text: glyph.drawn ? "" : (item.marked ? "✓" : (item.playing ? (P.kawaii ? "♪" : "▶") : (item.kind == 4 && item.on ? "✓" : (item.kind == 16 ? "∞" : item.num))));
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 font-family: P.mono;
@@ -1743,7 +1917,7 @@ component ListRow inherits Rectangle {
             font-size: 11px;
             color: P.copper;
         }
-        if item.sub != "" || item.kind <= 2: Text {
+        if !root.drop-sub && (item.sub != "" || item.kind <= 2): Text {
             horizontal-stretch: item.kind == 10 ? 5 : 2.5;
             preferred-width: 0px;
             min-width: 40px;
@@ -1753,7 +1927,7 @@ component ListRow inherits Rectangle {
             font-size: 12.5px;
             color: item.warn ? P.copper : (item.playing ? P.accent-text : (item.off ? P.wave : P.muted));
         }
-        if (item.meta != "" || item.kind <= 2) && (!slim || item.kind == 10): Text {
+        if !root.drop-meta && (item.meta != "" || item.kind <= 2) && (!slim || item.kind == 10): Text {
             horizontal-stretch: 2.5;
             preferred-width: 0px;
             min-width: 60px;
@@ -2059,6 +2233,7 @@ component ListRow inherits Rectangle {
                         full: parent.text;
                         cut: parent.preferred-width > parent.width + 0.5px;
                         down => { if item.selectable { root.select(); } }
+                        changed has-hover => { root.label-hover = self.has-hover; }
                     }
                 }
                 if item.meta != "": Text {
@@ -2070,6 +2245,7 @@ component ListRow inherits Rectangle {
                         full: parent.text;
                         cut: parent.preferred-width > parent.width + 0.5px;
                         down => { if item.selectable { root.select(); } }
+                        changed has-hover => { root.note-hover = self.has-hover; }
                     }
                 }
             }
@@ -2089,8 +2265,8 @@ component ListRow inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     h: 28px;
                     max-width: 340px;
-                    text: item.sub + "  ▾";
-                    peek: item.sub;
+                    text: item.sub;
+                    drop: true;
                     clicked => { root.act("choose"); }
                 }
                 if item.ctl == 3: Chip {
@@ -2134,6 +2310,7 @@ component ListRow inherits Rectangle {
                         full: parent.text;
                         cut: parent.preferred-width > parent.width + 0.5px;
                         down => { if item.selectable { root.select(); } }
+                        changed has-hover => { root.value-hover = self.has-hover; }
                     }
                 }
                 if item.ctl == 4: Chip {
@@ -2214,6 +2391,7 @@ component ListRow inherits Rectangle {
                         full: parent.text;
                         cut: parent.preferred-width > parent.width + 0.5px;
                         down => { if item.selectable { root.select(); } }
+                        changed has-hover => { root.other-hover = self.has-hover; }
                     }
                 }
             }
@@ -4273,6 +4451,24 @@ export component AppWindow inherits Window {
     in property <bool> can-back;
     in property <bool> can-forward;
     in-out property <string> search-text;
+    // Recent searches, newest first, offered under the empty search box.
+    in property <[string]> recent-searches;
+    // The letter scrubber's letters and the row each starts at; empty when
+    // the list isn't long and in A to Z order.
+    in property <[string]> scrub-letters;
+    in property <[int]> scrub-rows;
+    callback scrub-tick;
+    property <bool> scrub-shown: root.scrub-letters.length > 0 && !root.np-open && (root.layout == 0 || root.layout == 1)
+        && !root.eq-panel && !root.amp-panel;
+    // Pull down at the top of the list to look again (touch only).
+    in property <bool> can-refresh;
+    callback pull-refresh;
+    property <bool> at-top: root.layout == 0 ? (body.content-y >= -1px && list.content-y >= -1px)
+        : (root.layout == 1 && grid.content-y >= -1px);
+    callback recent-search(string);
+    callback clear-recent;
+    property <bool> recent-shown: !root.native-text && search-input.has-focus && root.search-text == ""
+        && !root.search-settings && root.recent-searches.length > 0;
     // In Settings the search box finds settings.
     in property <bool> search-settings;
     callback back;
@@ -4305,11 +4501,18 @@ export component AppWindow inherits Window {
     in property <bool> covers;
     in property <int> selected: -1;
     in property <bool> album-tracks;
+    // Every row's artist (or album) is the same, or empty: no column for it.
+    in property <bool> drop-sub;
+    in property <bool> drop-meta;
     // The open list is Hearted songs.
     in property <bool> hearted-open;
     in property <Hero> hero;
     in property <[string]> actions;
     in property <[string]> action-labels;
+    // A phone shows the first two actions as buttons and the rest in a "…"
+    // menu: these are the rest. Empty when all of them fit.
+    in property <[string]> more-actions;
+    in property <[string]> more-labels;
     callback row-select(int);
     callback row-activate(int);
     callback row-act(int, string);
@@ -4389,6 +4592,10 @@ export component AppWindow inherits Window {
     // The playing line among them; -1 for none (unsynced).
     in property <int> lyrics-current: -1;
     in property <bool> lyrics-synced;
+    // Synced, with the playing line kept in the middle and the rest dimmed.
+    in property <bool> lyrics-center;
+    // Where the playing line's middle is, down the centered lyrics.
+    property <length> lyr-mid;
     callback lyrics-clicked;
     // The Info page: a song's or an album's details, in the lyrics panel's
     // place. Opened from a row's menu, or from Now Playing for the song
@@ -4685,6 +4892,25 @@ export component AppWindow inherits Window {
             }
         }
     }
+    // Where the list, the grid and the page are scrolled to, so going back
+    // to a view can put it back there.
+    out property <length> list-y: -list.content-y;
+    out property <length> grid-y: -grid.content-y;
+    out property <length> body-y: -body.content-y;
+    public function set-scroll(l: length, g: length, b: length) {
+        list.content-y = -l;
+        grid.content-y = -g;
+        body.content-y = -b;
+    }
+    // Scroll so a row is at the top, as far as the list goes.
+    function jump-to-row(i: int) {
+        if root.layout == 0 {
+            list.content-y = -min(i * 40px, max(0px, list.content-height - list.visible-height));
+        }
+        if root.layout == 1 {
+            grid.content-y = -min(floor(i / grid.cols) * (grid.cell + 44px), max(0px, grid.content-height - grid.height));
+        }
+    }
     public function scroll-top() {
         list.content-y = 0;
         body.content-y = 0;
@@ -4814,7 +5040,7 @@ export component AppWindow inherits Window {
                                 enabled: root.can-forward;
                                 clicked => { root.forward(); keys.focus(); }
                             }
-                            Rectangle {
+                            sbox := Rectangle {
                                 horizontal-stretch: 1;
                                 min-width: 100px;
                                 preferred-width: 480px;
@@ -4886,7 +5112,7 @@ export component AppWindow inherits Window {
                             }
                             Rectangle { horizontal-stretch: 0.001; }
                             if P.kawaii && !root.compact: Text {
-                                text: P.light ? "ようこそ ♡ (｡•‿•｡)" : "おやすみ ☾ (っ˘ω˘ς )";
+                                text: P.light ? "ようこそ ♡ (｡•‿•｡)" : "おやすみ ☆ (っ˘ω˘ς )";
                                 vertical-alignment: center;
                                 font-size: 12px;
                                 color: P.muted;
@@ -4901,6 +5127,18 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         min-width: 0px;
                         clip: true;
+                        // Pull down at the top of a list (touch) to look
+                        // again: the server synced, the folders checked.
+                        pull := SwipeGestureHandler {
+                        width: parent.width;
+                        height: parent.height;
+                        property <length> pulled: self.swiping ? max(0px, self.current-position.y - self.pressed-position.y) : 0px;
+                        handle-swipe-down: Ui.touch && root.can-refresh && !root.np-open && root.at-top;
+                        swiped => {
+                            if self.current-position.y - self.pressed-position.y > 90px {
+                                root.pull-refresh();
+                            }
+                        }
 
                         // Album hero and track list. When the window is too
                         // short for the header, panels and some of the list,
@@ -4978,7 +5216,7 @@ export component AppWindow inherits Window {
                                                 border-radius: 11px;
                                                 background: P.raised;
                                                 kt := Text {
-                                                    text: "✿ " + root.hero.kicker;
+                                                    text: "♡ " + root.hero.kicker;
                                                     font-size: 10.5px;
                                                     font-weight: 500;
                                                     letter-spacing: 1.5px;
@@ -5028,13 +5266,20 @@ export component AppWindow inherits Window {
                                             padding-bottom: P.kawaii ? 3px : 0px;
                                             HScroll {
                                             spacing: root.tight ? 6px : 8px;
-                                            for a[i] in root.actions: Chip {
+                                            // On a phone, the first two and a "…" menu.
+                                            for a[i] in (root.tiny && root.more-actions.length > 0 ? [root.actions[0], root.actions[1]] : root.actions): Chip {
                                                 h: root.tight ? 32px : (P.kawaii ? 36px : 40px);
                                                 text: root.action-labels[i];
                                                 primary: i == 0;
                                                 icon-only: (root.compact && i > 1) || (root.tight && i > 0) || root.tiny;
                                                 icon: a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "queue" ? Icons.plus : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                                 clicked => { root.view-action(a); keys.focus(); }
+                                            }
+                                            if root.tiny && root.more-actions.length > 0: MoreChip {
+                                                h: root.tight ? 32px : (P.kawaii ? 36px : 40px);
+                                                actions: root.more-actions;
+                                                labels: root.more-labels;
+                                                picked(a) => { root.view-action(a); keys.focus(); }
                                             }
                                             }
                                         }
@@ -5099,12 +5344,18 @@ export component AppWindow inherits Window {
                                 padding-bottom: 12px;
                                 HScroll {
                                 spacing: 6px;
-                                for a[i] in root.actions: Chip {
+                                // On a phone, the first two and a "…" menu.
+                                for a[i] in (root.tiny && root.more-actions.length > 0 ? [root.actions[0], root.actions[1]] : root.actions): Chip {
                                     text: root.action-labels[i];
                                     icon: a == "new" || a == "subscribe" || a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                     icon-only: root.tiny && (a == "queue" || a == "playlist" || a == "shuffle");
                                     primary: a == "play";
                                     clicked => { root.view-action(a); keys.focus(); }
+                                }
+                                if root.tiny && root.more-actions.length > 0: MoreChip {
+                                    actions: root.more-actions;
+                                    labels: root.more-labels;
+                                    picked(a) => { root.view-action(a); keys.focus(); }
                                 }
                                 }
                             }
@@ -5154,6 +5405,7 @@ export component AppWindow inherits Window {
                                     if root.columns[2] != "": Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 40px; text: root.columns[2]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
                                     if root.columns[3] != "" && root.list-w >= 560px: Text { horizontal-stretch: 2.5; preferred-width: 0px; min-width: 60px; text: root.columns[3]; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
                                     Text { min-width: root.list-w < 400px ? 44px : 64px; text: root.columns[4]; horizontal-alignment: right; vertical-alignment: center; font-size: 11.5px; color: P.muted; }
+                                    if root.scrub-shown: Rectangle { width: 18px; }
                                 }
                             }
 
@@ -5188,6 +5440,9 @@ export component AppWindow inherits Window {
                                         selected: i == root.selected;
                                         focused: keys.has-focus;
                                         album-tracks: root.album-tracks;
+                                        drop-sub: root.drop-sub;
+                                        drop-meta: root.drop-meta;
+                                        scrub-room: root.scrub-shown;
                                         hearted: root.hearted-open;
                                         marking: root.marking;
                                         draggable: root.draggable;
@@ -5301,12 +5556,18 @@ export component AppWindow inherits Window {
                                 padding-bottom: 12px;
                                 HScroll {
                                 spacing: 6px;
-                                for a[i] in root.actions: Chip {
+                                // On a phone, the first two and a "…" menu.
+                                for a[i] in (root.tiny && root.more-actions.length > 0 ? [root.actions[0], root.actions[1]] : root.actions): Chip {
                                     text: root.action-labels[i];
                                     icon: a == "queue" ? Icons.plus : (a == "play" ? Icons.play : (a == "shuffle" ? Icons.shuffle : (a == "playlist" ? (P.kawaii ? Icons.heart : Icons.playlists) : "")));
                                     icon-only: root.tiny && (a == "queue" || a == "playlist" || a == "shuffle");
                                     primary: a == "play";
                                     clicked => { root.view-action(a); keys.focus(); }
+                                }
+                                if root.tiny && root.more-actions.length > 0: MoreChip {
+                                    actions: root.more-actions;
+                                    labels: root.more-labels;
+                                    picked(a) => { root.view-action(a); keys.focus(); }
                                 }
                                 }
                             }
@@ -5466,7 +5727,40 @@ export component AppWindow inherits Window {
                             info => { root.info-button(); keys.focus(); }
                             queue => { root.queue-button(); keys.focus(); }
                         }
-                    }
+                    
+                        // The pull's marker: comes down with the finger, lit
+                        // once far enough to let go.
+                        if pull.pulled > 4px: Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: min(pull.pulled, 110px) - 40px;
+                            width: 36px;
+                            height: 36px;
+                            border-radius: 18px;
+                            background: P.raised;
+                            border-width: 1px;
+                            border-color: pull.pulled > 90px ? P.verdigris : P.border;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: P.shadow;
+                            Icon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                d: Icons.repeat;
+                                size: 18px;
+                                stroke: pull.pulled > 90px ? P.verdigris : P.muted;
+                            }
+                        }
+                        // The letter scrubber, beside the rows on the right.
+                        if root.scrub-shown: Scrubber {
+                            property <length> top: max(0px, (root.layout == 1 ? grid.absolute-position.y : list.absolute-position.y) - pull.absolute-position.y);
+                            x: parent.width - self.width - 4px;
+                            y: self.top + 4px;
+                            height: max(0px, min(root.layout == 1 ? grid.height : list.height, parent.height - self.top) - 8px - (root.marked-count > 0 || root.marking ? root.sel-gap : 0px));
+                            letters: root.scrub-letters;
+                            jump(k) => { root.jump-to-row(root.scrub-rows[k]); }
+                            tick => { root.scrub-tick(); }
+                        }
+                        }
+}
                 }
 
                 Rectangle { width: root.side-count > 0 ? root.lyrics-w : 0px; }
@@ -5853,8 +6147,10 @@ export component AppWindow inherits Window {
                         // Lit while a timer runs; the time left is in its
                         // tooltip, at the top of its menu, and on Now
                         // Playing. A badge here would squeeze the output
-                        // chip.
-                        SleepButton {
+                        // chip. A phone leaves it, and the volume, to Now
+                        // Playing, so the song's title has room; its volume
+                        // buttons set the volume anyway.
+                        if !root.tiny: SleepButton {
                             y: (parent.height - self.height) / 2;
                             active: root.sleep-label != "";
                             label: root.sleep-label;
@@ -5878,7 +6174,7 @@ export component AppWindow inherits Window {
                         // Desktop: the button mutes and the slider sits beside
                         // it. Touch: the button opens a tall slider, since a
                         // short sideways one is too fiddly for a finger.
-                        IconButton {
+                        if !root.tiny: IconButton {
                             y: (parent.height - self.height) / 2;
                             icon: root.muted ? Icons.muted : Icons.volume;
                             tip: Ui.touch ? "Volume" : (root.muted ? "Unmute" : "Mute");
@@ -5892,10 +6188,8 @@ export component AppWindow inherits Window {
                                 keys.focus();
                             }
                         }
-                        if !Ui.touch: Bar {
-                            // Tiny: a little shorter, so the sleep timer's
-                            // moon and the percentage both fit.
-                            width: root.tiny ? 48px : (root.tight ? 80px : 96px);
+                        if !Ui.touch && !root.tiny: Bar {
+                            width: root.tight ? 80px : 96px;
                             y: (parent.height - self.height) / 2;
                             label: root.volume-locked ? "Volume, fixed at 100% for bit-perfect" : "Volume";
                             value: root.volume-locked ? 1.0 : root.volume;
@@ -5905,7 +6199,7 @@ export component AppWindow inherits Window {
                             live: true;
                             changed(v) => { root.set-volume(v); }
                         }
-                        Rectangle {
+                        if !root.tiny: Rectangle {
                             width: 40px;
                             Text {
                                 width: parent.width;
@@ -5922,6 +6216,79 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+            }
+        }
+
+        // Recent searches, dropped down under the empty search box while it
+        // has the focus. A click searches again. Android shows them in its
+        // own search box instead.
+        if root.recent-shown: Rectangle {
+            x: sbox.absolute-position.x - keys.absolute-position.x;
+            y: sbox.absolute-position.y - keys.absolute-position.y + sbox.height + 4px;
+            width: sbox.width;
+            height: rcol.preferred-height;
+            background: P.raised;
+            border-radius: 6px * P.round;
+            border-width: 1px;
+            border-color: P.border;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: P.shadow;
+            // Clicks between the rows stop here, not on the list under it.
+            TouchArea {}
+            rcol := VerticalLayout {
+                padding: 6px;
+                spacing: 0px;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 4px;
+                    height: 26px;
+                    Text {
+                        text: "Recent searches";
+                        font-size: 11px;
+                        color: P.muted;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: "Clear";
+                        font-size: 11px;
+                        color: P.accent-text;
+                        vertical-alignment: center;
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.clear-recent(); }
+                        }
+                    }
+                }
+                for q in root.recent-searches: Rectangle {
+                    height: 32px;
+                    border-radius: 4px * P.round;
+                    background: rta.has-hover ? P.hover : transparent;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 8px;
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            d: Icons.history;
+                            size: 14px;
+                        }
+                        Text {
+                            text: q;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: P.text;
+                            font-size: 13px;
+                        }
+                    }
+                    rta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.recent-search(q);
+                            search-input.focus();
+                        }
+                    }
+                }
             }
         }
 
@@ -6449,7 +6816,40 @@ export component AppWindow inherits Window {
                 // A Flickable rather than a plain box: a box takes its child
                 // layout's height as its own minimum, which pushed the
                 // panel's layout past the panel and the lines over the app.
-                if root.lyrics-synced: Flickable {
+                // Centered: every line, and the view slides so the playing
+                // line's middle sits in the panel's middle. The first lines
+                // start at the top and the last ones stay at the bottom,
+                // as there's nothing to scroll past them.
+                if root.lyrics-synced && root.lyrics-center: Flickable {
+                    vertical-stretch: 1;
+                    interactive: false;
+                    content-y: root.lyrics-current < 0 ? 0px
+                        : max(min(0px, self.height - self.content-height), min(0px, self.height / 2 - root.lyr-mid));
+                    animate content-y { duration: 320ms; easing: ease-out; }
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 10px;
+                        padding-bottom: 8px;
+                        for l[i] in root.lyrics-lines: Text {
+                            // Tells the panel where the playing line is,
+                            // whenever it, or the lines above it, move.
+                            property <bool> playing: i == root.lyrics-current;
+                            init => { if self.playing { root.lyr-mid = self.y + self.height / 2; } }
+                            changed playing => { if self.playing { root.lyr-mid = self.y + self.height / 2; } }
+                            changed y => { if self.playing { root.lyr-mid = self.y + self.height / 2; } }
+                            changed height => { if self.playing { root.lyr-mid = self.y + self.height / 2; } }
+                            text: l;
+                            wrap: word-wrap;
+                            horizontal-alignment: left;
+                            font-size: self.playing ? 17px : 14.5px;
+                            font-weight: self.playing ? 700 : 500;
+                            color: self.playing ? P.accent-text : P.muted;
+                            opacity: self.playing || root.lyrics-current < 0 ? 1 : 0.55;
+                            animate opacity { duration: 200ms; }
+                        }
+                    }
+                }
+                if root.lyrics-synced && !root.lyrics-center: Flickable {
                     vertical-stretch: 1;
                     interactive: false;
                     VerticalLayout {

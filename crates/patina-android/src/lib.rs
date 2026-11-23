@@ -175,6 +175,18 @@ impl Hooks for AndroidHooks {
     fn driving(&self) -> bool {
         jni_glue::driving()
     }
+
+    fn system_volume(&self) -> Option<f32> {
+        jni_glue::music_volume()
+    }
+
+    fn set_system_volume(&self, v: f32) {
+        jni_glue::set_music_volume(v);
+    }
+
+    fn haptic(&self, kind: patina_gui::platform::Haptic) {
+        jni_glue::haptic(kind.code());
+    }
 }
 
 /// Point the app's folders (config, library, cache) at Android's app

@@ -566,10 +566,16 @@ pub fn prompt(id: u64, p: &Prompt) -> bool {
         let title = env.new_string(&p.title)?;
         let message = env.new_string(&p.message)?;
         let ok = env.new_string(&p.ok)?;
+        let sugg =
+            env.new_object_array(p.suggestions.len() as i32, "java/lang/String", JObject::null())?;
+        for (i, s) in p.suggestions.iter().enumerate() {
+            let js = env.new_string(s)?;
+            env.set_object_array_element(&sugg, i as i32, &js)?;
+        }
         env.call_static_method(
             class,
             "prompt",
-            "(JLjava/lang/String;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;[ZLjava/lang/String;ZZ)V",
+            "(JLjava/lang/String;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;[ZLjava/lang/String;ZZ[Ljava/lang/String;)V",
             &[
                 JValue::Long(id as jlong),
                 JValue::Object(&title),
@@ -580,6 +586,7 @@ pub fn prompt(id: u64, p: &Prompt) -> bool {
                 JValue::Object(&ok),
                 JValue::Bool(u8::from(p.live)),
                 JValue::Bool(u8::from(p.light)),
+                JValue::Object(&sugg),
             ],
         )?;
         Ok(())
@@ -742,6 +749,31 @@ pub fn widget_colors(c: &[u32; 6]) {
         let arr = env.new_int_array(v.len() as i32)?;
         env.set_int_array_region(&arr, 0, &v)?;
         env.call_static_method(class, "widgetColors", "([I)V", &[JValue::Object(&arr)])?;
+        Ok(())
+    });
+}
+
+/// Android's media volume, 0 to 1. The phone's volume buttons set it, and
+/// the app's volume slider sets it too, so there's one volume, not two.
+pub fn music_volume() -> Option<f32> {
+    with_java(|env, class| {
+        env.call_static_method(class, "musicVolume", "()F", &[])?
+            .f()
+    })
+    .filter(|v| *v >= 0.0)
+}
+
+pub fn set_music_volume(v: f32) {
+    with_java(|env, class| {
+        env.call_static_method(class, "setMusicVolume", "(F)V", &[JValue::Float(v)])?;
+        Ok(())
+    });
+}
+
+/// A short buzz: 0 long press, 1 tick, 2 the lightest (scrubbing).
+pub fn haptic(kind: i32) {
+    with_java(|env, class| {
+        env.call_static_method(class, "haptic", "(I)V", &[JValue::Int(kind)])?;
         Ok(())
     });
 }

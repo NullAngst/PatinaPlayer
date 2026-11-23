@@ -23,7 +23,11 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 ### Views
 
 - Folders, Artists (by album artist or track artist, as a grid of pictures or a list), Albums (by name, artist, year, recently added, most played, rating or random), Songs (sortable on seven columns), Genres, Playlists, Radio, Podcasts, Queue and Downloads.
-- Search over everything at once. Every word has to match somewhere, so `nirv blea` finds Bleach.
+- Search over everything at once. Every word has to match somewhere, so `nirv blea` finds Bleach. Your last eight searches drop down under the empty search box (on Android, under Android's own search box); pick one to search for it again, or Clear them. They're kept in `recent-searches.txt` in the app's data folder.
+- A letter scrubber down the right edge of a long list in A to Z order (Artists, Albums, Songs, Genres, Folders, a server's folders): press or drag on it and the list jumps to that letter, with the letter shown big beside your finger. It works out which column the list is sorted by (the title, the artist or the album) and only shows when the list is in that order, so a list by year or a playlist's own order gets none.
+- Going back to a view puts it back where you'd scrolled to, from an album back to a long artist list, say. Opening a view from the sidebar starts it at the top.
+- On a touch screen, pull down at the top of Artists, Albums, Songs, Genres, Folders, Playlists or a server's page to look again: the server picked in the sidebar (or all of them) syncs, and your local folders get checked. On Podcasts it fetches the feeds.
+- A list leaves out a column every row has the same thing in, or nothing: a playlist of one artist's songs has no artist column, and that artist goes under the playlist's title instead. The title gets the room. An empty page says what fills it (Hearted songs says where the heart is).
 - Recently played: every song you've heard, newest first, under Today, Yesterday, the weekday or the date. Albums and Songs can sort by recently played too.
 - Listening stats: Most listened (top five songs, albums and artists), Top albums and Top artists, built from your play counts. A song counts once you've heard half of it or four minutes, whichever comes first.
 - Favorites: star a folder, album or artist and it sits in the sidebar, one click away.
@@ -32,7 +36,7 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 - View info, in the same menu for a song or an album (and in the queue): everything known about it in a panel where the lyrics go. For a song: title, artists, album, track and disc, year, every genre, composer, grouping, BPM, comment, length, rating, the heart, plays, last played, when it was added, the format in full, the file's size and path (or its server and id), and ReplayGain. Below that, every tag in the file as it is right now, and the pictures in it, for a song on this device or a server song kept in the cache. For an album: its artists, years, genres, songs, discs, length, rating, plays, the formats it comes in, its size and its folder. The Info button on Now Playing opens it for the song playing, and then it moves on with the queue. Tap or click a line to copy its value (a path, a MusicBrainz id, the format), and the note says what was copied.
 - Lyrics, Info and the Queue share one panel at the right. Open more than one and they become tabs across its top, so they never squeeze the list between them. Ctrl+L or `q` while that panel is open behind another tab brings it to the front instead of closing it.
 - Undo instead of "Are you sure?": deleting a playlist, a smart playlist, a saved mix or a radio station, clearing the queue, and taking songs out of a playlist or the queue happen at once, and the note that says so has an Undo button for 10 seconds (Ctrl+Z on the desktop and in the terminal app). Tap the note to take it down; it also goes when you leave that page. Only the last one can be put back. A playlist on a server still asks first, since the server deletes it for good. A mix that was kept offline comes back without its offline copies; keep it offline again.
-- Pick several rows and act on them at once: play them, queue them, add them to a playlist, keep them offline, send them to an iPod, or take them out of a playlist or the queue. Ctrl-click and Shift-click on the desktop, Space in the terminal app, and on a phone long press, Select, then tap the others. A bar at the bottom says how many are picked, with Pick none and Invert (everything not picked, and the picked ones dropped). While it's up, the list ends two rows short of the bottom, so the last rows scroll out from under it.
+- Pick several rows and act on them at once: play them, queue them, add them to a playlist, keep them offline, send them to an iPod, or take them out of a playlist or the queue. Ctrl-click and Shift-click on the desktop, Space in the terminal app, and on a phone long press, Select, then tap the others. A bar at the bottom says how many are picked, with Pick none and Invert (everything not picked, and the picked ones dropped). The list runs on under the bar, with room after its last row, so the last rows scroll out from under it.
 - Drag songs by the grip at the right of each row to reorder the queue or a playlist. On a touch screen, tap the grip to lift the song and tap where it should go.
 - Now Playing: at the top of the sidebar, or tap the cover in the bottom bar (Ctrl+N in the terminal app), for the big cover, the song, its format, whether it's bit-perfect, the output it's going to, every stage of the sound chain that's touching it, and the lyrics beside it. Going anywhere else (the sidebar, a search, Back, Go to album) closes it, so you see where you went. On a phone it takes the whole screen and keeps it simple: the cover, the song with its heart, the seek bar with the format between the times, the transport, volume, and lyrics and the queue at the foot. Rating, Go to album or artist, the cover and the sound chain are in the menu at the top.
 - Cover backdrop: the playing song's cover, blurred, washed over whatever theme you use, behind Now Playing or behind every view. Off by default; Settings, Appearance turns it on and sets how strong it is. It works the same on every theme, OLED included (though on OLED it lights pixels that would otherwise be off). Behind every view, the sidebar, the bottom bar, the queue and lyrics panels, the search box and the EQ and amp panels let it through too. On a phone, where the lyrics, info and queue panel covers the list, the panel is solid with the backdrop drawn into it, so the list doesn't show through. A light cover under light text (or a dark one under dark text) gets a veil of the theme's own ground over it, as much as the muted text needs to stay readable and no more.
@@ -46,7 +50,8 @@ It comes as two apps on one core: a desktop app (Slint) that's also the Android 
 - Hover any icon button for what it does.
 - Every library view has Play, Shuffle, Add to queue and Add to playlist at the top, and they take the whole view. Shuffle on a folder of three hundred albums plays all of them in random order.
 - Ratings, 1 to 5 stars, on songs and albums.
-- Lyrics, only when you press the Lyrics button: the song's tags, an `.lrc` next to it, its server, then LRCLIB if you've turned that on. Synced lyrics follow the song. While the panel stays open, the next song's lyrics are looked up as it starts; closing the panel stops that.
+- Lyrics, only when you press the Lyrics button: the song's tags, an `.lrc` next to it, its server, then LRCLIB if you've turned that on. Synced lyrics follow the song, with the line playing kept in the middle of the panel, larger, and the others dimmed (Settings, Lyrics turns that off for the old way, from a couple of lines before it at the top). Plain lyrics leave out LRC's header tags (`[ti:...]`, `[ar:...]`) if they carry them. While the panel stays open, the next song's lyrics are looked up as it starts; closing the panel stops that.
+- A row of buttons too long for its space has an arrow at the edge it carries on past; tap the arrow, or swipe the row, for the rest. On a phone, a view's buttons are Play, Shuffle and "…", which has the rest.
 
 ### Smart playlists
 
@@ -186,6 +191,8 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 - Settings has a search: with Settings open, the search box finds settings by words in their name, their help line or their group (`gapless`, `podcast speed`, `cache size`). Groups with a match open on their own. Clear the box to see them all again.
 - Themes: Runout (dark verdigris and copper, the default), Light, Dark, OLED (true black), and Kawaii Light and Kawaii Dark (pastel, rounded, with Japanese section names). The terminal app follows the theme too.
 - Fonts are bundled, so it looks the same everywhere.
+- Wayland or X11: Settings, Desktop, Display server. Automatic uses Wayland when the desktop has it; X11 goes through XWayland on a Wayland desktop. It takes effect the next time the app starts. Starting it with `WAYLAND_DISPLAY=` in front does the same once.
+- The visualizer moves at about 60 frames a second whatever the output buffer is: it works out which samples are being heard at each frame rather than waiting for the next buffer to come round, so a big `buffer_ms` doesn't make it jumpy.
 
 ### The terminal app
 
@@ -205,7 +212,9 @@ It needs libgpod installed, which is what Rhythmbox and gtkpod use (`libgpod4` o
 - Android Auto works with the app closed on the phone: connecting the car starts the player in the background, with your last queue where you left it, and opening the app later carries on with the same player. The car shows what's playing with next, previous and play/pause, plus a heart for the song playing and a shuffle button. Its tabs are Home (Shuffle everything, Favorites, Recently played, Recently added, Mixes), Artists, Albums, Playlists (smart playlists included) and Folders, with album covers in the lists and as grids. A long list of artists or albums comes as one folder per letter. A car with room for only four tabs gets Home at the top of Playlists. "Play Nirvana on PatinaPlayer" plays an artist, album or songs that match.
 - A home screen widget with the cover, the song, and back, play or pause, and next, in the app's theme. It keeps the theme after a restart.
 - The System theme (Android 12 and later) follows your wallpaper's Material You colors and the phone's light or dark mode.
-- The volume button opens a tall slider, easier to hit with a thumb than the bar's.
+- The volume is the phone's media volume: the volume buttons and the app's slider move the same thing, and the slider follows the buttons. The first time, whatever the app's own volume was goes into the phone's, so nothing gets louder. On Now Playing, the volume button opens a tall slider, easier to hit with a thumb than the bar's. The bar at the bottom leaves the volume and the sleep timer to Now Playing on a phone, so the song's title has room.
+- A light buzz under the finger on a long press, on picking rows, and on each letter of the scrubber, following Android's own touch feedback setting.
+- When the sound moves to another device on its own (a Bluetooth headset connects or goes away), the song pauses where it was. Play carries on from there, on whichever device has the sound now.
 - The Drive screen (Minimal UX while driving, in Settings, Appearance, on by default): when the phone goes into car mode, which Android Auto turns on and so do driving modes built on it, the app shows a car-style screen instead of the usual one. The cover, the song in big type, a thick progress bar, huge previous, play and next buttons, and the heart, shuffle and volume under them. Swipe anywhere left or right for the next or previous song. On a landscape screen the cover sits beside the buttons. Full app goes back to the whole app until driving ends, and a Drive button in the corner brings the Drive screen back. When the phone leaves car mode it all goes back to normal.
 - Settings leaves out what doesn't apply on a phone: the Desktop group (tray icon, close to tray), the iPod group, the Files group (paths inside the app's private folder), Sample format and Dither (AAudio always takes float) and Hold on metered connections (that comes from NetworkManager, which Android doesn't have).
 - Back up the library (Settings, Library) saves a copy of the library database through Android's save dialog, to Downloads, Drive or wherever you pick. It's the database the app keeps in its private folder: play counts, ratings, playlists, smart playlists, listening history and podcast positions. Passwords and tokens aren't in it; they're in the keyring.
@@ -237,6 +246,17 @@ Download `PatinaPlayer-<version>-arm64.apk` from Releases on your phone.
 2. Open PatinaPlayer and allow music and notifications when asked.
 
 It's arm64 only, which covers every phone from the last several years.
+
+### FreeBSD
+
+Download `PatinaPlayer-<version>-freebsd-amd64.tar.gz` from Releases.
+
+1. Install what it needs: `pkg install pipewire alsa-lib gnutls fontconfig freetype2 libxkbcommon wayland libX11 libXcursor libXrandr libXi mesa-libs`
+2. Unpack it: `tar -xzf PatinaPlayer-*-freebsd-amd64.tar.gz`
+3. Go in and copy it into place: `cp -R bin share /usr/local/` as root, or `cp -R bin share ~/.local/` for just you, with `~/.local/bin` on your PATH.
+4. Run `patinaplayer`, or `patinaplayer-tui` for the terminal app.
+
+FFmpeg is built in, as in the AppImage. Sound goes through PipeWire when it's running, and through alsa-lib otherwise, which plays to OSS on FreeBSD. The tray icon needs a desktop with StatusNotifierItem (Plasma, or a panel plugin for it). This build is made in a FreeBSD VM on every release; I don't run FreeBSD myself, so tell me if something's off.
 
 ## Building from source
 
@@ -275,6 +295,14 @@ On another distro the names differ but the list is the same. Fedora calls them `
 
 `bash packaging/build-appimage.sh`. It needs everything above plus `nasm`, `libgnutls28-dev` and `zlib1g-dev` (or whichever names your distro uses), since it builds its own FFmpeg. The result lands in `target/appimage/`.
 
+### FreeBSD, locally
+
+`bash packaging/build-freebsd.sh`, on FreeBSD. It needs `pkg install rust git gmake pkgconf nasm gnutls llvm pipewire alsa-lib libxkbcommon wayland fontconfig freetype2 libX11 libXcursor libXrandr libXi mesa-libs curl bash` (or rustup for Rust). It builds the static FFmpeg with gmake, then both apps, and packs `target/freebsd/PatinaPlayer-<version>-freebsd-<arch>.tar.gz`.
+
+FreeBSD's libutil has a `pw_init()` of its own, so FreeBSD's PipeWire renames PipeWire's `pw_init` and `pw_deinit` to `pipewire_init` and `pipewire_deinit`, with `pw_init` left as a macro. The `pipewire-sys` bindings come out without `pw_init`, and the `pipewire` crate stops with "cannot find function `pw_init` in crate `pw_sys`". `packaging/patch-pipewire-freebsd.sh` fixes that for the build, the same way the Slint patch works for the APK: it fetches `pipewire-sys` at the version `Cargo.lock` has, checks it against the lockfile, applies `packaging/pipewire-sys-freebsd.patch` (bindgen picks up the real names, and on FreeBSD only they're given their usual ones), and hands it to cargo with `--config` for that one build. Linux builds never see it. Once `pipewire-sys` takes a fix of its own, the script notices and builds without it.
+
+A plain `cargo build` on FreeBSD needs the same `--config` line; the script prints the folder to point it at: `cargo build --release --config "patch.crates-io.pipewire-sys.path=\"$(bash packaging/patch-pipewire-freebsd.sh target/pipewire-freebsd)\""`
+
 ### The APK, locally
 
 `bash packaging/build-apk.sh`. It needs the Android SDK with build-tools and a platform of 34 or newer (`ANDROID_HOME`), the NDK (`ANDROID_NDK_ROOT`), JDK 17 or newer, cmake, `curl` and `patch`, and `rustup target add aarch64-linux-android`. It builds FFmpeg and Mbed TLS for Android first, then the Rust library, the Java side and the APK, without Gradle. The result lands in `target/apk/`.
@@ -285,14 +313,14 @@ Without a release key in the environment it signs with a debug key kept in `targ
 
 ## Making a release
 
-The Release workflow builds the AppImage and the APK from a tag and attaches them to that tag's release. It only runs when you start it, never on a push.
+The Release workflow builds the AppImage, the APK and the FreeBSD tarball from a tag and attaches them to that tag's release. It only runs when you start it, never on a push.
 
 1. Go to Releases on GitHub and click Draft a new release.
 2. Under Choose a tag, type a new tag (like `v1.2.0`) and create it there, on `main`.
 3. Write the notes and click Publish release.
 4. Go to Actions and click the Release workflow.
 5. Click Run workflow, pick that tag under "Use workflow from", and run it.
-6. Wait. The first run takes about 15 minutes; later ones are faster, since FFmpeg and the Rust build are cached. The AppImage, its `.zsync` and the APK land on the release you made.
+6. Wait. The first run takes about 15 minutes; later ones are faster, since FFmpeg and the Rust build are cached. The FreeBSD build runs in a VM and isn't cached, so it can take longer than the others. The AppImage, its `.zsync`, the APK and the FreeBSD tarball land on the release you made. If one of them fails, the others still go up.
 
 If it was run on a branch, or there's no release for the tag yet, it stops in the first few seconds and says which. Running it again on the same tag replaces the files on the release.
 
@@ -398,10 +426,12 @@ balance = 0              # -100 (left only) to 100 (right only)
 
 [lyrics]
 online = false           # ask LRCLIB when nothing local or on the server has them
+center = true            # synced lyrics keep the playing line in the middle
 
 [desktop]
 tray = true
 close_to_tray = true     # closing the window hides it there and keeps playing
+display = "auto"         # auto (Wayland when there is one) or x11; read at start
 
 [cast]
 snapcast = ""            # a snapserver that doesn't announce itself: "host" or "host:port"
