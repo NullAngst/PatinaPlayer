@@ -1,5 +1,12 @@
 # Changes
 
+2026.11.23 - Bug fix (fast scrolling on touch screens)
+
+* Quick flicks scroll the list again. Pull to refresh is gone: Slint's swipe handler, which the pull was built on, holds each touch back while it decides whether it's a swipe, so a fast flick never reached the list, and several fast flicks in a row could start a pull and sync every server. Refresh is a button in Artists, Albums, Songs, Genres, Folders and Playlists now (in the "…" menu on a phone), doing what the pull did. Podcasts keeps its own Refresh.
+* Rows and queue rows no longer light up as hovered on a touch screen. A touched row kept the hover after the finger lifted, so a fast scroll left several rows lit at once.
+
+Reasons for changes: bug report with two screen recordings: fast scrolling stuttered, rows stayed highlighted, and syncs started on their own.
+
 2026.11.23 - Bug fix (pull to refresh taking over a scroll)
 
 * Scrolling up a list and reaching the top no longer turns into a pull to refresh partway through the same touch, which stopped the list from scrolling until the finger let go. Whether a touch can pull is decided when the finger goes down: only one that starts with the list already at the top. A pull, once started, still holds the touch until it's let go: Slint's swipe handling can't hand a gesture back to the list.

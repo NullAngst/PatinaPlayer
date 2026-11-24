@@ -1737,7 +1737,9 @@ component ListRow inherits Rectangle {
     property <bool> note-hover;
     property <bool> value-hover;
     property <bool> other-hover;
-    property <bool> hovered: ta.has-hover || root.label-hover || root.note-hover || root.value-hover || root.other-hover;
+    // A finger has no hover: a row touched kept it after the finger
+    // lifted, so a fast scroll left several rows lit at once.
+    property <bool> hovered: !Ui.touch && (ta.has-hover || root.label-hover || root.note-hover || root.value-hover || root.other-hover);
     // Inside an open Settings group the ground is already the idle
     // selection color, so hover and selection go a step up from it.
     property <bool> nested: item.nest > 0;
@@ -2415,7 +2417,8 @@ component AlbumTile inherits Rectangle {
     property <length> press-x;
     property <length> press-y;
     border-radius: 8px * P.round;
-    background: selected || item.marked ? P.raised : (ta.has-hover ? P.hover : transparent);
+    // No hover under a finger, as for list rows.
+    background: selected || item.marked ? P.raised : (ta.has-hover && !Ui.touch ? P.hover : transparent);
     border-width: item.marked ? 2px : 0px;
     border-color: P.verdigris;
     VerticalLayout {
@@ -2603,7 +2606,7 @@ component QueueLine inherits Rectangle {
     border-radius: 6px * P.round;
     border-width: q.playing && P.kawaii ? 2px : 0px;
     border-color: P.verdigris;
-    background: root.dragging ? transparent : (q.playing ? P.playing-bg : (selected || q.marked || root.lifted ? P.raised : (qta.has-hover ? P.hover : transparent)));
+    background: root.dragging ? transparent : (q.playing ? P.playing-bg : (selected || q.marked || root.lifted ? P.raised : (qta.has-hover && !Ui.touch ? P.hover : transparent)));
     if q.marked || root.lifted: Rectangle {
         x: 0px;
         y: root.dragging ? root.drag-dy + 8px : 8px;
@@ -4460,11 +4463,6 @@ export component AppWindow inherits Window {
     callback scrub-tick;
     property <bool> scrub-shown: root.scrub-letters.length > 0 && !root.np-open && (root.layout == 0 || root.layout == 1)
         && !root.eq-panel && !root.amp-panel;
-    // Pull down at the top of the list to look again (touch only).
-    in property <bool> can-refresh;
-    callback pull-refresh;
-    property <bool> at-top: root.layout == 0 ? (body.content-y >= -1px && list.content-y >= -1px)
-        : (root.layout == 1 && grid.content-y >= -1px);
     callback recent-search(string);
     callback clear-recent;
     property <bool> recent-shown: !root.native-text && search-input.has-focus && root.search-text == ""
@@ -5127,27 +5125,14 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         min-width: 0px;
                         clip: true;
-                        // Pull down at the top of a list (touch) to look
-                        // again: the server synced, the folders checked.
-                        pull := SwipeGestureHandler {
+                        // Holds the views, and places the letter scrubber
+                        // beside whichever list shows. (No pull to refresh
+                        // around them: any swipe handler here holds back each
+                        // touch long enough that a quick flick never reaches
+                        // the list. Refresh is a button instead.)
+                        pull := Rectangle {
                         width: parent.width;
                         height: parent.height;
-                        property <length> pulled: self.swiping ? max(0px, self.current-position.y - self.pressed-position.y) : 0px;
-                        // Decided when the finger goes down: only a touch that
-                        // starts with the list already at the top can pull.
-                        // Checked on every move instead, a scroll up the list
-                        // that reached the top was taken over partway through,
-                        // and the list stopped scrolling until the finger let go.
-                        property <bool> armed;
-                        property <bool> top: root.at-top;
-                        changed pressed-position => { self.armed = root.at-top; }
-                        changed top => { if !self.top { self.armed = false; } }
-                        handle-swipe-down: Ui.touch && root.can-refresh && !root.np-open && root.at-top && self.armed;
-                        swiped => {
-                            if self.current-position.y - self.pressed-position.y > 90px {
-                                root.pull-refresh();
-                            }
-                        }
 
                         // Album hero and track list. When the window is too
                         // short for the header, panels and some of the list,
@@ -5737,27 +5722,6 @@ export component AppWindow inherits Window {
                             queue => { root.queue-button(); keys.focus(); }
                         }
                     
-                        // The pull's marker: comes down with the finger, lit
-                        // once far enough to let go.
-                        if pull.pulled > 4px: Rectangle {
-                            x: (parent.width - self.width) / 2;
-                            y: min(pull.pulled, 110px) - 40px;
-                            width: 36px;
-                            height: 36px;
-                            border-radius: 18px;
-                            background: P.raised;
-                            border-width: 1px;
-                            border-color: pull.pulled > 90px ? P.verdigris : P.border;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: P.shadow;
-                            Icon {
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                d: Icons.repeat;
-                                size: 18px;
-                                stroke: pull.pulled > 90px ? P.verdigris : P.muted;
-                            }
-                        }
                         // The letter scrubber, beside the rows on the right.
                         if root.scrub-shown: Scrubber {
                             property <length> top: max(0px, (root.layout == 1 ? grid.absolute-position.y : list.absolute-position.y) - pull.absolute-position.y);

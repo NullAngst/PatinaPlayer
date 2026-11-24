@@ -937,6 +937,18 @@ impl State {
         if self.b.ipod_connected() && self.b.can_play_view() {
             acts.push(("ipod", "Send to iPod".into()));
         }
+        // Look again: the server synced, the folders checked, the feeds
+        // fetched (Podcasts has its own). Last, so on a phone it's in the
+        // "…" menu.
+        let refreshable = matches!(
+            self.b.section,
+            Section::Folders
+                | Section::Artists
+                | Section::Albums
+                | Section::Songs
+                | Section::Genres
+                | Section::Playlists
+        ) && (self.b.depth() == 1 || matches!(src, Some(Source::Folder(_))));
         if self.b.can_play_view() && !acts.iter().any(|(a, _)| *a == "play") {
             acts.splice(
                 0..0,
@@ -947,6 +959,9 @@ impl State {
                     ("playlist", "Add to playlist".into()),
                 ],
             );
+        }
+        if refreshable && !acts.iter().any(|(a, _)| *a == "refresh") {
+            acts.push(("refresh", "Refresh".into()));
         }
         (layout, cols, acts)
     }
@@ -1172,18 +1187,6 @@ impl State {
         }
         ui.set_empty_text(ss(empty));
         ui.set_album_tracks(self.b.in_playlist().is_none());
-        ui.set_can_refresh(matches!(
-            self.b.section,
-            Section::Folders
-                | Section::Artists
-                | Section::Albums
-                | Section::Songs
-                | Section::Genres
-                | Section::Playlists
-                | Section::Plex
-                | Section::MusicServers
-                | Section::Podcasts
-        ));
         ui.set_hearted_open(self.b.in_playlist() == Some(HEARTED));
         self.sync_eq_panel(ui);
         self.sync_amp_panel(ui);
@@ -2218,11 +2221,11 @@ impl State {
         set_strings(&self.recent_model, self.recent.iter().map(ss));
     }
 
-    /// A pull down at the top of a list: look again. Server views and
+    /// Refresh, in a view's buttons: look again. Server views and
     /// playlists sync the server (the one picked in the sidebar, or all of
     /// them), library views check the local folders too, and Podcasts
     /// fetches the feeds.
-    fn pull_refresh(&mut self, _ui: &AppWindow) {
+    fn refresh_view(&mut self) {
         use patina_core::library::scope::Pick;
         let server = match &self.b.config.library.scope {
             Pick::Server(n) => Some(n.clone()),
@@ -2828,6 +2831,7 @@ impl State {
                 let paths = self.b.view_playlist_paths();
                 self.open_pick(ui, "", paths);
             }
+            "refresh" => self.refresh_view(),
             "sort" => self.b.cycle_sort(),
             "reverse" => self.b.reverse_songs(),
             "mode" => self.b.toggle_mode(),
@@ -2851,7 +2855,6 @@ impl State {
                     "Subscribe",
                 );
             }
-            "refresh" => self.b.rescan(),
             "open-groups" => self.b.set_settings_groups(true),
             "fold-groups" => self.b.set_settings_groups(false),
             "eq-toggle" => self.b.eq_toggle(),
@@ -6355,7 +6358,6 @@ pub fn install(
     // Passing a letter on the scrubber: the lightest buzz. Nothing else to
     // do, so not through on! and its tick.
     ui.on_scrub_tick(|| platform::haptic(platform::Haptic::Clock));
-    on!(on_pull_refresh, |s, u| s.pull_refresh(&u));
     on!(on_clear_recent, |s, _u| s.clear_recent());
     on!(on_undo, |s, u| {
         u.set_toast_undo(false);
